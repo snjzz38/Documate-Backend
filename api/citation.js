@@ -139,19 +139,12 @@ export default async function handler(req, res) {
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
         // 1. GENERATE QUERY
-        const queryPrompt = `
-            TASK: Create a Google search query for this text.
-            TEXT: "${context.substring(0, 400)}"
-            RULES:
-            1. Extract the main topic.
-            2. Add keywords like "article", "report", "study" to find high-quality sources.
-            3. Return ONLY the query string.
-        `;
+        const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
-        let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
+        const query = queryRaw.replace(/"/g, '').trim();
 
         // 2. SEARCH
-        const searchResults = await searchWeb(q, GOOGLE_KEY, SEARCH_CX);
+        const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
         if (searchResults.length === 0) throw new Error("No search results found.");
 
         // 3. SCRAPE
@@ -168,21 +161,21 @@ export default async function handler(req, res) {
             specificRules = `
             STYLE: APA 7
             - IN-TEXT: (Author, Year). Example: (Smith, 2023).
-            - FOOTNOTES: Use the Full Bibliographic Entry: Author, A. A. (Year). Title. Site. URL
+            - FOOTNOTES: Full Bibliographic Entry.
             - BIBLIOGRAPHY: Author, A. A. (Year). Title. Site. URL
             `;
         } else if (s.includes('mla')) {
             specificRules = `
             STYLE: MLA 9
             - IN-TEXT: (Author, Year). Example: (Smith, 2023). **MUST INCLUDE DATE**.
-            - FOOTNOTES: Use the Full Bibliographic Entry: Author. "Title." Container, Date, URL.
+            - FOOTNOTES: Full Bibliographic Entry.
             - BIBLIOGRAPHY: Author. "Title." Container, Date, URL.
             `;
         } else if (s.includes('chicago')) {
             specificRules = `
             STYLE: Chicago 17
             - IN-TEXT: (Author Year). Example: (Smith 2023).
-            - FOOTNOTES: Full Note style: First Last, "Title," Site, Date, URL.
+            - FOOTNOTES: Full Note style.
             - BIBLIOGRAPHY: Last, First. "Title." Site. Date. URL.
             `;
         } else {
@@ -203,23 +196,24 @@ export default async function handler(req, res) {
                 4. Return plain text list.
             `;
         } else {
-            // --- AGGRESSIVE USAGE + RELEVANCE FILTER ---
+            // --- AGGRESSIVE 10-SOURCE PROMPT ---
             prompt = `
                 TASK: Insert citations into the text.
                 ${specificRules}
                 SOURCE DATA: ${sourceContext}
                 TEXT: "${context}"
                 
-                CRITICAL INSTRUCTIONS:
-                1. **RELEVANCE CHECK:** Only use sources that are actually relevant to the text. Ignore scams, login pages, or off-topic results.
-                2. **MAXIMIZE USAGE:** Try to cite as many *relevant* sources as possible (aim for 5-10).
-                3. **MULTI-CITATION:** You may cite multiple sources per sentence if they are relevant.
+                CRITICAL INSTRUCTIONS (FORCE 10 SOURCES):
+                1. **USE EVERY SOURCE:** You have ${sources.length} sources. You MUST use ALL of them.
+                2. **DISTRIBUTE:** Spread citations across the text.
+                3. **STACKING:** If necessary, cite multiple sources for a single sentence (e.g., "...innovate (Smith, 2023; Doe, 2024).").
+                4. **LOOSE RELEVANCE:** If a source is even slightly related to a keyword, CITE IT. Do not discard sources.
                 
                 FORMATTING REQUIREMENTS:
                 1. "insertions": Array of citation points.
-                2. "formatted_citations": Dictionary mapping Source ID to the string that goes at the bottom (or in the footnote).
-                   - **IF FOOTNOTES:** This string MUST be the Full Bibliographic Entry (Author, Title, Date, URL).
-                   - **IF IN-TEXT:** This string MUST be the Full Bibliographic Entry (for the reference list).
+                2. "formatted_citations": Dictionary mapping Source ID to the string that goes at the bottom.
+                   - **IF FOOTNOTES:** This string MUST be the Full Bibliographic Entry.
+                   - **IF IN-TEXT:** This string MUST be the Full Bibliographic Entry.
                 3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation.
                 
                 RETURN JSON ONLY:
