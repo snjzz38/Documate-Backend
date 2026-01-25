@@ -1,14 +1,4 @@
-// --- CONFIGURATION ---
-const DEFAULT_GROQ_MODELS = [
-  "qwen/qwen3-32b",
-  "llama-3.1-8b-instant",
-  "meta-llama/llama-4-maverick-17b-128e-instruct",
-  "meta-llama/llama-4-scout-17b-16e-instruct",
-  "meta-llama/llama-guard-4-12b",
-  "meta-llama/llama-prompt-guard-2-22m",
-  "meta-llama/llama-prompt-guard-2-86m",
-  "moonshotai/kimi-k2-instruct-0905”,
-];
+const DEFAULT_GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
 
 const AI_VOCAB_SWAPS = {
     "far-reaching": ["huge"], "widespread": ["common"], "harness": ["use"],
@@ -34,12 +24,10 @@ const STRATEGIES = {
 function postProcessText(text) {
     let processed = text.replace(/^(Here is|Sure,|Below is).*?:/gim, "").trim();
     processed = processed.replace(/^["']|["']$/g, '');
-
     for (const [bad, goods] of Object.entries(AI_VOCAB_SWAPS)) {
         const regex = new RegExp(`\\b${bad}\\b`, 'gi');
         if (regex.test(processed)) processed = processed.replace(regex, goods[0]);
     }
-
     processed = processed.replace(/fundamentally altering/gi, "fundamentally alters");
     processed = processed.replace(/empowered ([\w\s]+)/gi, "helped $1");
     processed = processed.replace(/accompanied by/gi, "with");
@@ -47,7 +35,6 @@ function postProcessText(text) {
     processed = processed.replace(/showcass\b/g, "shows");
     processed = processed.replace(/\bdo not\b/gi, "don't");
     processed = processed.replace(/\bcan not\b/gi, "can't");
-
     return processed;
 }
 
@@ -91,13 +78,11 @@ export default async function handler(req, res) {
                 resultText = data.choices[0].message.content;
                 break; 
             } catch (e) {
-                console.warn(`Model ${model} failed:`, e.message);
                 lastError = e;
             }
         }
 
         if (!resultText) throw lastError || new Error("All models failed");
-
         return res.status(200).json({ success: true, text: postProcessText(resultText) });
 
     } catch (error) {
