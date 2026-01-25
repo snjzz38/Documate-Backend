@@ -61,7 +61,8 @@ async function searchWeb(query, googleKey, cx) {
         const bannedDomains = [
             'instagram.com', 'facebook.com', 'tiktok.com', 'twitter.com', 'x.com',
             'pinterest.com', 'reddit.com', 'quora.com', 'youtube.com', 'vimeo.com',
-            'linkedin.com', 'wikipedia.org', 'bible.com', 'redeeminggod.com'
+            'linkedin.com', 'wikipedia.org', 'bible.com', 'redeeminggod.com',
+            'preplounge.com', 'glassdoor.com', 'indeed.com'
         ];
         
         const cleanResults = data.items.filter(item => {
@@ -118,7 +119,6 @@ async function scrapeUrls(urls) {
     }));
     
     const validResults = results.filter(r => r !== null);
-    // Sort Alphabetically by Title to keep things organized
     validResults.sort((a, b) => a.title.localeCompare(b.title));
     
     return validResults.map((r, i) => ({ ...r, id: i + 1 }));
@@ -138,7 +138,7 @@ export default async function handler(req, res) {
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
-        // 1. GENERATE QUERY (Improved for Relevance)
+        // 1. GENERATE QUERY
         const queryPrompt = `
             TASK: Create a Google search query for this text.
             TEXT: "${context.substring(0, 400)}"
@@ -163,19 +163,19 @@ export default async function handler(req, res) {
         const s = style.toLowerCase();
         let specificRules = "";
 
-        // --- DYNAMIC STYLE RULES (Handles Footnotes for APA/MLA) ---
+        // --- DYNAMIC STYLE RULES ---
         if (s.includes('apa')) {
             specificRules = `
             STYLE: APA 7
             - IN-TEXT: (Author, Year). Example: (Smith, 2023).
-            - FOOTNOTES: If outputType is footnotes, use the Full Bibliographic Entry: Author, A. A. (Year). Title. Site. URL
+            - FOOTNOTES: Use the Full Bibliographic Entry: Author, A. A. (Year). Title. Site. URL
             - BIBLIOGRAPHY: Author, A. A. (Year). Title. Site. URL
             `;
         } else if (s.includes('mla')) {
             specificRules = `
             STYLE: MLA 9
-            - IN-TEXT: (Author). Example: (Smith).
-            - FOOTNOTES: If outputType is footnotes, use the Full Bibliographic Entry: Author. "Title." Container, Date, URL.
+            - IN-TEXT: (Author, Year). Example: (Smith, 2023). **MUST INCLUDE DATE**.
+            - FOOTNOTES: Use the Full Bibliographic Entry: Author. "Title." Container, Date, URL.
             - BIBLIOGRAPHY: Author. "Title." Container, Date, URL.
             `;
         } else if (s.includes('chicago')) {
