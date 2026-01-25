@@ -1,0 +1,20 @@
+{
+  "name": "serverless-api",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Serverless APIs for Shkspr and Documate deployed on Vercel",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "vercel dev",
+    "start:documate": "node index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.14.1",
+    "node-fetch": "^2.6.1",
+    "resend": "^3.2.0",
+    "cheerio": "^1.0.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
