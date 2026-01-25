@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 
-// --- 1. CONFIGURATION: EXACT MODELS REQUESTED ---
-const DEFAULT_GROQ_MODELS = [
+// --- 1. CONFIGURATION: USER DEFINED MODELS ---
+const ALL_GROQ_MODELS = [
   "qwen/qwen3-32b",
   "llama-3.1-8b-instant",
   "meta-llama/llama-4-maverick-17b-128e-instruct",
@@ -12,17 +12,45 @@ const DEFAULT_GROQ_MODELS = [
   "moonshotai/kimi-k2-instruct-0905"
 ];
 
-// --- 2. HELPER: SEARCH (Google Custom Search) ---
+// --- 2. HELPER: CALL GROQ WITH ROTATION ---
+async function callGroq(messages, apiKey, jsonMode = false) {
+    let lastError = null;
+    for (const model of ALL_GROQ_MODELS) {
+        try {
+            const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: model,
+                    messages: messages,
+                    response_format: jsonMode ? { type: "json_object" } : undefined,
+                    temperature: 0.3 
+                })
+            });
+
+            if (!res.ok) throw new Error(`Status ${res.status}`);
+            const data = await res.json();
+            return data.choices[0].message.content;
+        } catch (e) {
+            console.warn(`Model ${model} failed: ${e.message}`);
+            lastError = e;
+        }
+    }
+    throw lastError || new Error("All Groq models failed");
+}
+
+// --- 3. HELPER: SEARCH (Google Custom Search) ---
 async function searchWeb(query, googleKey, cx) {
     console.log(`[Backend] Searching Google for: ${query}`);
     
     if (!googleKey || !cx) {
-        console.warn("Missing Google API Keys. Returning Mock Data.");
+        console.warn("Missing Google API Keys.");
         return [];
     }
 
     try {
-        const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=5`;
+        // Fetch 10 results (num=10) to satisfy the "Cite 10 Sources" requirement
+        const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10`;
         const res = await fetch(url);
         
         if (!res.ok) throw new Error(`Google API Error: ${res.status}`);
@@ -30,7 +58,15 @@ async function searchWeb(query, googleKey, cx) {
         const data = await res.json();
         if (!data.items) return [];
 
-        return data.items.map(item => ({
+        // Javascript Domain Filter (CRAAP Filter Logic)
+        const bannedDomains = ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo', 'wikipedia'];
+        
+        const cleanResults = data.items.filter(item => {
+            const domain = new URL(item.link).hostname.toLowerCase();
+            return !bannedDomains.some(b => domain.includes(b));
+        });
+
+        return cleanResults.map(item => ({
             title: item.title,
             link: item.link,
             snippet: item.snippet
@@ -41,9 +77,12 @@ async function searchWeb(query, googleKey, cx) {
     }
 }
 
-// --- 3. HELPER: SCRAPE ---
+// --- 4. HELPER: SCRAPE ---
 async function scrapeUrls(urls) {
-    const results = await Promise.all(urls.slice(0, 10).map(async (url) => {
+    // Limit to 10 sources
+    const targetUrls = urls.slice(0, 10);
+    
+    const results = await Promise.all(targetUrls.map(async (url) => {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 6000); 
@@ -59,44 +98,31 @@ async function scrapeUrls(urls) {
             const $ = cheerio.load(html);
             
             $('script, style, nav, footer, svg, header, iframe, .ad').remove();
-            const title = $('title').text().trim() || "Untitled";
             
-            // Aggressive cleaning to save tokens
+            // Metadata Extraction Logic from Frontend
+            let title = $('meta[property="og:title"]').attr('content') || $('title').text().trim() || "Untitled";
+            let author = $('meta[name="author"]').attr('content') || "";
+            
+            // Aggressive cleaning
             let content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 2500);
             
-            return { id: 0, title, link: url, content };
+            return { 
+                id: 0, 
+                title: title, 
+                link: url, 
+                content: content,
+                meta: { author: author }
+            };
         } catch (e) {
             return null;
         }
     }));
-    return results.filter(r => r !== null).map((r, i) => ({ ...r, id: i + 1 }));
-}
-
-// --- 4. HELPER: GROQ CALL WITH ROTATION ---
-async function callGroq(messages, apiKey, jsonMode = false) {
-    let lastError = null;
-    for (const model of DEFAULT_GROQ_MODELS) {
-        try {
-            const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-                method: "POST",
-                headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    model: model,
-                    messages: messages,
-                    response_format: jsonMode ? { type: "json_object" } : undefined,
-                    temperature: 0.3 // Low temp for strict formatting
-                })
-            });
-
-            if (!res.ok) throw new Error(`Status ${res.status}`);
-            const data = await res.json();
-            return data.choices[0].message.content;
-        } catch (e) {
-            console.warn(`Model ${model} failed: ${e.message}`);
-            lastError = e;
-        }
-    }
-    throw lastError || new Error("All Groq models failed");
+    
+    // Sort Alphabetically (Frontend Logic)
+    const validResults = results.filter(r => r !== null);
+    validResults.sort((a, b) => a.title.localeCompare(b.title));
+    
+    return validResults.map((r, i) => ({ ...r, id: i + 1 }));
 }
 
 export default async function handler(req, res) {
@@ -109,25 +135,36 @@ export default async function handler(req, res) {
     try {
         const { context, style, outputType, apiKey, googleKey } = req.body;
         
-        // KEYS: Prefer User Key -> Fallback to Server Key
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
-        // 1. GENERATE QUERY
-        const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
+        // --- STEP 1: QUERY GENERATION (Logic from SearchService) ---
+        const queryPrompt = `
+            TASK: Create a Google search query for this text.
+            TEXT: "${context.substring(0, 400)}"
+            RULES:
+            1. PRIORITIZE Proper Nouns and Key Concepts.
+            2. Combine them into a SINGLE line string.
+            3. Max 8 words.
+            4. Return ONLY the query string.
+        `;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
-        const query = queryRaw.replace(/"/g, '').trim();
+        let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
 
-        // 2. SEARCH
-        const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
+        // Apply Blocklist (CRAAP Filter)
+        const blocklist = " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com";
+        const finalQuery = `${q} ${blocklist}`;
+
+        // --- STEP 2: SEARCH ---
+        const searchResults = await searchWeb(finalQuery, GOOGLE_KEY, SEARCH_CX);
         if (searchResults.length === 0) throw new Error("No search results found.");
 
-        // 3. SCRAPE
+        // --- STEP 3: SCRAPE ---
         const sources = await scrapeUrls(searchResults.map(s => s.link));
         const sourceContext = JSON.stringify(sources);
 
-        // 4. FORMAT (Restoring the EXACT working prompt logic)
+        // --- STEP 4: FORMAT (Logic from FormatService) ---
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
         let prompt = "";
@@ -136,7 +173,7 @@ export default async function handler(req, res) {
             prompt = `
                 TASK: Create a bibliography.
                 STYLE: ${style}
-                SOURCES: ${sourceContext}
+                SOURCE DATA (JSON): ${sourceContext}
                 
                 RULES:
                 1. Format strictly according to ${style}.
@@ -145,11 +182,11 @@ export default async function handler(req, res) {
                 4. Return a plain text list. Double newline separation.
             `;
         } else {
-            // THE "MAGIC" PROMPT THAT WORKED BEFORE
+            // MAX DENSITY + FULL BIBLIO PROMPT
             prompt = `
                 TASK: Insert citations into the text.
                 STYLE: ${style}
-                SOURCE DATA: ${sourceContext}
+                SOURCE DATA (JSON): ${sourceContext}
                 TEXT: "${context}"
                 
                 MANDATORY INSTRUCTIONS:
