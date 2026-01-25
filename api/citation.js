@@ -2,24 +2,41 @@ import * as cheerio from 'cheerio';
 
 // --- CONFIGURATION ---
 const DEFAULT_GROQ_MODELS = [
-  "qwen/qwen3-32b",
-  "llama-3.1-8b-instant",
-  "meta-llama/llama-4-maverick-17b-128e-instruct",
-  "meta-llama/llama-4-scout-17b-16e-instruct",
-  "meta-llama/llama-guard-4-12b",
-  "meta-llama/llama-prompt-guard-2-22m",
-  "meta-llama/llama-prompt-guard-2-86m",
-  "moonshotai/kimi-k2-instruct-0905”,
+    'llama-3.3-70b-versatile', 
+    'llama-3.1-8b-instant', 
+    'meta-llama/llama-4-maverick-17b-128e-instruct'
 ];
 
-// --- HELPER: SEARCH WEB ---
-async function searchWeb(query, apiKey) {
-    console.log(`[Backend] Searching for: ${query}`);
-    // TODO: Integrate Serper.dev or Google Custom Search API here for production
-    return [
-        { title: "Example Source 1", link: "https://example.com/1" },
-        { title: "Example Source 2", link: "https://example.com/2" }
-    ];
+// --- HELPER: REAL GOOGLE SEARCH ---
+async function searchWeb(query, googleKey, cx) {
+    console.log(`[Backend] Searching Google for: ${query}`);
+    
+    if (!googleKey || !cx) {
+        console.warn("Missing Google API Keys. Returning Mock Data.");
+        return [
+            { title: "Error: Missing Server Keys", link: "https://google.com" }
+        ];
+    }
+
+    try {
+        const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=5`;
+        const res = await fetch(url);
+        
+        if (!res.ok) throw new Error(`Google API Error: ${res.status}`);
+        
+        const data = await res.json();
+        
+        if (!data.items) return [];
+
+        return data.items.map(item => ({
+            title: item.title,
+            link: item.link,
+            snippet: item.snippet
+        }));
+    } catch (e) {
+        console.error("Search failed:", e.message);
+        return [];
+    }
 }
 
 // --- HELPER: SCRAPE URLS ---
@@ -39,9 +56,14 @@ async function scrapeUrls(urls) {
             const html = await res.text();
             const $ = cheerio.load(html);
             
-            $('script, style, nav, footer, svg, header').remove();
+            $('script, style, nav, footer, svg, header, iframe, .ad').remove();
             const title = $('title').text().trim() || "Untitled";
-            const content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 3000);
+            
+            // Clean text aggressively
+            let content = $('body').text()
+                .replace(/\s+/g, ' ')
+                .trim()
+                .substring(0, 3000);
             
             return { id: 0, title, link: url, content };
         } catch (e) {
@@ -87,15 +109,23 @@ export default async function handler(req, res) {
 
     try {
         const { context, style, outputType, apiKey } = req.body;
+        
+        // ENV VARS
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
+        const GOOGLE_KEY = process.env.GOOGLE_SEARCH_API_KEY;
+        const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
 
         // 1. GENERATE QUERY
         const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
         const query = queryRaw.replace(/"/g, '').trim();
 
-        // 2. SEARCH
-        const searchResults = await searchWeb(query, GROQ_KEY);
+        // 2. SEARCH (Using Real Google API)
+        const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
+
+        if (searchResults.length === 0) {
+            throw new Error("No search results found. Check API Keys.");
+        }
 
         // 3. SCRAPE
         const sources = await scrapeUrls(searchResults.map(s => s.link));
