@@ -1,4 +1,5 @@
-const DEFAULT_GEMINI_MODELS = [  'gemma-3-27b-it',
+const ALL_GEMINI_MODELS = [
+  'gemma-3-27b-it',
   'gemini-3-flash-preview',
   'gemini-2.5-pro',
   'gemini-2.5-flash-lite',
@@ -7,7 +8,8 @@ const DEFAULT_GEMINI_MODELS = [  'gemma-3-27b-it',
   'gemini-2.0-flash-lite',
   'gemma-3-12b-it',
   'gemma-3-4b-it',
-  'gemma-3-1b-it'];
+  'gemma-3-1b-it'
+];
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -18,7 +20,6 @@ export default async function handler(req, res) {
 
     try {
         const { studentText, contextFiles, instructions, apiKey } = req.body;
-        // Use User Key if provided, else Server Key
         const GEMINI_KEY = apiKey || process.env.GEMINI_API_KEY;
 
         const parts = [{ text: "SYSTEM: You are an expert academic grader. Provide specific, constructive feedback." }];
@@ -35,7 +36,7 @@ export default async function handler(req, res) {
         let resultText = null;
         let lastError = null;
 
-        for (const model of DEFAULT_GEMINI_MODELS) {
+        for (const model of ALL_GEMINI_MODELS) {
             try {
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
                 const response = await fetch(url, {
