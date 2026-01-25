@@ -13,9 +13,7 @@ async function searchWeb(query, googleKey, cx) {
     
     if (!googleKey || !cx) {
         console.warn("Missing Google API Keys. Returning Mock Data.");
-        return [
-            { title: "Error: Missing Server Keys", link: "https://google.com" }
-        ];
+        return [];
     }
 
     try {
@@ -25,7 +23,6 @@ async function searchWeb(query, googleKey, cx) {
         if (!res.ok) throw new Error(`Google API Error: ${res.status}`);
         
         const data = await res.json();
-        
         if (!data.items) return [];
 
         return data.items.map(item => ({
@@ -59,7 +56,6 @@ async function scrapeUrls(urls) {
             $('script, style, nav, footer, svg, header, iframe, .ad').remove();
             const title = $('title').text().trim() || "Untitled";
             
-            // Clean text aggressively
             let content = $('body').text()
                 .replace(/\s+/g, ' ')
                 .trim()
@@ -73,7 +69,7 @@ async function scrapeUrls(urls) {
     return results.filter(r => r !== null).map((r, i) => ({ ...r, id: i + 1 }));
 }
 
-// --- HELPER: CALL GROQ WITH ROTATION ---
+// --- HELPER: CALL GROQ ---
 async function callGroq(messages, apiKey, jsonMode = false) {
     let lastError = null;
     for (const model of DEFAULT_GROQ_MODELS) {
@@ -100,7 +96,6 @@ async function callGroq(messages, apiKey, jsonMode = false) {
 }
 
 export default async function handler(req, res) {
-    // CORS HEADERS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -108,24 +103,21 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { context, style, outputType, apiKey } = req.body;
+        const { context, style, outputType, apiKey, googleKey } = req.body;
         
-        // ENV VARS
+        // KEYS: Prefer User Key, Fallback to Server Key
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
-        const GOOGLE_KEY = process.env.GOOGLE_SEARCH_API_KEY;
-        const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
+        const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
+        const SEARCH_CX = process.env.SEARCH_ENGINE_ID; // Always use Server CX unless you add a UI field for it
 
         // 1. GENERATE QUERY
         const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
         const query = queryRaw.replace(/"/g, '').trim();
 
-        // 2. SEARCH (Using Real Google API)
+        // 2. SEARCH
         const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
-
-        if (searchResults.length === 0) {
-            throw new Error("No search results found. Check API Keys.");
-        }
+        if (searchResults.length === 0) throw new Error("No search results found.");
 
         // 3. SCRAPE
         const sources = await scrapeUrls(searchResults.map(s => s.link));
@@ -133,15 +125,42 @@ export default async function handler(req, res) {
 
         // 4. FORMAT
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        let prompt = "";
         
+        // STRICT STYLE DEFINITIONS
+        const styleGuide = `
+            STRICT CITATION RULES for ${style}:
+            - MLA: In-text: (Author Page). Biblio: Author. "Title." Container, Date, URL.
+            - APA: In-text: (Author, Year). Biblio: Author. (Year). Title. Source. URL.
+            - Chicago: In-text: Superscript number. Footnote: Author, Title (City: Publisher, Year), URL.
+            - Harvard: In-text: (Author Year). Biblio: Author (Year) Title. Available at: URL.
+        `;
+
+        let prompt = "";
         if (outputType === 'bibliography') {
-            prompt = `Create a bibliography in ${style} style for these sources. Include "Accessed ${today}". Return plain text list. Sources: ${sourceContext}`;
+            prompt = `
+                TASK: Create a bibliography.
+                ${styleGuide}
+                SOURCES: ${sourceContext}
+                MANDATORY: Include "Accessed ${today}" at the end of every entry.
+                OUTPUT: Plain text list. Double newline separation.
+            `;
         } else {
             prompt = `
-                Insert citations into text: "${context}".
-                Style: ${style}. Sources: ${sourceContext}.
-                Rules: Cite EVERY sentence. Return JSON: { "insertions": [{ "anchor": "phrase", "source_id": 1, "citation_text": "..." }], "formatted_citations": { "1": "Full Citation (Accessed ${today})" } }
+                TASK: Insert citations into text: "${context}".
+                ${styleGuide}
+                SOURCES: ${sourceContext}
+                
+                MANDATORY:
+                1. Cite EVERY sentence.
+                2. Return JSON:
+                {
+                  "insertions": [
+                    { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "..." }
+                  ],
+                  "formatted_citations": {
+                    "1": "Full Bibliographic Entry (Accessed ${today})"
+                  }
+                }
             `;
         }
 
