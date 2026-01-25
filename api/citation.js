@@ -132,68 +132,91 @@ export default async function handler(req, res) {
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
-        // 1. QUERY GEN
-        const queryPrompt = `
-            TASK: Create a Google search query for this text.
-            TEXT: "${context.substring(0, 400)}"
-            RULES:
-            1. PRIORITIZE Proper Nouns and Key Concepts.
-            2. Combine them into a SINGLE line string.
-            3. Max 8 words.
-            4. Return ONLY the query string.
-        `;
+        // 1. GENERATE QUERY
+        const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
-        let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
+        const query = queryRaw.replace(/"/g, '').trim();
 
         // 2. SEARCH
-        const blocklist = " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com";
-        const finalQuery = `${q} ${blocklist}`;
-        
-        const searchResults = await searchWeb(finalQuery, GOOGLE_KEY, SEARCH_CX);
+        const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
         if (searchResults.length === 0) throw new Error("No search results found.");
 
         // 3. SCRAPE
         const sources = await scrapeUrls(searchResults.map(s => s.link));
         const sourceContext = JSON.stringify(sources);
 
-        // 4. FORMAT
+        // 4. FORMATTING LOGIC (The Fix)
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        
+        const s = style.toLowerCase();
+        let specificRules = "";
+
+        // --- STYLE DEFINITIONS ---
+        if (s.includes('apa')) {
+            specificRules = `
+            STYLE: APA 7 (American Psychological Association)
+            - IN-TEXT: Parenthetical (Author, Year). Example: (Smith, 2023). If no date, use (Smith, n.d.).
+            - FOOTNOTES: Not standard, but if requested, provide the Full Bibliographic Entry.
+            - BIBLIOGRAPHY: Author, A. A. (Year). Title of work. Site Name. URL
+            `;
+        } else if (s.includes('mla')) {
+            specificRules = `
+            STYLE: MLA 9 (Modern Language Association)
+            - IN-TEXT: Parenthetical (Author). Example: (Smith). No date in-text unless Author is missing.
+            - FOOTNOTES: Bibliographic note style.
+            - BIBLIOGRAPHY: Author. "Title of Source." Title of Container, Publication Date, URL.
+            `;
+        } else if (s.includes('chicago')) {
+            specificRules = `
+            STYLE: Chicago 17 (Notes and Bibliography OR Author-Date)
+            - IN-TEXT: (Author Year). Example: (Smith 2023). No comma between author and date.
+            - FOOTNOTES: Full Note style. 1. First Last, "Title," Site Name, Publication Date, URL.
+            - BIBLIOGRAPHY: Last, First. "Title." Site Name. Publication Date. URL.
+            `;
+        } else {
+            specificRules = `STYLE: ${style}. Follow standard academic formatting for this style.`;
+        }
+
         let prompt = "";
         
         if (outputType === 'bibliography') {
             prompt = `
                 TASK: Create a bibliography.
-                STYLE: ${style}
-                SOURCE DATA (JSON): ${sourceContext}
+                ${specificRules}
+                SOURCES: ${sourceContext}
                 
                 RULES:
-                1. Format strictly according to ${style}.
+                1. Format strictly according to the requested STYLE.
                 2. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every entry.
                 3. **DO NOT NUMBER THE LIST.**
                 4. Return a plain text list. Double newline separation.
             `;
         } else {
+            // In-Text or Footnotes
             prompt = `
                 TASK: Insert citations into the text.
-                STYLE: ${style}
-                SOURCE DATA (JSON): ${sourceContext}
+                ${specificRules}
+                SOURCE DATA: ${sourceContext}
                 TEXT: "${context}"
                 
                 MANDATORY INSTRUCTIONS:
                 1. **CITE EVERY SENTENCE:** You MUST assign a source to every single sentence.
                 2. **FORMATTING:**
                    - "insertions": Array of where to put citations.
-                   - "formatted_citations": Dictionary mapping Source ID to Full Bibliographic String.
-                3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation in "formatted_citations".
+                   - "formatted_citations": Dictionary mapping Source ID to the Full Bibliographic String (for the bottom list/footnotes).
+                3. **IN-TEXT CITATION TEXT (citation_text):** 
+                   - If APA: Must be "(Author, Year)".
+                   - If Chicago: Must be "(Author Year)".
+                   - If MLA: Must be "(Author)".
+                   - If Footnotes: Provide the Full Note in "formatted_citations".
+                4. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation in "formatted_citations".
                 
                 RETURN JSON ONLY:
                 {
                   "insertions": [
-                    { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "(Smith, 2023)" }
+                    { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "..." }
                   ],
                   "formatted_citations": {
-                    "1": "Smith, J. (2023). Title. Publisher. URL (Accessed ${today})."
+                    "1": "Full Bibliographic Entry..."
                   }
                 }
             `;
