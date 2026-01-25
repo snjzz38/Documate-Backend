@@ -57,7 +57,12 @@ async function searchWeb(query, googleKey, cx) {
         const data = await res.json();
         if (!data.items) return [];
 
-        const bannedDomains = ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo', 'wikipedia'];
+        // EXPANDED BLOCKLIST (Relevance Filter)
+        const bannedDomains = [
+            'instagram.com', 'facebook.com', 'tiktok.com', 'twitter.com', 'x.com',
+            'pinterest.com', 'reddit.com', 'quora.com', 'youtube.com', 'vimeo.com',
+            'linkedin.com', 'wikipedia.org', 'bible.com', 'redeeminggod.com'
+        ];
         
         const cleanResults = data.items.filter(item => {
             const domain = new URL(item.link).hostname.toLowerCase();
@@ -113,6 +118,7 @@ async function scrapeUrls(urls) {
     }));
     
     const validResults = results.filter(r => r !== null);
+    // Sort Alphabetically by Title to keep things organized
     validResults.sort((a, b) => a.title.localeCompare(b.title));
     
     return validResults.map((r, i) => ({ ...r, id: i + 1 }));
@@ -132,48 +138,55 @@ export default async function handler(req, res) {
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
-        // 1. GENERATE QUERY
-        const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
+        // 1. GENERATE QUERY (Improved for Relevance)
+        const queryPrompt = `
+            TASK: Create a Google search query for this text.
+            TEXT: "${context.substring(0, 400)}"
+            RULES:
+            1. Extract the main topic.
+            2. Add keywords like "article", "report", "study" to find high-quality sources.
+            3. Return ONLY the query string.
+        `;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
-        const query = queryRaw.replace(/"/g, '').trim();
+        let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
 
         // 2. SEARCH
-        const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
+        const searchResults = await searchWeb(q, GOOGLE_KEY, SEARCH_CX);
         if (searchResults.length === 0) throw new Error("No search results found.");
 
         // 3. SCRAPE
         const sources = await scrapeUrls(searchResults.map(s => s.link));
         const sourceContext = JSON.stringify(sources);
 
-        // 4. FORMATTING LOGIC (The Fix)
+        // 4. FORMATTING LOGIC
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         const s = style.toLowerCase();
         let specificRules = "";
 
-        // --- STYLE DEFINITIONS ---
+        // --- DYNAMIC STYLE RULES (Handles Footnotes for APA/MLA) ---
         if (s.includes('apa')) {
             specificRules = `
-            STYLE: APA 7 (American Psychological Association)
-            - IN-TEXT: Parenthetical (Author, Year). Example: (Smith, 2023). If no date, use (Smith, n.d.).
-            - FOOTNOTES: Not standard, but if requested, provide the Full Bibliographic Entry.
-            - BIBLIOGRAPHY: Author, A. A. (Year). Title of work. Site Name. URL
+            STYLE: APA 7
+            - IN-TEXT: (Author, Year). Example: (Smith, 2023).
+            - FOOTNOTES: If outputType is footnotes, use the Full Bibliographic Entry: Author, A. A. (Year). Title. Site. URL
+            - BIBLIOGRAPHY: Author, A. A. (Year). Title. Site. URL
             `;
         } else if (s.includes('mla')) {
             specificRules = `
-            STYLE: MLA 9 (Modern Language Association)
-            - IN-TEXT: Parenthetical (Author). Example: (Smith). No date in-text unless Author is missing.
-            - FOOTNOTES: Bibliographic note style.
-            - BIBLIOGRAPHY: Author. "Title of Source." Title of Container, Publication Date, URL.
+            STYLE: MLA 9
+            - IN-TEXT: (Author). Example: (Smith).
+            - FOOTNOTES: If outputType is footnotes, use the Full Bibliographic Entry: Author. "Title." Container, Date, URL.
+            - BIBLIOGRAPHY: Author. "Title." Container, Date, URL.
             `;
         } else if (s.includes('chicago')) {
             specificRules = `
-            STYLE: Chicago 17 (Notes and Bibliography OR Author-Date)
-            - IN-TEXT: (Author Year). Example: (Smith 2023). No comma between author and date.
-            - FOOTNOTES: Full Note style. 1. First Last, "Title," Site Name, Publication Date, URL.
-            - BIBLIOGRAPHY: Last, First. "Title." Site Name. Publication Date. URL.
+            STYLE: Chicago 17
+            - IN-TEXT: (Author Year). Example: (Smith 2023).
+            - FOOTNOTES: Full Note style: First Last, "Title," Site, Date, URL.
+            - BIBLIOGRAPHY: Last, First. "Title." Site. Date. URL.
             `;
         } else {
-            specificRules = `STYLE: ${style}. Follow standard academic formatting for this style.`;
+            specificRules = `STYLE: ${style}. Follow standard formatting.`;
         }
 
         let prompt = "";
@@ -183,32 +196,31 @@ export default async function handler(req, res) {
                 TASK: Create a bibliography.
                 ${specificRules}
                 SOURCES: ${sourceContext}
-                
                 RULES:
-                1. Format strictly according to the requested STYLE.
-                2. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every entry.
+                1. Format strictly according to style.
+                2. **ACCESS DATE:** Include "Accessed ${today}" at the end of every entry.
                 3. **DO NOT NUMBER THE LIST.**
-                4. Return a plain text list. Double newline separation.
+                4. Return plain text list.
             `;
         } else {
-            // In-Text or Footnotes
+            // --- AGGRESSIVE USAGE + RELEVANCE FILTER ---
             prompt = `
                 TASK: Insert citations into the text.
                 ${specificRules}
                 SOURCE DATA: ${sourceContext}
                 TEXT: "${context}"
                 
-                MANDATORY INSTRUCTIONS:
-                1. **CITE EVERY SENTENCE:** You MUST assign a source to every single sentence.
-                2. **FORMATTING:**
-                   - "insertions": Array of where to put citations.
-                   - "formatted_citations": Dictionary mapping Source ID to the Full Bibliographic String (for the bottom list/footnotes).
-                3. **IN-TEXT CITATION TEXT (citation_text):** 
-                   - If APA: Must be "(Author, Year)".
-                   - If Chicago: Must be "(Author Year)".
-                   - If MLA: Must be "(Author)".
-                   - If Footnotes: Provide the Full Note in "formatted_citations".
-                4. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation in "formatted_citations".
+                CRITICAL INSTRUCTIONS:
+                1. **RELEVANCE CHECK:** Only use sources that are actually relevant to the text. Ignore scams, login pages, or off-topic results.
+                2. **MAXIMIZE USAGE:** Try to cite as many *relevant* sources as possible (aim for 5-10).
+                3. **MULTI-CITATION:** You may cite multiple sources per sentence if they are relevant.
+                
+                FORMATTING REQUIREMENTS:
+                1. "insertions": Array of citation points.
+                2. "formatted_citations": Dictionary mapping Source ID to the string that goes at the bottom (or in the footnote).
+                   - **IF FOOTNOTES:** This string MUST be the Full Bibliographic Entry (Author, Title, Date, URL).
+                   - **IF IN-TEXT:** This string MUST be the Full Bibliographic Entry (for the reference list).
+                3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation.
                 
                 RETURN JSON ONLY:
                 {
@@ -216,7 +228,7 @@ export default async function handler(req, res) {
                     { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "..." }
                   ],
                   "formatted_citations": {
-                    "1": "Full Bibliographic Entry..."
+                    "1": "Full Bibliographic Entry (Accessed ${today})"
                   }
                 }
             `;
