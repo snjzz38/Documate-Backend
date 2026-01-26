@@ -18,12 +18,12 @@ const CONFIG = {
         'instagram.com', 'facebook.com', 'tiktok.com', 'twitter.com', 'x.com',
         'pinterest.com', 'reddit.com', 'quora.com', 'youtube.com', 'vimeo.com',
         'wikipedia.org', 'bible.com', 'redeeminggod.com', 'preplounge.com',
-        'glassdoor.com', 'indeed.com'
+        'glassdoor.com', 'indeed.com', 'linkedin.com'
     ]
 };
 
 // =============================================================================
-// 2. GROQ SERVICE (LLM Interaction)
+// 2. GROQ SERVICE
 // =============================================================================
 const GroqService = {
     async call(messages, apiKey, jsonMode = false) {
@@ -45,7 +45,6 @@ const GroqService = {
                 const data = await res.json();
                 return data.choices[0].message.content;
             } catch (e) {
-                console.warn(`Model ${model} failed: ${e.message}`);
                 lastError = e;
             }
         }
@@ -54,55 +53,40 @@ const GroqService = {
 };
 
 // =============================================================================
-// 3. SEARCH SERVICE (Google Custom Search)
+// 3. SEARCH SERVICE
 // =============================================================================
 const SearchService = {
     async perform(query, googleKey, cx) {
-        console.log(`[Backend] Searching Google for: ${query}`);
-        
-        if (!googleKey || !cx) {
-            console.warn("Missing Google API Keys.");
-            return [];
-        }
-
+        if (!googleKey || !cx) return [];
         try {
             const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10`;
             const res = await fetch(url);
-            
-            if (!res.ok) throw new Error(`Google API Error: ${res.status}`);
-            
             const data = await res.json();
             if (!data.items) return [];
 
-            // Filter results
-            const cleanResults = data.items.filter(item => {
+            return data.items.filter(item => {
                 const domain = new URL(item.link).hostname.toLowerCase();
                 return !CONFIG.BANNED_DOMAINS.some(b => domain.includes(b));
-            });
-
-            return cleanResults.map(item => ({
+            }).map(item => ({
                 title: item.title,
                 link: item.link,
                 snippet: item.snippet
             }));
-        } catch (e) {
-            console.error("Search failed:", e.message);
-            return [];
-        }
+        } catch (e) { return []; }
     }
 };
 
 // =============================================================================
-// 4. SCRAPE SERVICE (Content Extraction)
+// 4. SCRAPE SERVICE
 // =============================================================================
 const ScrapeService = {
     async processUrls(urls) {
         const targetUrls = urls.slice(0, 10);
-        
         const results = await Promise.all(targetUrls.map(async (url) => {
             try {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 6000); 
+                // REDUCED TIMEOUT: 3.5s to prevent Vercel 10s limit
+                const timeoutId = setTimeout(() => controller.abort(), 3500); 
                 
                 const res = await fetch(url, { 
                     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DocuMate/1.0)' },
@@ -118,56 +102,28 @@ const ScrapeService = {
                 
                 let title = $('meta[property="og:title"]').attr('content') || $('title').text().trim() || "Untitled";
                 let author = $('meta[name="author"]').attr('content') || "";
-                let content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 2500);
+                let content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 2000);
                 
-                return { 
-                    id: 0, 
-                    title: title, 
-                    link: url, 
-                    content: content,
-                    meta: { author: author }
-                };
-            } catch (e) {
-                return null;
-            }
+                return { id: 0, title, link: url, content, meta: { author } };
+            } catch (e) { return null; }
         }));
         
         const validResults = results.filter(r => r !== null);
         validResults.sort((a, b) => a.title.localeCompare(b.title));
-        
         return validResults.map((r, i) => ({ ...r, id: i + 1 }));
     }
 };
 
 // =============================================================================
-// 5. PROMPT FACTORY (Prompt Engineering)
+// 5. PROMPT FACTORY
 // =============================================================================
 const PromptFactory = {
     getStyleRules(style) {
-        const s = style.toLowerCase();
-        if (s.includes('apa')) {
-            return `
-            STYLE: APA 7
-            - IN-TEXT: (Author, Year). Example: (Smith, 2023).
-            - FOOTNOTES: Use the Full Bibliographic Entry: Author, A. A. (Year). Title. Site. URL
-            - BIBLIOGRAPHY: Author, A. A. (Year). Title. Site. URL
-            `;
-        } else if (s.includes('mla')) {
-            return `
-            STYLE: MLA 9
-            - IN-TEXT: (Author, Year). Example: (Smith, 2023). **MUST INCLUDE DATE**.
-            - FOOTNOTES: Use the Full Bibliographic Entry: Author. "Title." Container, Date, URL.
-            - BIBLIOGRAPHY: Author. "Title." Container, Date, URL.
-            `;
-        } else if (s.includes('chicago')) {
-            return `
-            STYLE: Chicago 17
-            - IN-TEXT: (Author Year). Example: (Smith 2023).
-            - FOOTNOTES: Full Note style: First Last, "Title," Site, Date, URL.
-            - BIBLIOGRAPHY: Last, First. "Title." Site. Date. URL.
-            `;
-        }
-        return `STYLE: ${style}. Follow standard formatting.`;
+        const s = (style || "").toLowerCase();
+        if (s.includes('apa')) return `STYLE: APA 7. In-text: (Author, Year). Footnotes: Full Biblio.`;
+        if (s.includes('mla')) return `STYLE: MLA 9. In-text: (Author, Year). Footnotes: Full Biblio.`;
+        if (s.includes('chicago')) return `STYLE: Chicago 17. In-text: (Author Year). Footnotes: Full Note.`;
+        return `STYLE: Standard Academic.`;
     },
 
     build(type, style, context, sourceContext) {
@@ -188,6 +144,17 @@ const PromptFactory = {
                     4. Return plain text list.
                 `
             };
+        } else if (type === 'quotes') {
+            return {
+                isJson: false,
+                text: `
+                    TASK: Extract Quotes for Sources 1-10.
+                    CONTEXT: "${context.substring(0, 300)}..."
+                    SOURCE DATA: ${sourceContext}
+                    RULES: Output strictly in order ID 1 to 10.
+                    Format: [ID] Title - URL \n > "Quote..."
+                `
+            };
         } else {
             return {
                 isJson: true,
@@ -198,15 +165,12 @@ const PromptFactory = {
                     TEXT: "${context}"
                     
                     CRITICAL INSTRUCTIONS:
-                    1. **RELEVANCE CHECK:** Only use sources that are actually relevant.
-                    2. **MAXIMIZE USAGE:** Try to cite as many *relevant* sources as possible (aim for 5-10).
-                    3. **MULTI-CITATION:** You may cite multiple sources per sentence.
+                    1. **USE EVERY SOURCE:** You have multiple sources. Use as many as relevant.
+                    2. **MULTI-CITATION:** You may cite multiple sources per sentence.
                     
                     FORMATTING REQUIREMENTS:
                     1. "insertions": Array of citation points.
-                    2. "formatted_citations": Dictionary mapping Source ID to the string that goes at the bottom (or in the footnote).
-                       - **IF FOOTNOTES:** This string MUST be the Full Bibliographic Entry.
-                       - **IF IN-TEXT:** This string MUST be the Full Bibliographic Entry.
+                    2. "formatted_citations": Dictionary mapping Source ID to Full Bibliographic String.
                     3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation.
                     
                     RETURN JSON ONLY:
@@ -235,34 +199,40 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { context, style, outputType, apiKey, googleKey } = req.body;
+        const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
         
+        // --- FIX: NORMALIZE INPUT (Handle 'text' vs 'context') ---
+        const userText = context || req.body.text || "";
+        if (!userText || userText.length < 5) throw new Error("Text too short.");
+
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
-        // 1. GENERATE QUERY
-        const queryPrompt = `
-            TASK: Create a Google search query for this text.
-            TEXT: "${context.substring(0, 400)}"
-            RULES:
-            1. Extract the main topic.
-            2. Add keywords like "article", "report", "study".
-            3. Return ONLY the query string.
-        `;
-        const queryRaw = await GroqService.call([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
-        let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
+        let sources = [];
 
-        // 2. SEARCH
-        const searchResults = await SearchService.perform(q, GOOGLE_KEY, SEARCH_CX);
-        if (searchResults.length === 0) throw new Error("No search results found.");
+        // 1. GET SOURCES
+        if (preLoadedSources && preLoadedSources.length > 0) {
+            sources = preLoadedSources;
+        } else {
+            const queryPrompt = `
+                TASK: Create a Google search query for this text.
+                TEXT: "${userText.substring(0, 400)}"
+                RULES: Return ONLY the query string. Max 8 words.
+            `;
+            const queryRaw = await GroqService.call([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
+            let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
 
-        // 3. SCRAPE
-        const sources = await ScrapeService.processUrls(searchResults.map(s => s.link));
+            const searchResults = await SearchService.perform(q, GOOGLE_KEY, SEARCH_CX);
+            if (searchResults.length === 0) throw new Error("No search results found.");
+
+            sources = await ScrapeService.processUrls(searchResults.map(s => s.link));
+        }
+
         const sourceContext = JSON.stringify(sources);
 
-        // 4. FORMAT
-        const promptData = PromptFactory.build(outputType, style, context, sourceContext);
+        // 2. FORMAT
+        const promptData = PromptFactory.build(outputType, style, userText, sourceContext);
         const result = await GroqService.call([{ role: "user", content: promptData.text }], GROQ_KEY, promptData.isJson);
 
         return res.status(200).json({
