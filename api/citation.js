@@ -220,7 +220,7 @@ class DocumateBackendApp {
     const PipelineService = {
         async handleCitation({ context, style, outputType, apiKey }) {
             try {
-                const sources = await SearchService.performSmartSearch(context, apiKey);
+                const sources = await this.SearchService.performSmartSearch(context, apiKey);
                 const richSources = await ScrapeService.getRichData(sources, apiKey);
                 const sourceContext = JSON.stringify(richSources, null, 2);
 
