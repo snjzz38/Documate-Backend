@@ -139,6 +139,11 @@ export default async function handler(req, res) {
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
 
         // 1. GENERATE QUERY
+        // (Skip query gen if we are just extracting quotes from already loaded sources, 
+        // but for simplicity in this architecture, we re-search/scrape to ensure freshness 
+        // or rely on the frontend passing source data if you implemented that. 
+        // Assuming standard flow: Search -> Scrape -> Process)
+        
         const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
         const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
         const query = queryRaw.replace(/"/g, '').trim();
@@ -153,38 +158,25 @@ export default async function handler(req, res) {
 
         // 4. FORMATTING LOGIC
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        const s = style.toLowerCase();
+        const s = style ? style.toLowerCase() : '';
         let specificRules = "";
 
-        // --- DYNAMIC STYLE RULES ---
+        // --- STYLE DEFINITIONS ---
         if (s.includes('apa')) {
-            specificRules = `
-            STYLE: APA 7
-            - IN-TEXT: (Author, Year). Example: (Smith, 2023).
-            - FOOTNOTES: Full Bibliographic Entry.
-            - BIBLIOGRAPHY: Author, A. A. (Year). Title. Site. URL
-            `;
+            specificRules = `STYLE: APA 7. In-text: (Author, Year). Footnotes: Full Biblio.`;
         } else if (s.includes('mla')) {
-            specificRules = `
-            STYLE: MLA 9
-            - IN-TEXT: (Author, Year). Example: (Smith, 2023). **MUST INCLUDE DATE**.
-            - FOOTNOTES: Full Bibliographic Entry.
-            - BIBLIOGRAPHY: Author. "Title." Container, Date, URL.
-            `;
+            specificRules = `STYLE: MLA 9. In-text: (Author, Year). Footnotes: Full Biblio.`;
         } else if (s.includes('chicago')) {
-            specificRules = `
-            STYLE: Chicago 17
-            - IN-TEXT: (Author Year). Example: (Smith 2023).
-            - FOOTNOTES: Full Note style.
-            - BIBLIOGRAPHY: Last, First. "Title." Site. Date. URL.
-            `;
+            specificRules = `STYLE: Chicago 17. In-text: (Author Year). Footnotes: Full Note.`;
         } else {
-            specificRules = `STYLE: ${style}. Follow standard formatting.`;
+            specificRules = `STYLE: Standard Academic.`;
         }
 
         let prompt = "";
+        let isJsonMode = true; // Default to JSON for insertions
         
         if (outputType === 'bibliography') {
+            isJsonMode = false;
             prompt = `
                 TASK: Create a bibliography.
                 ${specificRules}
@@ -195,8 +187,27 @@ export default async function handler(req, res) {
                 3. **DO NOT NUMBER THE LIST.**
                 4. Return plain text list.
             `;
-        } else {
-            // --- AGGRESSIVE 10-SOURCE PROMPT ---
+        } 
+        // --- NEW: QUOTES LOGIC ---
+        else if (outputType === 'quotes') {
+            isJsonMode = false; // Return plain text for the UI to display directly
+            prompt = `
+                TASK: Extract relevant quotes from the provided sources based on the user text.
+                USER TEXT: "${context.substring(0, 500)}..."
+                SOURCES: ${sourceContext}
+                
+                RULES:
+                1. **STRICT ORDER:** Go through sources ID 1 to 10.
+                2. **EXTRACT:** Find 1-2 sentences from the source content that support the user's text.
+                3. **FORMAT:**
+                   [ID] Source Title - URL
+                   > "The direct quote from the text..."
+                   
+                4. If a source has no relevant content, skip it.
+            `;
+        } 
+        // --- INSERTION LOGIC ---
+        else {
             prompt = `
                 TASK: Insert citations into the text.
                 ${specificRules}
@@ -206,14 +217,12 @@ export default async function handler(req, res) {
                 CRITICAL INSTRUCTIONS (FORCE 10 SOURCES):
                 1. **USE EVERY SOURCE:** You have ${sources.length} sources. You MUST use ALL of them.
                 2. **DISTRIBUTE:** Spread citations across the text.
-                3. **STACKING:** If necessary, cite multiple sources for a single sentence (e.g., "...innovate (Smith, 2023; Doe, 2024).").
-                4. **LOOSE RELEVANCE:** If a source is even slightly related to a keyword, CITE IT. Do not discard sources.
+                3. **STACKING:** If necessary, cite multiple sources for a single sentence.
+                4. **LOOSE RELEVANCE:** If a source is even slightly related, CITE IT.
                 
                 FORMATTING REQUIREMENTS:
                 1. "insertions": Array of citation points.
-                2. "formatted_citations": Dictionary mapping Source ID to the string that goes at the bottom.
-                   - **IF FOOTNOTES:** This string MUST be the Full Bibliographic Entry.
-                   - **IF IN-TEXT:** This string MUST be the Full Bibliographic Entry.
+                2. "formatted_citations": Dictionary mapping Source ID to Full Bibliographic String.
                 3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation.
                 
                 RETURN JSON ONLY:
@@ -228,12 +237,13 @@ export default async function handler(req, res) {
             `;
         }
 
-        const result = await callGroq([{ role: "user", content: prompt }], GROQ_KEY, outputType !== 'bibliography');
+        const result = await callGroq([{ role: "user", content: prompt }], GROQ_KEY, isJsonMode);
 
         return res.status(200).json({
             success: true,
             sources: sources,
-            result: outputType === 'bibliography' ? result : JSON.parse(result)
+            // If JSON mode, parse it. If text mode (Biblio/Quotes), return string.
+            result: isJsonMode ? JSON.parse(result) : result
         });
 
     } catch (error) {
