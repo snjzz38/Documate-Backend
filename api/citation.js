@@ -1,231 +1,231 @@
-import * as cheerio from 'cheerio';
+/**
+ * uses/citation.js - Hybrid Client
+ * Logic: Fetches AI/Search data from Vercel -> Processes Text Locally
+ */
+(function() {
+    // --- SINGLETON CHECK ---
+    if (window.DocumateCitationActive) return;
+    window.DocumateCitationActive = true;
 
-// --- 1. CONFIGURATION ---
-const ALL_GROQ_MODELS = [
-  "qwen/qwen3-32b",
-  "llama-3.1-8b-instant",
-  "meta-llama/llama-4-maverick-17b-128e-instruct",
-  "meta-llama/llama-4-scout-17b-16e-instruct",
-  "meta-llama/llama-guard-4-12b",
-  "meta-llama/llama-prompt-guard-2-22m",
-  "meta-llama/llama-prompt-guard-2-86m",
-  "moonshotai/kimi-k2-instruct-0905"
-];
+    // ⚡ UPDATE THIS: Your actual Vercel Endpoint
+    const API_ENDPOINT = "https://documate-backend.vercel.app/api/citation"; 
 
-// --- 2. HELPER: CALL GROQ ---
-async function callGroq(messages, apiKey, jsonMode = false) {
-    let lastError = null;
-    for (const model of ALL_GROQ_MODELS) {
+    console.log("%c [DocuMate] HYBRID ENGINE ACTIVE ", "background: #000; color: #0f0; font-weight: bold;");
+
+    // ==========================================================================
+    // 1. EVENT ROUTER
+    // ==========================================================================
+    window.addEventListener('message', async (event) => {
+        const { type, ...data } = event.data;
+
+        if (type === 'DOCUMATE_CITATION_REQUEST') {
+            await handleCitationRequest(data);
+        }
+        else if (type === 'DOCUMATE_QUOTES_REQUEST') {
+            await handleQuotesRequest(data);
+        }
+    });
+
+    // ==========================================================================
+    // 2. NETWORK HANDLER (Talks to Vercel)
+    // ==========================================================================
+    async function handleCitationRequest(data) {
         try {
-            const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-                method: "POST",
-                headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            window.postMessage({ type: 'DOCUMATE_CITE_PROGRESS', percent: 20 }, '*');
+
+            // 1. Send Request to Backend
+            // We only send the context + style. We wait for raw data back.
+            const response = await fetch(API_ENDPOINT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: model,
-                    messages: messages,
-                    response_format: jsonMode ? { type: "json_object" } : undefined,
-                    temperature: 0.3 
+                    type: 'citation', // Tell backend what mode we are in
+                    context: data.context,
+                    style: data.style,
+                    outputType: data.outputType,
+                    apiKey: data.apiKey, // Pass keys if not stored in ENV
+                    googleKey: data.googleKey
                 })
             });
 
-            if (!res.ok) throw new Error(`Status ${res.status}`);
-            const data = await res.json();
-            return data.choices[0].message.content;
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`Server Error (${response.status}): ${errText}`);
+            }
+
+            // 2. Parse Response
+            const json = await response.json();
+            if (!json.success) throw new Error(json.error || "Unknown backend error");
+
+            window.postMessage({ type: 'DOCUMATE_CITE_PROGRESS', percent: 80 }, '*');
+
+            // 3. Process Logic Locally (The "Frontend Logic")
+            // We use the backend's data, but the browser's CPU to stitch text.
+            // This is safer and allows for instant UI updates.
+            if (data.outputType === 'bibliography') {
+                // Bibliography is simple, just pass it through
+                window.postMessage({ type: 'DOCUMATE_CITATION_STREAM_CHUNK', text: json.result }, '*');
+                window.postMessage({ type: 'DOCUMATE_CITATION_RESPONSE', success: true, sources: json.sources }, '*');
+            } else {
+                // In-Text/Footnotes requires complex stitching
+                processInsertion(json.result, data.context, json.sources, data.outputType);
+            }
+
         } catch (e) {
-            console.warn(`Model ${model} failed: ${e.message}`);
-            lastError = e;
+            console.error("Citation Failed:", e);
+            window.postMessage({ type: 'DOCUMATE_CITATION_RESPONSE', success: false, error: e.message }, '*');
         }
     }
-    throw lastError || new Error("All Groq models failed");
-}
 
-// --- 3. HELPER: SEARCH (Google Custom Search) ---
-async function searchWeb(query, googleKey, cx) {
-    console.log(`[Backend] Searching Google for: ${query}`);
-    
-    if (!googleKey || !cx) {
-        console.warn("Missing Google API Keys.");
-        return [];
-    }
-
-    try {
-        const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10`;
-        const res = await fetch(url);
-        
-        if (!res.ok) throw new Error(`Google API Error: ${res.status}`);
-        
-        const data = await res.json();
-        if (!data.items) return [];
-
-        // Javascript Domain Filter (CRAAP Filter)
-        const bannedDomains = ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo', 'wikipedia'];
-        
-        const cleanResults = data.items.filter(item => {
-            const domain = new URL(item.link).hostname.toLowerCase();
-            return !bannedDomains.some(b => domain.includes(b));
-        });
-
-        return cleanResults.map(item => ({
-            title: item.title,
-            link: item.link,
-            snippet: item.snippet
-        }));
-    } catch (e) {
-        console.error("Search failed:", e.message);
-        return [];
-    }
-}
-
-// --- 4. HELPER: SCRAPE ---
-async function scrapeUrls(urls) {
-    const targetUrls = urls.slice(0, 10);
-    
-    const results = await Promise.all(targetUrls.map(async (url) => {
+    async function handleQuotesRequest(data) {
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000); 
+            window.postMessage({ type: 'DOCUMATE_QUOTES_STREAM_CLEAR' }, '*');
             
-            const res = await fetch(url, { 
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DocuMate/1.0)' },
-                signal: controller.signal 
+            // 1. Send to Backend
+            const response = await fetch(API_ENDPOINT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'quotes',
+                    text: data.text,
+                    sources: data.preLoadedSources,
+                    apiKey: data.apiKey
+                })
             });
-            clearTimeout(timeoutId);
+
+            if (!response.ok) throw new Error("Backend connection failed.");
+
+            // 2. Handle Streaming Response from Vercel (Advanced)
+            // If your backend streams, we read it here. If not, we await JSON.
+            // Assuming standard JSON for now to fix the ERR_FAILED first.
+            const json = await response.json();
             
-            if (!res.ok) throw new Error('Failed');
-            const html = await res.text();
-            const $ = cheerio.load(html);
+            if(json.quotes) {
+                window.postMessage({ type: 'DOCUMATE_QUOTES_STREAM_CHUNK', text: json.quotes }, '*');
+            }
             
-            $('script, style, nav, footer, svg, header, iframe, .ad').remove();
-            
-            let title = $('meta[property="og:title"]').attr('content') || $('title').text().trim() || "Untitled";
-            let author = $('meta[name="author"]').attr('content') || "";
-            let content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 2500);
-            
-            return { 
-                id: 0, 
-                title: title, 
-                link: url, 
-                content: content,
-                meta: { author: author }
-            };
+            window.postMessage({ type: 'DOCUMATE_QUOTES_RESPONSE', success: true }, '*');
+
         } catch (e) {
-            return null;
+            window.postMessage({ type: 'DOCUMATE_QUOTES_RESPONSE', success: false, error: e.message }, '*');
         }
-    }));
-    
-    const validResults = results.filter(r => r !== null);
-    validResults.sort((a, b) => a.title.localeCompare(b.title));
-    
-    return validResults.map((r, i) => ({ ...r, id: i + 1 }));
-}
-
-// --- MAIN HANDLER ---
-export default async function handler(req, res) {
-    // --- CORS HEADERS (CRITICAL FOR EXTENSIONS) ---
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-    // Handle Preflight Request
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
     }
 
-    try {
-        const { context, style, outputType, apiKey, googleKey } = req.body;
+    // ==========================================================================
+    // 3. TEXT PROCESSING (The Robust "Frontend" Logic)
+    // ==========================================================================
+    function processInsertion(aiData, context, sources, outputType) {
+        // Safe parsing in case backend sent a string instead of object
+        const data = (typeof aiData === 'string') ? parseAIJson(aiData) : aiData;
         
-        const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
-        const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
-        const SEARCH_CX = process.env.SEARCH_ENGINE_ID; 
+        const insertions = data.insertions || [];
+        const formattedMap = data.formatted_citations || {};
 
-        // 1. QUERY GEN
-        const queryPrompt = `
-            TASK: Create a Google search query for this text.
-            TEXT: "${context.substring(0, 400)}"
-            RULES:
-            1. PRIORITIZE Proper Nouns and Key Concepts.
-            2. Combine them into a SINGLE line string.
-            3. Max 8 words.
-            4. Return ONLY the query string.
-        `;
-        const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
-        let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
+        let resultText = context;
+        let footnoteCounter = 1;
+        let usedSourceIds = new Set();
 
-        // 2. SEARCH
-        const blocklist = " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com";
-        const finalQuery = `${q} ${blocklist}`;
-        
-        const searchResults = await searchWeb(finalQuery, GOOGLE_KEY, SEARCH_CX);
-        if (searchResults.length === 0) throw new Error("No search results found.");
-
-        // 3. SCRAPE
-        const sources = await scrapeUrls(searchResults.map(s => s.link));
-        const sourceContext = JSON.stringify(sources);
-
-        // 4. FORMAT
-        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        
-        let prompt = "";
-        let isJsonMode = true;
-        
-        if (outputType === 'bibliography') {
-            isJsonMode = false;
-            prompt = `
-                TASK: Create a bibliography.
-                STYLE: ${style}
-                SOURCE DATA (JSON): ${sourceContext}
-                
-                RULES:
-                1. Format strictly according to ${style}.
-                2. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every entry.
-                3. **DO NOT NUMBER THE LIST.**
-                4. Return a plain text list. Double newline separation.
-            `;
-        } else if (outputType === 'quotes') {
-            isJsonMode = false;
-            prompt = `
-                TASK: Extract Quotes for Sources 1-10.
-                CONTEXT: "${context.substring(0, 300)}..."
-                SOURCE DATA (JSON): ${sourceContext}
-                RULES: Output strictly in order ID 1 to 10.
-                Format: [ID] Title - URL \n > "Quote..."
-            `;
-        } else {
-            // MAX DENSITY + FULL BIBLIO PROMPT
-            prompt = `
-                TASK: Insert citations into the text.
-                STYLE: ${style}
-                SOURCE DATA (JSON): ${sourceContext}
-                TEXT: "${context}"
-                
-                MANDATORY INSTRUCTIONS:
-                1. **CITE EVERY SENTENCE:** You MUST assign a source to every single sentence.
-                2. **FORMATTING:**
-                   - "insertions": Array of where to put citations.
-                   - "formatted_citations": Dictionary mapping Source ID to Full Bibliographic String.
-                3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation in "formatted_citations".
-                
-                RETURN JSON ONLY:
-                {
-                  "insertions": [
-                    { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "(Smith, 2023)" }
-                  ],
-                  "formatted_citations": {
-                    "1": "Smith, J. (2023). Title. Publisher. URL (Accessed ${today})."
-                  }
-                }
-            `;
+        // A. Tokenize (Find word positions)
+        const tokens = [];
+        const tokenRegex = /[a-z0-9]+/gi;
+        let match;
+        while ((match = tokenRegex.exec(context)) !== null) {
+            tokens.push({ 
+                word: match[0].toLowerCase(), 
+                start: match.index, 
+                end: match.index + match[0].length 
+            });
         }
 
-        const result = await callGroq([{ role: "user", content: prompt }], GROQ_KEY, isJsonMode);
+        // B. Map Insertions to Positions
+        const validInsertions = insertions.map(item => {
+            if (!item.anchor || !item.source_id) return null;
+            const anchorWords = item.anchor.toLowerCase().match(/[a-z0-9]+/g);
+            if (!anchorWords || anchorWords.length === 0) return null;
 
-        return res.status(200).json({
-            success: true,
-            sources: sources,
-            result: isJsonMode ? JSON.parse(result) : result
+            let bestIndex = -1;
+            
+            // 1. Strict Match
+            for (let i = 0; i <= tokens.length - anchorWords.length; i++) {
+                let matchFound = true;
+                for (let j = 0; j < anchorWords.length; j++) {
+                    if (tokens[i + j].word !== anchorWords[j]) { matchFound = false; break; }
+                }
+                if (matchFound) { bestIndex = tokens[i + anchorWords.length - 1].end; break; }
+            }
+            
+            // 2. Fuzzy Match (Last 2 words fallback)
+            if (bestIndex === -1 && anchorWords.length > 2) {
+                const shortAnchor = anchorWords.slice(-2);
+                for (let i = 0; i <= tokens.length - shortAnchor.length; i++) {
+                    if (tokens[i].word === shortAnchor[0] && tokens[i+1].word === shortAnchor[1]) {
+                        bestIndex = tokens[i+1].end; break;
+                    }
+                }
+            }
+
+            if (bestIndex !== -1) return { ...item, insertIndex: bestIndex };
+            return null;
+        }).filter(i => i !== null).sort((a, b) => b.insertIndex - a.insertIndex);
+
+        // C. Apply Insertions (Reverse Order)
+        validInsertions.forEach(item => {
+            const source = sources.find(s => s.id === item.source_id);
+            if (!source) return;
+
+            usedSourceIds.add(source.id);
+
+            let insertContent = "";
+            if (outputType === 'footnotes') {
+                const supers = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+                insertContent = footnoteCounter.toString().split('').map(d => supers[d] || '').join('');
+                footnoteCounter++;
+            } else {
+                insertContent = " " + (item.citation_text || `(Source ${source.id})`);
+            }
+
+            const pos = item.insertIndex;
+            resultText = resultText.substring(0, pos) + insertContent + resultText.substring(pos);
         });
 
-    } catch (error) {
-        return res.status(500).json({ success: false, error: error.message });
+        // D. Build Bibliography (Batch Style - Robust)
+        let usedSection = outputType === 'footnotes' ? "\n\n### Footnotes\n" : "\n\n### Sources Used\n";
+        let unusedSection = "\n\n### Unused Sources\n";
+        let listCounter = 1;
+
+        sources.forEach(s => {
+            let citation = formattedMap[s.id] || `${s.title}. ${s.link}`;
+            
+            if (usedSourceIds.has(s.id)) {
+                if (outputType === 'footnotes') {
+                    usedSection += `${listCounter}. ${citation}\n`;
+                    listCounter++;
+                } else {
+                    usedSection += `${citation}\n\n`;
+                }
+            } else {
+                unusedSection += `${citation}\n\n`;
+            }
+        });
+
+        resultText += usedSection;
+        if (usedSourceIds.size < sources.length) {
+            resultText += unusedSection;
+        }
+
+        // Send Result back to Controller
+        window.postMessage({ type: 'DOCUMATE_CITATION_STREAM_CLEAR' }, '*');
+        window.postMessage({ type: 'DOCUMATE_CITATION_STREAM_CHUNK', text: resultText }, '*');
+        window.postMessage({ type: 'DOCUMATE_CITATION_RESPONSE', success: true, sources: sources }, '*');
     }
-}
+
+    function parseAIJson(text) {
+        try {
+            const first = text.indexOf('{');
+            const last = text.lastIndexOf('}');
+            if (first === -1) return { insertions: [], formatted_citations: {} };
+            return JSON.parse(text.substring(first, last + 1));
+        } catch (e) { return { insertions: [], formatted_citations: {} }; }
+    }
+
+})();
