@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 
-// --- CONFIGURATION ---
+// --- 1. CONFIGURATION ---
 const ALL_GROQ_MODELS = [
   "qwen/qwen3-32b",
   "llama-3.1-8b-instant",
@@ -12,7 +12,7 @@ const ALL_GROQ_MODELS = [
   "moonshotai/kimi-k2-instruct-0905"
 ];
 
-// --- HELPER: CALL GROQ ---
+// --- 2. HELPER: CALL GROQ ---
 async function callGroq(messages, apiKey, jsonMode = false) {
     let lastError = null;
     for (const model of ALL_GROQ_MODELS) {
@@ -24,7 +24,7 @@ async function callGroq(messages, apiKey, jsonMode = false) {
                     model: model,
                     messages: messages,
                     response_format: jsonMode ? { type: "json_object" } : undefined,
-                    temperature: 0.2 // Low temp for precision
+                    temperature: 0.2
                 })
             });
             if (!res.ok) throw new Error(`Status ${res.status}`);
@@ -35,29 +35,29 @@ async function callGroq(messages, apiKey, jsonMode = false) {
     throw lastError || new Error("All Groq models failed");
 }
 
-// --- HELPER: SEARCH ---
+// --- 3. HELPER: SEARCH ---
 async function searchWeb(query, googleKey, cx) {
     if (!googleKey || !cx) return [];
     try {
-        const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10`;
+        // HARD FILTER IN QUERY: Forces Google to ignore social media
+        const antiSocial = "-site:linkedin.com -site:facebook.com -site:twitter.com -site:instagram.com -site:tiktok.com -site:pinterest.com -site:reddit.com -site:quora.com";
+        const cleanQuery = `${query} ${antiSocial}`;
+        
+        const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(cleanQuery)}&num=10`;
         const res = await fetch(url);
         const data = await res.json();
-        if (!data.items) return [];
         
-        const banned = ['instagram', 'facebook', 'tiktok', 'twitter', 'pinterest', 'reddit', 'quora', 'youtube'];
-        return data.items.filter(item => {
-            const domain = new URL(item.link).hostname.toLowerCase();
-            return !banned.some(b => domain.includes(b));
-        }).map(item => ({ title: item.title, link: item.link, snippet: item.snippet }));
+        if (!data.items) return [];
+        return data.items.map(item => ({ title: item.title, link: item.link, snippet: item.snippet }));
     } catch (e) { return []; }
 }
 
-// --- HELPER: SCRAPE ---
+// --- 4. HELPER: SCRAPE ---
 async function scrapeUrls(urls) {
     const results = await Promise.all(urls.slice(0, 10).map(async (url) => {
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s Timeout
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
             const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: controller.signal });
             clearTimeout(timeoutId);
             if (!res.ok) throw new Error('Failed');
@@ -65,7 +65,6 @@ async function scrapeUrls(urls) {
             const $ = cheerio.load(html);
             $('script, style, nav, footer, svg, header, iframe').remove();
             
-            // Extract Metadata
             let author = $('meta[name="author"]').attr('content') || "";
             let date = $('meta[property="article:published_time"]').attr('content') || "";
             let site = $('meta[property="og:site_name"]').attr('content') || "";
@@ -90,17 +89,12 @@ export default async function handler(req, res) {
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
 
         let sources = [];
-
-        // 1. GET SOURCES (Use Cached if available to prevent timeout)
-        if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
-            console.log("[Backend] Using Pre-loaded Sources");
+        if (preLoadedSources && preLoadedSources.length > 0) {
             sources = preLoadedSources;
         } else {
-            console.log("[Backend] Performing New Search");
             const queryPrompt = `Generate a google search query for: "${context.substring(0, 200)}". Return ONLY the query string.`;
             const queryRaw = await callGroq([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
             const query = queryRaw.replace(/"/g, '').trim();
-            
             const searchResults = await searchWeb(query, GOOGLE_KEY, SEARCH_CX);
             if (searchResults.length === 0) throw new Error("No search results found.");
             sources = await scrapeUrls(searchResults.map(s => s.link));
@@ -110,7 +104,6 @@ export default async function handler(req, res) {
         let prompt = "";
         let isJsonMode = true;
 
-        // 2. BUILD PROMPT BASED ON TASK
         if (outputType === 'quotes') {
             isJsonMode = false;
             prompt = `
@@ -123,30 +116,30 @@ export default async function handler(req, res) {
                 3. If no relevant quote, skip source.
             `;
         } else if (outputType === 'bibliography') {
-            // For bibliography, we just need the metadata cleaned up by AI
+            // FIX: Return JSON so frontend can attach URLs
             prompt = `
                 TASK: Extract metadata for bibliography.
                 SOURCES: ${sourceContext}
-                RETURN JSON ARRAY:
-                [
-                  { "id": 1, "author": "Smith, John", "date": "2023", "title": "Page Title", "publisher": "Site Name" }
-                ]
+                RETURN JSON OBJECT:
+                {
+                    "bibliography": [
+                        { "id": 1, "author": "Smith, John", "date": "2023", "title": "Page Title", "publisher": "Site Name" }
+                    ]
+                }
                 Rules:
                 - If author unknown, use "Unknown".
                 - If date unknown, use "n.d.".
             `;
         } else {
-            // Citations (In-Text / Footnotes)
+            // Citations
             prompt = `
                 TASK: Map citations to text.
                 TEXT: "${context}"
                 SOURCES: ${sourceContext}
-                
                 MANDATORY:
                 1. Cite EVERY sentence.
                 2. Use multiple sources per sentence if needed.
                 3. Extract metadata for formatting.
-                
                 RETURN JSON:
                 {
                   "insertions": [
