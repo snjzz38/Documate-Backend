@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 
 // =============================================================================
-// 1. CONFIGURATION & CONSTANTS
+// 1. CONFIGURATION
 // =============================================================================
 const CONFIG = {
     GROQ_MODELS: [
@@ -37,7 +37,7 @@ const GroqService = {
                         model: model,
                         messages: messages,
                         response_format: jsonMode ? { type: "json_object" } : undefined,
-                        temperature: 0.3
+                        temperature: 0.2
                     })
                 });
 
@@ -85,8 +85,8 @@ const ScrapeService = {
         const results = await Promise.all(targetUrls.map(async (url) => {
             try {
                 const controller = new AbortController();
-                // REDUCED TIMEOUT: 3.5s to prevent Vercel 10s limit
-                const timeoutId = setTimeout(() => controller.abort(), 3500); 
+                // 3s Timeout to prevent Vercel limit
+                const timeoutId = setTimeout(() => controller.abort(), 3000); 
                 
                 const res = await fetch(url, { 
                     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DocuMate/1.0)' },
@@ -104,7 +104,7 @@ const ScrapeService = {
                 let author = $('meta[name="author"]').attr('content') || "";
                 let content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 2000);
                 
-                return { id: 0, title, link: url, content, meta: { author } };
+                return { id: 0, title, link: url, content, meta: { author, title } };
             } catch (e) { return null; }
         }));
         
@@ -118,33 +118,10 @@ const ScrapeService = {
 // 5. PROMPT FACTORY
 // =============================================================================
 const PromptFactory = {
-    getStyleRules(style) {
-        const s = (style || "").toLowerCase();
-        if (s.includes('apa')) return `STYLE: APA 7. In-text: (Author, Year). Footnotes: Full Biblio.`;
-        if (s.includes('mla')) return `STYLE: MLA 9. In-text: (Author, Year). Footnotes: Full Biblio.`;
-        if (s.includes('chicago')) return `STYLE: Chicago 17. In-text: (Author Year). Footnotes: Full Note.`;
-        return `STYLE: Standard Academic.`;
-    },
-
     build(type, style, context, sourceContext) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        const specificRules = this.getStyleRules(style);
-
-        if (type === 'bibliography') {
-            return {
-                isJson: false,
-                text: `
-                    TASK: Create a bibliography.
-                    ${specificRules}
-                    SOURCES: ${sourceContext}
-                    RULES:
-                    1. Format strictly according to style.
-                    2. **ACCESS DATE:** Include "Accessed ${today}" at the end of every entry.
-                    3. **DO NOT NUMBER THE LIST.**
-                    4. Return plain text list.
-                `
-            };
-        } else if (type === 'quotes') {
+        
+        if (type === 'quotes') {
             return {
                 isJson: false,
                 text: `
@@ -155,31 +132,44 @@ const PromptFactory = {
                     Format: [ID] Title - URL \n > "Quote..."
                 `
             };
-        } else {
+        } else if (type === 'bibliography') {
             return {
                 isJson: true,
                 text: `
-                    TASK: Insert citations into the text.
-                    ${specificRules}
-                    SOURCE DATA: ${sourceContext}
+                    TASK: Extract metadata for bibliography.
+                    SOURCES: ${sourceContext}
+                    RETURN JSON OBJECT:
+                    {
+                        "bibliography": [
+                            { "id": 1, "author": "Smith, John", "date": "2023", "title": "Page Title", "publisher": "Site Name" }
+                        ]
+                    }
+                    Rules:
+                    - If author unknown, use "Unknown".
+                    - If date unknown, use "n.d.".
+                `
+            };
+        } else {
+            // Citations (In-Text / Footnotes)
+            return {
+                isJson: true,
+                text: `
+                    TASK: Map citations to text.
                     TEXT: "${context}"
+                    SOURCES: ${sourceContext}
                     
-                    CRITICAL INSTRUCTIONS:
-                    1. **USE EVERY SOURCE:** You have multiple sources. Use as many as relevant.
-                    2. **MULTI-CITATION:** You may cite multiple sources per sentence.
+                    MANDATORY:
+                    1. Cite EVERY sentence.
+                    2. Use multiple sources per sentence if needed.
+                    3. Extract metadata for formatting.
                     
-                    FORMATTING REQUIREMENTS:
-                    1. "insertions": Array of citation points.
-                    2. "formatted_citations": Dictionary mapping Source ID to Full Bibliographic String.
-                    3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation.
-                    
-                    RETURN JSON ONLY:
+                    RETURN JSON:
                     {
                       "insertions": [
-                        { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "..." }
+                        { "anchor": "3-5 word phrase", "source_id": 1 }
                       ],
-                      "formatted_citations": {
-                        "1": "Full Bibliographic Entry (Accessed ${today})"
+                      "metadata_map": {
+                        "1": { "author": "Smith", "date": "2023", "title": "Title", "publisher": "Site" }
                       }
                     }
                 `
@@ -201,7 +191,7 @@ export default async function handler(req, res) {
     try {
         const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
         
-        // --- FIX: NORMALIZE INPUT (Handle 'text' vs 'context') ---
+        // Normalize input
         const userText = context || req.body.text || "";
         if (!userText || userText.length < 5) throw new Error("Text too short.");
 
