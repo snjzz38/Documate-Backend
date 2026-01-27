@@ -85,7 +85,6 @@ const ScrapeService = {
         const results = await Promise.all(targetUrls.map(async (url) => {
             try {
                 const controller = new AbortController();
-                // 3s Timeout to prevent Vercel limit
                 const timeoutId = setTimeout(() => controller.abort(), 3000); 
                 
                 const res = await fetch(url, { 
@@ -128,8 +127,13 @@ const PromptFactory = {
                     TASK: Extract Quotes for Sources 1-10.
                     CONTEXT: "${context.substring(0, 300)}..."
                     SOURCE DATA: ${sourceContext}
-                    RULES: Output strictly in order ID 1 to 10.
-                    Format: [ID] Title - URL \n > "Quote..."
+                    
+                    RULES:
+                    1. Output strictly in order ID 1 to 10.
+                    2. Format: 
+                       **[ID] Source Title** - URL
+                       > "Direct quote from text..."
+                    3. If a source has no relevant content, skip it.
                 `
             };
         } else if (type === 'bibliography') {
@@ -150,7 +154,7 @@ const PromptFactory = {
                 `
             };
         } else {
-            // Citations (In-Text / Footnotes)
+            // Citations
             return {
                 isJson: true,
                 text: `
@@ -202,9 +206,15 @@ export default async function handler(req, res) {
         let sources = [];
 
         // 1. GET SOURCES
-        if (preLoadedSources && preLoadedSources.length > 0) {
+        if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
+            // FAST PATH: Use existing sources (Quotes)
             sources = preLoadedSources;
         } else {
+            // SLOW PATH: Search & Scrape (Citations)
+            if (outputType === 'quotes') {
+                throw new Error("Please generate citations first to find sources.");
+            }
+
             const queryPrompt = `
                 TASK: Create a Google search query for this text.
                 TEXT: "${userText.substring(0, 400)}"
