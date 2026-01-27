@@ -64,9 +64,20 @@ const SearchService = {
             const data = await res.json();
             if (!data.items) return [];
 
+            const seenLinks = new Set();
+            
             return data.items.filter(item => {
                 const domain = new URL(item.link).hostname.toLowerCase();
-                return !CONFIG.BANNED_DOMAINS.some(b => domain.includes(b));
+                const link = item.link;
+
+                // Filter Banned Domains
+                if (CONFIG.BANNED_DOMAINS.some(b => domain.includes(b))) return false;
+                
+                // Filter Duplicate Links (But allow same domain)
+                if (seenLinks.has(link)) return false;
+                seenLinks.add(link);
+                
+                return true;
             }).map(item => ({
                 title: item.title,
                 link: item.link,
@@ -81,7 +92,9 @@ const SearchService = {
 // =============================================================================
 const ScrapeService = {
     async processUrls(urls) {
+        // Ensure we try to process up to 10 distinct URLs
         const targetUrls = urls.slice(0, 10);
+        
         const results = await Promise.all(targetUrls.map(async (url) => {
             try {
                 const controller = new AbortController();
@@ -127,13 +140,8 @@ const PromptFactory = {
                     TASK: Extract Quotes for Sources 1-10.
                     CONTEXT: "${context.substring(0, 300)}..."
                     SOURCE DATA: ${sourceContext}
-                    
-                    RULES:
-                    1. Output strictly in order ID 1 to 10.
-                    2. Format: 
-                       **[ID] Source Title** - URL
-                       > "Direct quote from text..."
-                    3. If a source has no relevant content, skip it.
+                    RULES: Output strictly in order ID 1 to 10.
+                    Format: [ID] Title - URL \n > "Quote..."
                 `
             };
         } else if (type === 'bibliography') {
@@ -154,7 +162,6 @@ const PromptFactory = {
                 `
             };
         } else {
-            // Citations
             return {
                 isJson: true,
                 text: `
@@ -195,7 +202,6 @@ export default async function handler(req, res) {
     try {
         const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
         
-        // Normalize input
         const userText = context || req.body.text || "";
         if (!userText || userText.length < 5) throw new Error("Text too short.");
 
@@ -205,15 +211,10 @@ export default async function handler(req, res) {
 
         let sources = [];
 
-        // 1. GET SOURCES
         if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
-            // FAST PATH: Use existing sources (Quotes)
             sources = preLoadedSources;
         } else {
-            // SLOW PATH: Search & Scrape (Citations)
-            if (outputType === 'quotes') {
-                throw new Error("Please generate citations first to find sources.");
-            }
+            if (outputType === 'quotes') throw new Error("Please generate citations first.");
 
             const queryPrompt = `
                 TASK: Create a Google search query for this text.
@@ -230,8 +231,6 @@ export default async function handler(req, res) {
         }
 
         const sourceContext = JSON.stringify(sources);
-
-        // 2. FORMAT
         const promptData = PromptFactory.build(outputType, style, userText, sourceContext);
         const result = await GroqService.call([{ role: "user", content: promptData.text }], GROQ_KEY, promptData.isJson);
 
