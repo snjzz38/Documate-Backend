@@ -18,7 +18,7 @@ const CONFIG = {
         'instagram.com', 'facebook.com', 'tiktok.com', 'twitter.com', 'x.com',
         'pinterest.com', 'reddit.com', 'quora.com', 'youtube.com', 'vimeo.com',
         'wikipedia.org', 'bible.com', 'redeeminggod.com', 'preplounge.com',
-        'glassdoor.com', 'indeed.com', 'linkedin.com'
+        'glassdoor.com', 'indeed.com', 'linkedin.com', 'stackexchange.com'
     ]
 };
 
@@ -53,36 +53,56 @@ const GroqService = {
 };
 
 // =============================================================================
-// 3. SEARCH SERVICE
+// 3. SEARCH SERVICE (Enhanced for 10 Sources)
 // =============================================================================
 const SearchService = {
     async perform(query, googleKey, cx) {
         if (!googleKey || !cx) return [];
+        
+        const fetchPage = async (start) => {
+            try {
+                const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10&start=${start}`;
+                const res = await fetch(url);
+                const data = await res.json();
+                return data.items || [];
+            } catch (e) { return []; }
+        };
+
         try {
-            const url = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cx}&q=${encodeURIComponent(query)}&num=10`;
-            const res = await fetch(url);
-            const data = await res.json();
-            if (!data.items) return [];
+            // Fetch Page 1 (Results 1-10)
+            let rawResults = await fetchPage(1);
+            
+            // If we don't have enough, Fetch Page 2 (Results 11-20)
+            if (rawResults.length < 15) {
+                const page2 = await fetchPage(11);
+                rawResults = rawResults.concat(page2);
+            }
 
             const seenLinks = new Set();
             
-            return data.items.filter(item => {
-                const domain = new URL(item.link).hostname.toLowerCase();
-                const link = item.link;
-
-                // Filter Banned Domains
-                if (CONFIG.BANNED_DOMAINS.some(b => domain.includes(b))) return false;
-                
-                // Filter Duplicate Links (But allow same domain)
-                if (seenLinks.has(link)) return false;
-                seenLinks.add(link);
-                
-                return true;
+            // Filter & Deduplicate
+            const cleanResults = rawResults.filter(item => {
+                try {
+                    const domain = new URL(item.link).hostname.toLowerCase();
+                    
+                    // Filter Banned
+                    if (CONFIG.BANNED_DOMAINS.some(b => domain.includes(b))) return false;
+                    
+                    // Filter Duplicates
+                    if (seenLinks.has(item.link)) return false;
+                    seenLinks.add(item.link);
+                    
+                    return true;
+                } catch(e) { return false; }
             }).map(item => ({
                 title: item.title,
                 link: item.link,
                 snippet: item.snippet
             }));
+
+            // Return exactly 10 if possible, or as many as we found
+            return cleanResults.slice(0, 10);
+            
         } catch (e) { return []; }
     }
 };
@@ -92,10 +112,7 @@ const SearchService = {
 // =============================================================================
 const ScrapeService = {
     async processUrls(urls) {
-        // Ensure we try to process up to 10 distinct URLs
-        const targetUrls = urls.slice(0, 10);
-        
-        const results = await Promise.all(targetUrls.map(async (url) => {
+        const results = await Promise.all(urls.map(async (url) => {
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 3000); 
@@ -140,8 +157,13 @@ const PromptFactory = {
                     TASK: Extract Quotes for Sources 1-10.
                     CONTEXT: "${context.substring(0, 300)}..."
                     SOURCE DATA: ${sourceContext}
-                    RULES: Output strictly in order ID 1 to 10.
-                    Format: [ID] Title - URL \n > "Quote..."
+                    
+                    RULES:
+                    1. Output strictly in order ID 1 to 10.
+                    2. Format: 
+                       **[ID] Source Title** - URL
+                       > "Direct quote from text..."
+                    3. If a source has no relevant content, skip it.
                 `
             };
         } else if (type === 'bibliography') {
@@ -162,6 +184,7 @@ const PromptFactory = {
                 `
             };
         } else {
+            // Citations
             return {
                 isJson: true,
                 text: `
@@ -200,8 +223,14 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
+        let { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
         
+        // --- FIX: AUTO-DETECT QUOTES MODE ---
+        // If sources are preloaded but outputType wasn't sent correctly, assume quotes
+        if ((!outputType || outputType === 'undefined') && preLoadedSources && preLoadedSources.length > 0) {
+            outputType = 'quotes';
+        }
+
         const userText = context || req.body.text || "";
         if (!userText || userText.length < 5) throw new Error("Text too short.");
 
@@ -211,6 +240,7 @@ export default async function handler(req, res) {
 
         let sources = [];
 
+        // 1. GET SOURCES
         if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
             sources = preLoadedSources;
         } else {
@@ -224,6 +254,7 @@ export default async function handler(req, res) {
             const queryRaw = await GroqService.call([{ role: "user", content: queryPrompt }], GROQ_KEY, false);
             let q = queryRaw.replace(/[\r\n]+/g, ' ').replace(/^\d+\.\s*/, '').replace(/["`]/g, '').trim();
 
+            // Fetch more results to ensure we hit 10 valid ones
             const searchResults = await SearchService.perform(q, GOOGLE_KEY, SEARCH_CX);
             if (searchResults.length === 0) throw new Error("No search results found.");
 
