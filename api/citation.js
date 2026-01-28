@@ -1,13 +1,15 @@
+// /api/citation.js
 import * as cheerio from 'cheerio';
 
 // =============================================================================
 // 1. CONFIGURATION & UTILS
 // =============================================================================
 const CONFIG = {
-    // Exact blocklist from your frontend code
+    // Blocks social media, PDF, and non-academic noise
     BLOCKLIST_QUERY: " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com",
     BANNED_DOMAINS: ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo'],
-    GROQ_MODEL: "llama-3.1-70b-versatile" // High intelligence needed for citation logic
+    // Use a model with strong logical reasoning
+    GROQ_MODEL: "llama-3.1-70b-versatile"
 };
 
 const getTodayDate = () => new Date().toLocaleDateString('en-US', { 
@@ -20,7 +22,7 @@ const getTodayDate = () => new Date().toLocaleDateString('en-US', {
 
 const SearchService = {
     async perform(text, googleKey, cx) {
-        // 1. Replicate Frontend Query Construction
+        // Construct optimized query
         let q = text.split(/\s+/).slice(0, 6).join(' '); 
         const finalQuery = `${q} ${CONFIG.BLOCKLIST_QUERY}`;
 
@@ -46,8 +48,7 @@ const SearchService = {
             try {
                 const domain = new URL(s.link).hostname.replace('www.', '').toLowerCase();
                 if (CONFIG.BANNED_DOMAINS.some(b => domain.includes(b))) return;
-                if (s.link.endsWith('.pdf')) return;
-
+                
                 if (!seenDomains.has(domain)) {
                     seenDomains.add(domain);
                     unique.push({ title: s.title, link: s.link, snippet: s.snippet });
@@ -57,7 +58,7 @@ const SearchService = {
             } catch (e) {}
         });
 
-        // Fill up to 10
+        // Ensure we get up to 10 unique domains
         while (unique.length < 10 && backup.length > 0) unique.push(backup.shift());
         return unique;
     }
@@ -65,11 +66,10 @@ const SearchService = {
 
 const ScrapeService = {
     async getRichData(sources) {
-        // Parallel scraping with timeout
         const promises = sources.map(async (s) => {
             try {
                 const controller = new AbortController();
-                setTimeout(() => controller.abort(), 2500); // 2.5s Timeout per page
+                setTimeout(() => controller.abort(), 3000); // 3s Timeout
 
                 const res = await fetch(s.link, { 
                     signal: controller.signal,
@@ -80,26 +80,22 @@ const ScrapeService = {
                 const html = await res.text();
                 const $ = cheerio.load(html);
 
-                // Clean clutter
                 $('script, style, nav, footer, iframe, svg').remove();
 
-                const content = $('body').text().replace(/\s+/g, ' ').substring(0, 2000);
+                const content = $('body').text().replace(/\s+/g, ' ').substring(0, 2500);
                 const title = $('meta[property="og:title"]').attr('content') || $('title').text() || s.title;
                 
                 return {
                     ...s,
                     title: title.trim(),
-                    content: content.length > 100 ? content : s.snippet // Fallback to Google snippet if scrape fails
+                    content: content.length > 100 ? content : s.snippet 
                 };
             } catch (e) {
-                // Return original Google source if scrape fails
                 return { ...s, content: s.snippet || "No content available." };
             }
         });
 
         const results = await Promise.all(promises);
-        
-        // Sort alphabetically and assign IDs (just like frontend)
         return results
             .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
             .map((s, index) => ({ ...s, id: index + 1 }));
@@ -116,11 +112,10 @@ const FormatService = {
                 CONTEXT: "${context.substring(0, 300)}..."
                 DATA: ${srcData}
                 RULES: Output strictly in order ID 1 to 10.
-                Format: [ID] Title - URL \n > "Quote..."
+                Format: **[ID] Title** - URL \n > "Quote..."
             `;
         }
         
-        // Bibliography Logic
         if (type === 'bibliography') {
             return `
                 TASK: Create Bibliography.
@@ -128,13 +123,12 @@ const FormatService = {
                 SOURCE DATA: ${srcData}
                 RULES:
                 1. Format strictly according to ${style}.
-                2. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every entry.
-                3. **DO NOT NUMBER THE LIST.**
-                4. Return a plain text list. Double newline separation.
+                2. Include "Accessed ${today}".
+                3. Return plain text list.
             `;
         }
 
-        // Citation Logic (In-Text / Footnotes)
+        // Complex Citation Logic
         return `
             TASK: Insert citations into the text.
             STYLE: ${style}
@@ -142,21 +136,11 @@ const FormatService = {
             TEXT: "${context}"
             
             MANDATORY INSTRUCTIONS:
-            1. **CITE EVERY SENTENCE:** You MUST assign a source to every single sentence.
-            2. **FORMATTING:**
-               - "insertions": Array of where to put citations.
-               - "formatted_citations": Dictionary mapping Source ID to Full Bibliographic String.
-            3. **ACCESS DATE:** You MUST include "Accessed ${today}" at the end of every full citation in "formatted_citations".
+            1. Cite EVERY sentence.
+            2. "insertions": Array of { anchor, source_id, citation_text }.
+            3. "formatted_citations": Dictionary { "1": "Full Citation (Accessed ${today})" }.
             
-            RETURN JSON ONLY:
-            {
-              "insertions": [
-                { "anchor": "unique 3-5 word phrase", "source_id": 1, "citation_text": "(Smith, 2023)" }
-              ],
-              "formatted_citations": {
-                "1": "Smith, J. (2023). Title. Publisher. URL (accessed ${today})."
-              }
-            }
+            RETURN JSON ONLY.
         `;
     }
 };
@@ -165,10 +149,7 @@ const GroqService = {
     async call(messages, apiKey, jsonMode = false) {
         const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
-            headers: { 
-                "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json"
-            },
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: CONFIG.GROQ_MODEL,
                 messages: messages,
@@ -184,7 +165,7 @@ const GroqService = {
 };
 
 // =============================================================================
-// 3. TEXT PROCESSING (Ported from Frontend)
+// 3. TEXT PROCESSOR (The Brain)
 // =============================================================================
 const TextProcessor = {
     applyInsertions(context, insertions, sources, formattedMap, outputType) {
@@ -192,26 +173,21 @@ const TextProcessor = {
         let footnoteCounter = 1;
         let usedSourceIds = new Set();
 
-        // 1. Tokenize Text
+        // 1. Tokenize Text for Fuzzy Matching
         const tokens = [];
         const tokenRegex = /[a-z0-9]+/gi;
         let match;
         while ((match = tokenRegex.exec(context)) !== null) {
-            tokens.push({ 
-                word: match[0].toLowerCase(), 
-                start: match.index, 
-                end: match.index + match[0].length 
-            });
+            tokens.push({ word: match[0].toLowerCase(), start: match.index, end: match.index + match[0].length });
         }
 
-        // 2. Sort Insertions & Calculate Indices
+        // 2. Sort Insertions
         const validInsertions = insertions.map(item => {
             if (!item.anchor || !item.source_id) return null;
             const anchorWords = item.anchor.toLowerCase().match(/[a-z0-9]+/g);
-            if (!anchorWords || anchorWords.length === 0) return null;
+            if (!anchorWords) return null;
 
             let bestIndex = -1;
-            
             // Strict Match
             for (let i = 0; i <= tokens.length - anchorWords.length; i++) {
                 let matchFound = true;
@@ -220,20 +196,9 @@ const TextProcessor = {
                 }
                 if (matchFound) { bestIndex = tokens[i + anchorWords.length - 1].end; break; }
             }
-            
-            // Fuzzy Match (Last 2 words)
-            if (bestIndex === -1 && anchorWords.length > 2) {
-                const shortAnchor = anchorWords.slice(-2);
-                for (let i = 0; i <= tokens.length - shortAnchor.length; i++) {
-                    if (tokens[i].word === shortAnchor[0] && tokens[i+1].word === shortAnchor[1]) {
-                        bestIndex = tokens[i+1].end; break;
-                    }
-                }
-            }
-
             if (bestIndex !== -1) return { ...item, insertIndex: bestIndex };
             return null;
-        }).filter(i => i !== null).sort((a, b) => b.insertIndex - a.insertIndex);
+        }).filter(Boolean).sort((a, b) => b.insertIndex - a.insertIndex);
 
         // 3. Apply Insertions
         validInsertions.forEach(item => {
@@ -250,12 +215,10 @@ const TextProcessor = {
             } else {
                 insertContent = " " + (item.citation_text || `(Source ${source.id})`);
             }
-
-            const pos = item.insertIndex;
-            resultText = resultText.substring(0, pos) + insertContent + resultText.substring(pos);
+            resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
         });
 
-        // 4. Build Footer
+        // 4. Append Sources
         let usedSection = outputType === 'footnotes' ? "\n\n### Footnotes\n" : "\n\n### Sources Used\n";
         let unusedSection = "\n\n### Unused Sources\n";
         let listCounter = 1;
@@ -274,10 +237,7 @@ const TextProcessor = {
             }
         });
 
-        resultText += usedSection;
-        if (usedSourceIds.size < sources.length) resultText += unusedSection;
-
-        return resultText;
+        return resultText + usedSection + (usedSourceIds.size < sources.length ? unusedSection : "");
     }
 };
 
@@ -285,84 +245,61 @@ const TextProcessor = {
 // 4. MAIN HANDLER
 // =============================================================================
 export default async function handler(req, res) {
-    // CORS Setup
     if (req.method === 'OPTIONS') {
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'POST');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         return res.status(200).end();
     }
-
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+    
+    // Set headers for actual response
+    res.setHeader('Access-Control-Allow-Origin', '*');
 
     try {
         const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
         
+        // Use provided keys or server env variables
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
 
-        // --- BRANCH 1: QUOTES ---
-        // If we already have sources (from a previous citation run), just do quotes
+        // --- BRANCH A: QUOTES (Fast) ---
         if (preLoadedSources && preLoadedSources.length > 0) {
-            const sourceContext = JSON.stringify(preLoadedSources, null, 2);
-            const prompt = FormatService.buildPrompt('quotes', null, context, sourceContext);
+            const prompt = FormatService.buildPrompt('quotes', null, context, JSON.stringify(preLoadedSources));
             const result = await GroqService.call([{ role: "user", content: prompt }], GROQ_KEY, false);
-            
             return res.status(200).json({ success: true, text: result });
         }
 
-        // --- BRANCH 2: CITATIONS / BIBLIOGRAPHY ---
-        
+        // --- BRANCH B: CITATIONS (Deep) ---
         // 1. Search
         const rawSources = await SearchService.perform(context, GOOGLE_KEY, SEARCH_CX);
-        if (rawSources.length === 0) throw new Error("No academic sources found.");
+        if (!rawSources.length) throw new Error("No valid sources found.");
 
         // 2. Scrape
         const richSources = await ScrapeService.getRichData(rawSources);
-        const sourceContext = JSON.stringify(richSources, null, 2);
 
-        // 3. Prompt Construction
-        const prompt = FormatService.buildPrompt(outputType, style, context, sourceContext);
+        // 3. AI Reasoning
+        const prompt = FormatService.buildPrompt(outputType, style, context, JSON.stringify(richSources));
         const isJson = outputType !== 'bibliography';
-
-        // 4. AI Request
         const aiResponse = await GroqService.call([{ role: "user", content: prompt }], GROQ_KEY, isJson);
 
-        // 5. Processing
-        let finalOutput = "";
-
+        // 4. Process
+        let finalOutput;
         if (outputType === 'bibliography') {
-            // Bibliography is just plain text returned from AI
             finalOutput = aiResponse;
         } else {
-            // Citations require JSON parsing + Text Insertion
-            let data;
-            try {
-                data = JSON.parse(aiResponse);
-            } catch (e) {
-                // Fallback if AI returns bad JSON
-                console.error("JSON Parse Error", e);
-                data = { insertions: [], formatted_citations: {} };
-            }
-            
-            finalOutput = TextProcessor.applyInsertions(
-                context, 
-                data.insertions, 
-                richSources, 
-                data.formatted_citations, 
-                outputType
-            );
+            let data = JSON.parse(aiResponse);
+            finalOutput = TextProcessor.applyInsertions(context, data.insertions, richSources, data.formatted_citations, outputType);
         }
 
         return res.status(200).json({
             success: true,
-            sources: richSources, // Return sources so frontend can cache them for quotes
+            sources: richSources,
             text: finalOutput
         });
 
     } catch (error) {
-        console.error("Handler Error:", error);
-        res.status(500).json({ success: false, error: error.message });
+        console.error(error);
+        return res.status(500).json({ success: false, error: error.message });
     }
 }
