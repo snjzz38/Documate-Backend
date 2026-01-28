@@ -4,15 +4,10 @@ import * as cheerio from 'cheerio';
 // 1. CONFIGURATION
 // =============================================================================
 const CONFIG = {
-    // Blocks social media & PDF noise
     BLOCKLIST_QUERY: " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com",
     BANNED_DOMAINS: ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo'],
-    
-    // UPDATED MODEL: Llama 3.3 is the newest/most stable on Groq right now
     GROQ_MODEL: "llama-3.3-70b-versatile",
-    
-    // SAFETY: Limit scraped content size to prevent 400 (Token Overflow)
-    MAX_CHARS_PER_SOURCE: 1500 
+    MAX_CHARS_PER_SOURCE: 2000 
 };
 
 const getTodayDate = () => new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -22,7 +17,7 @@ const getTodayDate = () => new Date().toLocaleDateString('en-US', { year: 'numer
 // =============================================================================
 const SearchService = {
     async perform(text, googleKey, cx) {
-        if (!googleKey || !cx) throw new Error("Missing Google Search Configuration (Key or CX ID)");
+        if (!googleKey || !cx) throw new Error("Missing Google Search Configuration");
         
         let q = text.split(/\s+/).slice(0, 6).join(' '); 
         const finalQuery = `${q} ${CONFIG.BLOCKLIST_QUERY}`;
@@ -31,11 +26,7 @@ const SearchService = {
         const res = await fetch(url);
         const data = await res.json();
         
-        if (data.error) {
-            console.error("Google Search API Error:", data.error);
-            throw new Error(`Google Search Error: ${data.error.message}`);
-        }
-        
+        if (data.error) throw new Error(`Google Search Error: ${data.error.message}`);
         if (!data.items) return [];
         return this.deduplicate(data.items);
     },
@@ -53,7 +44,7 @@ const SearchService = {
                 }
             } catch (e) {}
         });
-        return unique.slice(0, 8); // Limit to 8 sources to save tokens
+        return unique.slice(0, 8); 
     }
 };
 
@@ -62,7 +53,7 @@ const ScrapeService = {
         const promises = sources.map(async (s) => {
             try {
                 const controller = new AbortController();
-                setTimeout(() => controller.abort(), 2000); // 2s Timeout
+                setTimeout(() => controller.abort(), 2000); 
 
                 const res = await fetch(s.link, { 
                     signal: controller.signal,
@@ -75,13 +66,14 @@ const ScrapeService = {
 
                 $('script, style, nav, footer, iframe, svg, header, .ad').remove();
                 
-                // Aggressive cleaning to prevent token overflow
                 const content = $('body').text().replace(/\s+/g, ' ').substring(0, CONFIG.MAX_CHARS_PER_SOURCE);
                 const title = $('meta[property="og:title"]').attr('content') || $('title').text() || s.title;
+                const author = $('meta[name="author"]').attr('content') || "Unknown Author";
+                const siteName = $('meta[property="og:site_name"]').attr('content') || "";
                 
-                return { ...s, title: title.trim(), content: content.length > 50 ? content : s.snippet };
+                return { ...s, title: title.trim(), content: content.length > 50 ? content : s.snippet, meta: { author, siteName } };
             } catch (e) {
-                return { ...s, content: s.snippet || "No content." };
+                return { ...s, content: s.snippet || "No content available." };
             }
         });
         const results = await Promise.all(promises);
@@ -92,28 +84,41 @@ const ScrapeService = {
 const FormatService = {
     buildPrompt(type, style, context, srcData) {
         const today = getTodayDate();
+        
+        // --- QUOTES MODE ---
         if (type === 'quotes') {
             return `TASK: Extract Quotes. CONTEXT: "${context.substring(0, 300)}..." DATA: ${srcData} RULES: Output strictly in order ID 1 to 10. Format: **[ID] Title** - URL \n > "Quote..."`;
         }
+
+        // --- BIBLIOGRAPHY ONLY ---
         if (type === 'bibliography') {
-            return `TASK: Create Bibliography. STYLE: ${style} SOURCE DATA: ${srcData} RULES: Format strictly. Include "Accessed ${today}". Return plain text.`;
+            return `TASK: Create Bibliography. STYLE: ${style} SOURCE DATA: ${srcData} RULES: Format strictly. Include "Accessed ${today}". Return plain text list.`;
         }
-        // Strict JSON prompt for citations
+
+        // --- CITATION INSERTION ---
+        let styleInstruction = "";
+        if (style.toLowerCase().includes('apa')) styleInstruction = "Use APA 7 style. In-text: (Author, Year). Bibliography: Author. (Year). Title. Site. URL";
+        else if (style.toLowerCase().includes('mla')) styleInstruction = "Use MLA 9 style. In-text: (Author). Bibliography: Author. Title. Site, Date, URL.";
+        else if (style.toLowerCase().includes('chicago')) styleInstruction = "Use Chicago style. In-text: Use superscripts (e.g. word¹). Bibliography: Author. Title. Site. URL.";
+        else styleInstruction = `Use ${style} style for citations.`;
+
         return `
-            TASK: Insert citations.
-            STYLE: ${style}
+            TASK: Insert citations into text.
+            ${styleInstruction}
             SOURCE DATA: ${srcData}
             TEXT: "${context}"
             
             MANDATORY:
-            1. Cite every sentence.
+            1. Cite every sentence that contains factual claims.
             2. RETURN JSON object with keys: "insertions" (array), "formatted_citations" (object).
-            3. "formatted_citations" values must end with "(Accessed ${today})".
+            3. "formatted_citations": The Key is the Source ID. The Value is the FULL bibliography entry.
+            4. **CRITICAL**: Include "Accessed ${today}" at the end of every "formatted_citations" value.
+            5. Ensure URL is included in "formatted_citations".
             
             Example JSON Structure:
             {
-              "insertions": [{ "anchor": "text segment", "source_id": 1, "citation_text": "(Smith 2024)" }],
-              "formatted_citations": { "1": "Smith. Title. URL (Accessed ${today})" }
+              "insertions": [{ "anchor": "text segment", "source_id": 1, "citation_text": "(Smith, 2024)" }],
+              "formatted_citations": { "1": "Smith, J. (2024). Article Title. *Website Name*. https://example.com (Accessed ${today})." }
             }
         `;
     }
@@ -121,31 +126,19 @@ const FormatService = {
 
 const GroqService = {
     async call(messages, apiKey, jsonMode = false) {
-        // DEBUG: Check if Key exists
-        if (!apiKey || apiKey.length < 10) throw new Error("Missing or Invalid Groq API Key.");
-
         const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
-            headers: { 
-                "Authorization": `Bearer ${apiKey}`, 
-                "Content-Type": "application/json" 
-            },
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: CONFIG.GROQ_MODEL,
                 messages: messages,
                 temperature: 0.1,
-                // Only use json_object if requested. This often fixes 400 errors.
                 response_format: jsonMode ? { type: "json_object" } : undefined
             })
         });
 
         const data = await response.json();
-
-        // DEBUG: Catch API Errors
-        if (!response.ok) {
-            console.error("Groq API Error Details:", JSON.stringify(data));
-            throw new Error(`Groq API ${response.status}: ${data.error?.message || 'Unknown Error'}`);
-        }
+        if (!response.ok) throw new Error(`Groq API ${response.status}: ${data.error?.message}`);
         return data.choices[0].message.content;
     }
 };
@@ -156,6 +149,7 @@ const TextProcessor = {
         let footnoteCounter = 1;
         let usedSourceIds = new Set();
 
+        // 1. Fuzzy Match Logic (Tokenization)
         const tokens = [];
         const tokenRegex = /[a-z0-9]+/gi;
         let match;
@@ -180,24 +174,48 @@ const TextProcessor = {
             return null;
         }).filter(Boolean).sort((a, b) => b.insertIndex - a.insertIndex);
 
+        // 2. Apply Insertions to Text
         validInsertions.forEach(item => {
             const source = sources.find(s => s.id === item.source_id);
             if (!source) return;
             usedSourceIds.add(source.id);
             
-            let insertContent = outputType === 'footnotes' 
-                ? (() => { const s = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' }; const n = footnoteCounter.toString().split('').map(d => s[d] || '').join(''); footnoteCounter++; return n; })()
-                : " " + (item.citation_text || `(${source.id})`);
+            let insertContent = "";
+            if (outputType === 'footnotes') {
+                // Unicode Superscripts
+                const s = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+                insertContent = footnoteCounter.toString().split('').map(d => s[d] || '').join('');
+                footnoteCounter++; // Increment counter for each insertion
+            } else {
+                insertContent = " " + (item.citation_text || `(${source.id})`);
+            }
 
             resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
         });
 
-        let footer = outputType === 'footnotes' ? "\n\n### Footnotes\n" : "\n\n### Sources Used\n";
-        sources.forEach((s, i) => {
-            if (usedSourceIds.has(s.id)) footer += `${outputType === 'footnotes' ? (i+1) + '. ' : ''}${formattedMap[s.id] || s.link}\n\n`;
+        // 3. Build Footer (Used vs Unused)
+        let usedSection = outputType === 'footnotes' ? "\n\n### References Cited\n" : "\n\n### Works Cited\n";
+        let unusedSection = "\n\n### Further Reading (Unused Sources)\n";
+
+        // We iterate through ALL sources to sort them into Used vs Unused
+        sources.forEach((s) => {
+            const fullCitation = formattedMap[s.id] || `${s.title}. ${s.link}`;
+            
+            if (usedSourceIds.has(s.id)) {
+                // Deduplication: Only add to list once, even if used 5 times in text
+                usedSection += `${fullCitation}\n\n`;
+            } else {
+                unusedSection += `${fullCitation}\n\n`;
+            }
         });
 
-        return resultText + footer;
+        // Combine sections
+        let finalOutput = resultText + usedSection;
+        if (usedSourceIds.size < sources.length) {
+            finalOutput += unusedSection;
+        }
+
+        return finalOutput;
     }
 };
 
@@ -211,21 +229,13 @@ export default async function handler(req, res) {
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         return res.status(200).end();
     }
-    
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     try {
         const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
-        
-        // 1. RESOLVE KEYS
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
-
-        // DEBUG LOGGING
-        console.log(`[Request] Groq Key Present: ${!!GROQ_KEY}, Google Key Present: ${!!GOOGLE_KEY}`);
-
-        if (!GROQ_KEY) throw new Error("Groq API Key is missing. Please add it to Vercel Env Vars or the Frontend settings.");
 
         // --- BRANCH A: QUOTES ---
         if (preLoadedSources && preLoadedSources.length > 0) {
@@ -248,22 +258,16 @@ export default async function handler(req, res) {
         if (outputType === 'bibliography') {
             finalOutput = aiResponse;
         } else {
-            // Safe JSON Parse
             let data;
-            try {
-                data = JSON.parse(aiResponse);
-            } catch (e) {
-                // If model fails JSON mode, treat as raw text
-                console.warn("JSON Parse Failed, returning raw text");
-                return res.status(200).json({ success: true, sources: richSources, text: aiResponse });
-            }
+            try { data = JSON.parse(aiResponse); } 
+            catch (e) { return res.status(200).json({ success: true, sources: richSources, text: aiResponse }); }
+            
             finalOutput = TextProcessor.applyInsertions(context, data.insertions, richSources, data.formatted_citations, outputType);
         }
 
         return res.status(200).json({ success: true, sources: richSources, text: finalOutput });
 
     } catch (error) {
-        console.error("Handler Failure:", error);
         return res.status(500).json({ success: false, error: error.message });
     }
 }
