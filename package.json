@@ -5,7 +5,8 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "cheerio": "^1.0.0"
+    "cheerio": "^1.0.0",
+    "pdf-parse": "^1.1.1"
   },
   "engines": {
     "node": "20.x"
