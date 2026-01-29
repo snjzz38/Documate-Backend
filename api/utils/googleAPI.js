@@ -1,52 +1,55 @@
-// api/googleAPI.js
-export const GoogleAPI = {
-    // Standard academic blocklist
-    BLOCKLIST: " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com",
-    BANNED_DOMAINS: ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo'],
+// api/utils/geminiAPI.js
 
-    async search(query, apiKey, cx) {
-        if (!apiKey || !cx) throw new Error("Missing Google Search Configuration");
+const GEMINI_MODELS = [
+  'gemma-3-27b-it',
+  'gemini-3-flash-preview',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemma-3-12b-it',
+  'gemma-3-4b-it',
+  'gemma-3-1b-it'
+];
 
-        // Prepare Query
-        const cleanQuery = query.split(/\s+/).slice(0, 8).join(' '); // Limit query length
-        const finalQuery = `${cleanQuery} ${this.BLOCKLIST}`;
-        
-        const url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cx}&q=${encodeURIComponent(finalQuery)}&num=10`;
+export const GeminiAPI = {
+    async chat(promptText, apiKey) {
+        if (!apiKey) throw new Error("Missing Gemini API Key");
 
-        try {
-            const res = await fetch(url);
-            const data = await res.json();
-            
-            if (data.error) throw new Error(`Google Search Error: ${data.error.message}`);
-            if (!data.items) return [];
+        let lastError = null;
 
-            return this._deduplicate(data.items);
-        } catch (e) {
-            console.error("Google API Fail:", e);
-            throw e;
-        }
-    },
+        for (let attempt = 0; attempt < GEMINI_MODELS.length; attempt++) {
+            const currentModel = GEMINI_MODELS[0];
 
-    _deduplicate(items) {
-        const unique = [];
-        const seenDomains = new Set();
-        
-        items.forEach(item => {
             try {
-                const domain = new URL(item.link).hostname.replace('www.', '').toLowerCase();
-                if (this.BANNED_DOMAINS.some(b => domain.includes(b))) return;
+                // Using standard REST API for Gemini
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
                 
-                if (!seenDomains.has(domain)) {
-                    seenDomains.add(domain);
-                    unique.push({
-                        title: item.title,
-                        link: item.link,
-                        snippet: item.snippet
-                    });
+                const res = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: promptText }] }]
+                    })
+                });
+
+                if (!res.ok) {
+                    const errData = await res.json();
+                    throw new Error(errData.error?.message || `Status ${res.status}`);
                 }
-            } catch (e) {}
-        });
-        
-        return unique.slice(0, 8); // Return top 8 unique sources
+
+                const data = await res.json();
+                return data.candidates[0].content.parts[0].text;
+
+            } catch (e) {
+                lastError = e;
+                // ROTATION LOGIC: Move failed model to end
+                const failedModel = GEMINI_MODELS.shift();
+                GEMINI_MODELS.push(failedModel);
+            }
+        }
+
+        throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
     }
 };
