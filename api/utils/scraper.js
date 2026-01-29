@@ -5,9 +5,8 @@ export const ScraperAPI = {
     async scrape(sources) {
         const promises = sources.map(async (source) => {
             try {
-                // 1. Fetch with Timeout & Spoofed Headers
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout (slightly longer for deeper reading)
+                const timeout = setTimeout(() => controller.abort(), 5000); // 5s for deep scrape
 
                 const res = await fetch(source.link, {
                     signal: controller.signal,
@@ -23,11 +22,9 @@ export const ScraperAPI = {
                 
                 return this._parseHtml(html, source);
             } catch (e) {
-                // Return basic info if scrape fails
                 return { 
                     ...source, 
                     content: source.snippet || "Content unavailable.",
-                    quote_chunk: source.snippet, // Fallback for quotes
                     meta: { author: "Unknown", published: "n.d.", siteName: "" }
                 };
             }
@@ -40,69 +37,40 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
 
-        // 2. Remove Junk
-        $('script, style, nav, footer, iframe, svg, header, .ad, .advertisement, .popup, .cookie-banner').remove();
+        // 1. Clean Garbage
+        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .advertisement, .popup, .cookie-banner, .social-share').remove();
 
-        // 3. Extract Metadata (The "Deep" Scrape)
-        let author = $('meta[name="author"]').attr('content') || 
-                     $('meta[property="article:author"]').attr('content') ||
-                     $('a[rel="author"]').first().text();
-
-        let date = $('meta[property="article:published_time"]').attr('content') ||
-                   $('meta[name="date"]').attr('content') ||
-                   $('time').first().attr('datetime');
-
-        let siteName = $('meta[property="og:site_name"]').attr('content') || 
-                       $('meta[name="application-name"]').attr('content');
-
-        // 4. JSON-LD Fallback (Crucial for modern sites)
-        if (!author || !date) {
-            try {
-                const jsonLd = $('script[type="application/ld+json"]').html();
-                if (jsonLd) {
-                    const data = JSON.parse(jsonLd);
-                    // Handle array or object
-                    const obj = Array.isArray(data) ? data[0] : data;
-                    
-                    if (!author && obj.author) {
-                        if (typeof obj.author === 'string') author = obj.author;
-                        else if (Array.isArray(obj.author)) author = obj.author[0].name;
-                        else if (obj.author.name) author = obj.author.name;
-                    }
-                    if (!date && obj.datePublished) date = obj.datePublished;
-                    if (!siteName && obj.publisher && obj.publisher.name) siteName = obj.publisher.name;
-                }
-            } catch (e) {}
-        }
-
-        // Clean Metadata
-        author = author ? author.trim().replace(/^By\s+/i, '') : "Unknown";
-        date = date ? new Date(date).getFullYear() : "n.d.";
-        siteName = siteName || new URL(originalSource.link).hostname.replace('www.', '');
-
-        // 5. Extract Content & Middle Chunk
+        // 2. Extract Raw Text
         const rawText = $('body').text().replace(/\s+/g, ' ').trim();
-        
-        // Limit total context for AI to save tokens
-        const cleanContent = rawText.substring(0, 2500);
+        const len = rawText.length;
 
-        // **Middle Chunk Logic for Quotes**
-        // Get a 500-char slice from the middle of the text to ensure variety
-        let quoteChunk = "";
-        if (rawText.length > 600) {
-            const start = Math.floor(rawText.length / 2) - 250;
-            const safeStart = start < 0 ? 0 : start;
-            quoteChunk = "..." + rawText.substring(safeStart, safeStart + 600) + "...";
-        } else {
-            quoteChunk = rawText;
+        // 3. SMART CHUNKING (Start 1250 + Middle 500 + End 500)
+        let finalContent = rawText.substring(0, 1250); // Start
+        
+        if (len > 2000) {
+            // Middle
+            const midStart = Math.floor(len / 2) - 250;
+            const midChunk = rawText.substring(midStart, midStart + 500);
+            finalContent += `\n... [Middle Section] ...\n${midChunk}`;
+            
+            // End
+            const endChunk = rawText.substring(len - 500, len);
+            finalContent += `\n... [End Section] ...\n${endChunk}`;
+        } else if (len > 1250) {
+            // Just append the rest if it's small enough
+            finalContent += rawText.substring(1250);
         }
+
+        // 4. Basic Cheerio Metadata (Fallback)
+        let author = $('meta[name="author"]').attr('content') || $('meta[property="article:author"]').attr('content') || "Unknown";
+        let date = $('meta[property="article:published_time"]').attr('content') || $('time').first().attr('datetime') || "n.d.";
+        let site = $('meta[property="og:site_name"]').attr('content') || new URL(originalSource.link).hostname.replace('www.', '');
 
         return {
             ...originalSource,
             title: ($('meta[property="og:title"]').attr('content') || $('title').text() || originalSource.title).trim(),
-            content: cleanContent,
-            quote_chunk: quoteChunk, // <--- New Field for specific use in Quote Logic
-            meta: { author, published: date, siteName }
+            content: finalContent, // Sends the composite text to AI
+            meta: { author, published: date, siteName: site }
         };
     }
 };
