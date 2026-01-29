@@ -1,5 +1,5 @@
 // api/utils/googleSearch.js
-export const GoogleSearch = {
+export const GoogleSearchAPI = {
     BLOCKLIST: " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com",
     BANNED_DOMAINS: ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo'],
 
@@ -17,7 +17,7 @@ export const GoogleSearch = {
             if (!data.items) return [];
             return this._deduplicate(data.items);
         } catch (e) {
-            throw e; // Let main handler catch it
+            throw e; 
         }
     },
 
