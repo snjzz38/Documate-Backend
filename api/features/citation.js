@@ -1,7 +1,7 @@
 // api/features/citation.js
-import { GoogleSearch } from '../utils/googleSearch.js'; // Note the ..
-import { ScraperAPI } from '../utils/scraper.js';       // Note the ..
-import { GroqAPI } from '../utils/groqAPI.js';          // Note the ..
+import { GoogleSearchAPI } from '../utils/googleSearch.js'; // Renamed Import
+import { ScraperAPI } from '../utils/scraper.js';           // Correct Import
+import { GroqAPI } from '../utils/groqAPI.js';              // Correct Import
 
 // Helper: Prompt Construction
 const PromptBuilder = {
@@ -13,7 +13,6 @@ const PromptBuilder = {
             return `TASK: Extract Quotes. CONTEXT: "${context.substring(0, 300)}..." DATA: ${srcData} RULES: Output strictly in order ID 1 to 10. Format: **[ID] Title** - URL \n > "Quote..."`;
         }
 
-        // Citations
         return `
             TASK: Insert citations into text.
             STYLE: ${style}
@@ -41,7 +40,6 @@ const TextProcessor = {
         let footnoteCounter = 1;
         let usedSourceIds = new Set();
         
-        // Tokenizer for fuzzy match
         const tokens = [];
         const tokenRegex = /[a-z0-9]+/gi;
         let match;
@@ -92,48 +90,40 @@ const TextProcessor = {
     }
 };
 
-// =============================================================================
-// MAIN HANDLER
-// =============================================================================
 export default async function handler(req, res) {
-    // 1. CRITICAL: Handle CORS Preflight First
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
         if (req.method !== 'POST') throw new Error("Method not allowed");
 
         const { context, style, outputType, apiKey, googleKey, preLoadedSources } = req.body;
         
-        // Environment Variables
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const SEARCH_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
 
-        // --- Branch 1: Quotes (Cached Sources) ---
+        // --- Branch 1: Quotes ---
         if (preLoadedSources && preLoadedSources.length > 0) {
             const prompt = PromptBuilder.build('quotes', null, context, preLoadedSources);
-            // Uses Groq Rotation automatically
             const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
             return res.status(200).json({ success: true, text: result });
         }
 
-        // --- Branch 2: Citations (Full Search) ---
+        // --- Branch 2: Citations ---
         if (!SEARCH_KEY || !SEARCH_CX) throw new Error("Missing Google Search Config (Key or CX)");
         
-        // 1. Search
-        const rawSources = await GoogleSearch.search(context, SEARCH_KEY, SEARCH_CX);
+        // 1. Search (Renamed API)
+        const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX);
         if (!rawSources.length) throw new Error("No academic sources found.");
 
-        // 2. Scrape
-        const richSources = await ScrapeAPI.scrape(rawSources);
+        // 2. Scrape (Fixed Typo: ScraperAPI, not ScrapeAPI)
+        const richSources = await ScraperAPI.scrape(rawSources);
 
-        // 3. Reason (with Groq Rotation)
+        // 3. Reason
         const prompt = PromptBuilder.build(outputType, style, context, richSources);
         const isJson = outputType !== 'bibliography';
         
@@ -146,7 +136,6 @@ export default async function handler(req, res) {
                 const data = JSON.parse(aiResponse);
                 finalOutput = TextProcessor.merge(context, data.insertions, richSources, data.formatted_citations, outputType);
             } catch (e) {
-                // Fallback to raw text if JSON parses fail
                 console.warn("JSON Parse failed, returning raw");
             }
         }
