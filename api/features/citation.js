@@ -32,7 +32,7 @@ const FormatService = {
                 }
             }
             
-            // Pre-extract ALL authors from content - FIXED REGEX
+            // Pre-extract ALL authors from content - IMPROVED LOGIC
             let enhancedAuthors = [];
             let enhancedAuthor = s.meta.author;
             
@@ -43,8 +43,7 @@ const FormatService = {
             );
             
             if (!s.meta.author || s.meta.author === "Unknown" || isSiteName) {
-                // Look for actual author names in content
-                // Pattern for "Name and Name" format
+                // Look for "Name and Name" pattern first (most reliable for multi-author)
                 const andPattern = /([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
                 const andMatch = s.content.match(andPattern);
                 
@@ -52,29 +51,31 @@ const FormatService = {
                     enhancedAuthors.push(andMatch[1].trim());
                     enhancedAuthors.push(andMatch[2].trim());
                 } else {
-                    // Try other patterns
+                    // Try "By Name" pattern
                     const byPattern = /(?:By|Author(?:s)?:)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/i;
                     const byMatch = s.content.match(byPattern);
                     
                     if (byMatch) {
                         enhancedAuthors.push(byMatch[1].trim());
-                    } else {
-                        // Pattern for standalone proper names near the beginning
-                        const namePattern = /^.{0,500}([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/;
-                        const nameMatch = s.content.match(namePattern);
-                        if (nameMatch) {
-                            enhancedAuthors.push(nameMatch[1].trim());
-                        }
                     }
                 }
                 
-                // Remove duplicates and common false positives
+                // Remove duplicates and false positives
                 enhancedAuthors = [...new Set(enhancedAuthors)].filter(name => 
                     !name.match(/^(Senior|Fellow|Center|Technology|Innovation|Subscribe|Search|Share|Print)/)
                 );
                 
                 if (enhancedAuthors.length > 0) {
                     enhancedAuthor = enhancedAuthors.join(' and ');
+                }
+            } else {
+                // Meta author exists - check if it contains multiple authors
+                if (enhancedAuthor.includes(' and ')) {
+                    enhancedAuthors = enhancedAuthor.split(' and ').map(a => a.trim());
+                } else if (enhancedAuthor.includes(', and ')) {
+                    enhancedAuthors = enhancedAuthor.split(/, and |, /).map(a => a.trim());
+                } else {
+                    enhancedAuthors = [enhancedAuthor];
                 }
             }
             
@@ -83,9 +84,10 @@ TITLE: ${s.title}
 URL: ${s.link}
 SITE_NAME: ${s.meta.siteName || 'Unknown'}
 DETECTED_AUTHOR: ${enhancedAuthor} 
+ALL_AUTHORS: ${enhancedAuthors.join(' | ')}
 DETECTED_DATE: ${enhancedDate || s.meta.published}
-AUTHOR_COUNT: ${enhancedAuthors.length || (enhancedAuthor && enhancedAuthor !== "Unknown" && !isSiteName ? 1 : 0)}
-TEXT_CONTENT: ${s.content.substring(0, 600).replace(/\n/g, ' ')}...`;
+AUTHOR_COUNT: ${enhancedAuthors.length}
+TEXT_CONTENT: ${s.content.substring(0, 800).replace(/\n/g, ' ')}...`;
         }).join('\n\n---\n\n');
 
         // --- 1. QUOTES ---
@@ -99,49 +101,76 @@ TEXT_CONTENT: ${s.content.substring(0, 600).replace(/\n/g, ' ')}...`;
 
         // --- 2. CITATIONS ---
         
-        // Define strict style templates to prevent MLA/Chicago mix-ups
+        // Define strict style templates
         let styleRules = "";
+        let styleExamples = "";
+        
         if (style.toLowerCase().includes("chicago")) {
             styleRules = `
-                STYLE: Chicago Manual of Style (Notes & Bibliography).
-                BIBLIOGRAPHY FORMAT: 
-                  - 1 author: Author Last, First. "Title." *Publisher*, Date. URL.
-                  - 2 authors: Author1 Last, First, and Author2 First Last. "Title." *Publisher*, Date. URL.
-                  - 3+ authors: Author1 Last, First, et al. "Title." *Publisher*, Date. URL.
-                IN-TEXT FORMAT: 
-                  - 1 author: (Author, Year)
-                  - 2 authors: (Author1 and Author2, Year)
-                  - 3+ authors: (Author1 et al., Year)
+                STYLE: Chicago Manual of Style (17th Edition) - Notes and Bibliography System
+                
+                BIBLIOGRAPHY FORMAT (exactly as shown):
+                  - 1 author: LastName, FirstName. "Article Title." *Website/Publisher Name*, Month Day, Year. URL.
+                  - 2 authors: LastName1, FirstName1, and FirstName2 LastName2. "Article Title." *Website/Publisher Name*, Month Day, Year. URL.
+                  - 3+ authors: LastName1, FirstName1, et al. "Article Title." *Website/Publisher Name*, Month Day, Year. URL.
+                
+                IN-TEXT FORMAT (exactly as shown):
+                  - 1 author: (LastName, Year)
+                  - 2 authors: (LastName1 and LastName2, Year)
+                  - 3+ authors: (LastName1 et al., Year)
+                  - No date: (LastName, n.d.)
+            `;
+            styleExamples = `
+                CHICAGO EXAMPLES:
+                
+                Example 1 (Two Authors):
+                - DETECTED_AUTHOR: "Darrell M. West and John R. Allen"
+                - ALL_AUTHORS: Darrell M. West | John R. Allen
+                - DETECTED_DATE: April 24, 2018
+                - citation_text: "(West and Allen, 2018)"
+                - formatted_citations: "West, Darrell M., and John R. Allen. \\"How artificial intelligence is transforming the world.\\" *Brookings*, April 24, 2018. https://www.brookings.edu/..."
+                
+                Example 2 (Single Author):
+                - DETECTED_AUTHOR: "Adam Bohr"
+                - ALL_AUTHORS: Adam Bohr
+                - DETECTED_DATE: 2020
+                - citation_text: "(Bohr, 2020)"
+                - formatted_citations: "Bohr, Adam. \\"The rise of artificial intelligence in healthcare.\\" *PMC*, 2020. https://pmc.ncbi.nlm.nih.gov/..."
             `;
         } else if (style.toLowerCase().includes("mla")) {
             styleRules = `
-                STYLE: MLA 9th Edition.
+                STYLE: MLA 9th Edition
+                
                 BIBLIOGRAPHY FORMAT:
-                  - 1 author: Author Last, First. "Title." *Container*, Date, URL.
-                  - 2 authors: Author1 Last, First, and Author2 First Last. "Title." *Container*, Date, URL.
-                  - 3+ authors: Author1 Last, First, et al. "Title." *Container*, Date, URL.
+                  - 1 author: LastName, FirstName. "Article Title." *Container Title*, Date, URL.
+                  - 2 authors: LastName1, FirstName1, and FirstName2 LastName2. "Article Title." *Container*, Date, URL.
+                  - 3+ authors: LastName1, FirstName1, et al. "Article Title." *Container*, Date, URL.
+                
                 IN-TEXT FORMAT:
-                  - 1 author: (Author, Year)
-                  - 2 authors: (Author1 and Author2, Year)
-                  - 3+ authors: (Author1 et al., Year)
+                  - 1 author: (LastName, Year)
+                  - 2 authors: (LastName1 and LastName2, Year)
+                  - 3+ authors: (LastName1 et al., Year)
             `;
         } else if (style.toLowerCase().includes("apa")) {
             styleRules = `
-                STYLE: APA 7th Edition.
+                STYLE: APA 7th Edition
+                
                 BIBLIOGRAPHY FORMAT:
-                  - 1 author: Author, A. A. (Year). Title. *Site Name*. URL
+                  - 1 author: Author, A. A. (Year). Title of article. *Site Name*. URL
                   - 2 authors: Author1, A. A., & Author2, B. B. (Year). Title. *Site Name*. URL
                   - 3+ authors: Author1, A. A., Author2, B. B., & Author3, C. C. (Year). Title. *Site Name*. URL
+                
                 IN-TEXT FORMAT:
                   - 1 author: (Author, Year)
-                  - 2 authors: (Author1 & Author2, Year)
+                  - 2 authors: (Author1 & Author2, Year)  [Note: use & not "and"]
                   - 3+ authors: (Author1 et al., Year)
             `;
         }
 
         return `
-            TASK: Insert citations into the text.
+            TASK: Insert citations into the text using ${style} format.
             ${styleRules}
+            ${styleExamples}
             
             SOURCE DATA:
             ${sourceContext}
@@ -150,75 +179,52 @@ TEXT_CONTENT: ${s.content.substring(0, 600).replace(/\n/g, ' ')}...`;
             
             CRITICAL INSTRUCTIONS:
             
-            1. **MULTIPLE AUTHORS HANDLING**:
-               - Check DETECTED_AUTHOR field carefully
-               - If it contains " and " (e.g., "Darrell M. West and John R. Allen"), this is TWO authors
+            1. **MULTIPLE AUTHORS HANDLING - EXTREMELY IMPORTANT**:
+               - Look at ALL_AUTHORS field - this shows all authors separated by " | "
+               - If ALL_AUTHORS has 2+ entries separated by |, you MUST include ALL of them
                - Extract LAST NAMES ONLY for in-text citations
-               - Examples:
-                 * "Darrell M. West and John R. Allen" → (West and Allen, Year)
-                 * "John Smith, Jane Doe, and Bob Lee" → (Smith et al., Year)
-                 * "Mary Johnson" → (Johnson, Year)
-               - For APA style with 2 authors, use "&" instead of "and": (West & Allen, Year)
+               - WRONG: Using only first author when multiple exist
+               - CORRECT Examples:
+                 * ALL_AUTHORS: "Darrell M. West | John R. Allen" → (West and Allen, 2018)
+                 * ALL_AUTHORS: "Adib Bin Rashid | Ashfakul Karim Kausik" → (Rashid et al., 2024)
+                 * ALL_AUTHORS: "Adam Bohr" → (Bohr, 2020)
             
             2. **IN-TEXT CITATION FORMATTING**:
-               - The "citation_text" field MUST contain the Date whenever possible
-               - CORRECT: (West and Allen, 2018)
-               - CORRECT: (Smith et al., 2024)
-               - CORRECT: (Johnson, 2024)
-               - ONLY IF NO DATE FOUND: (Author, n.d.)
-               - WRONG: (West, 2018) when Allen is also an author
-               - WRONG: Missing date when date is available
+               - MUST contain year/date whenever available
+               - For Chicago: Use "and" between 2 authors, "et al." for 3+
+               - For APA: Use "&" between 2 authors, "et al." for 3+
+               - EXAMPLES:
+                 * Chicago 2 authors: (West and Allen, 2018)
+                 * Chicago 3+ authors: (Smith et al., 2024)
+                 * APA 2 authors: (West & Allen, 2018)
             
-            3. **METADATA FORENSICS**:
-               Step A - Author Extraction:
-                 - If DETECTED_AUTHOR contains " and ", this means MULTIPLE authors
-                 - Look in TEXT_CONTENT for author names near the beginning
-                 - Common patterns: "Name and Name", "By Name", "Author: Name"
-                 - Ignore site names (like "Brookings") unless no real author is found
-               
-               Step B - Date Extraction:
-                 - If DETECTED_DATE is "n.d.", search TEXT_CONTENT for dates
-                 - Look for: "April 24, 2018", "2018", "January 2024", etc.
-                 - Extract the YEAR and use it
-                 - If you find a date, DO NOT use "n.d."
-               
-               Step C - Verification:
-                 - Double-check AUTHOR_COUNT to ensure you have all authors
-                 - Verify the extracted date makes sense (2000-2026 range)
+            3. **BIBLIOGRAPHY FORMATTING**:
+               - Follow the EXACT format for the selected style
+               - Include ALL author names (full names, not et al. unless 3+)
+               - Use italics with *asterisks* for publication/website name
+               - Include complete URL
+               - End with: URL (Accessed ${today})
             
-            4. **URL HANDLING - EXTREMELY IMPORTANT**:
-               - NEVER use placeholder text like "[URL]", "[link]", or "URL"
-               - ALWAYS use the ACTUAL URL from the URL field
-               - The formatted citation MUST include the complete, real URL
-               - Example: https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/
+            4. **METADATA EXTRACTION**:
+               - Use ALL_AUTHORS field to get all author names
+               - If DETECTED_DATE is "n.d.", search TEXT_CONTENT for dates
+               - Extract year from dates like "April 24, 2018" → use 2018
             
-            5. **FORMATTED CITATIONS REQUIREMENTS**:
-               - Include the COMPLETE bibliographic entry with ALL authors
-               - Use the REAL URL, not a placeholder
-               - End with: "URL (Accessed ${today})"
-               - Example: "West, Darrell M., and John R. Allen. 'How artificial intelligence is transforming the world.' Brookings, April 24, 2018. https://www.brookings.edu/articles/... (Accessed ${today})"
+            5. **URL HANDLING**:
+               - NEVER use "[URL]" or "[link]" placeholders
+               - ALWAYS use the real URL from the URL field
             
-            6. **EXAMPLE - Brookings Article**:
-               Given:
-               - DETECTED_AUTHOR: "Darrell M. West and John R. Allen"
-               - DETECTED_DATE: "April 24, 2018"
-               - URL: https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/
-               
-               Output:
-               - citation_text: "(West and Allen, 2018)"
-               - formatted_citations: "West, Darrell M., and John R. Allen. 'How artificial intelligence is transforming the world.' Brookings, April 24, 2018. https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/ (Accessed ${today})"
-            
-            OUTPUT FORMAT: Return strictly valid JSON with NO placeholders.
+            OUTPUT FORMAT: Return strictly valid JSON.
             {
               "insertions": [
-                { "anchor": "exact phrase from text", "source_id": 1, "citation_text": "(Author(s), Year)" }
+                { "anchor": "exact phrase from text", "source_id": 1, "citation_text": "(Authors, Year)" }
               ],
               "formatted_citations": { 
-                "1": "Complete bibliographic entry with REAL URL (Accessed ${today})"
+                "1": "Complete ${style} bibliographic entry with REAL URL (Accessed ${today})"
               }
             }
             
-            REMEMBER: Use REAL URLs from the URL field, not placeholders!
+            CRITICAL REMINDER: Check ALL_AUTHORS field for multiple authors! Include ALL authors in citations!
         `;
     }
 };
