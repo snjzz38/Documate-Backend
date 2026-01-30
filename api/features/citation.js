@@ -32,29 +32,37 @@ const FormatService = {
                 }
             }
             
-            // Pre-extract author from content if DETECTED_AUTHOR is Unknown
-            let enhancedAuthor = s.meta.author;
-            if (!enhancedAuthor || enhancedAuthor === "Unknown") {
-                const authorPatterns = [
-                    /By\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/,
-                    /Author:\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i,
-                    /Written by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i
-                ];
-                
-                for (const pattern of authorPatterns) {
-                    const match = s.content.match(pattern);
-                    if (match) {
-                        enhancedAuthor = match[1];
-                        break;
-                    }
+            // Pre-extract ALL authors from content
+            let enhancedAuthors = [];
+            const authorPatterns = [
+                /By\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)(?:\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+))?/,
+                /([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/,
+                /Author[s]?:\s*([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)(?:\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+))?/i,
+                /Written by\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)(?:\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+))?/i
+            ];
+            
+            for (const pattern of authorPatterns) {
+                const match = s.content.match(pattern);
+                if (match) {
+                    enhancedAuthors.push(match[1]);
+                    if (match[2]) enhancedAuthors.push(match[2]);
+                    break;
                 }
+            }
+            
+            let enhancedAuthor = s.meta.author;
+            if (enhancedAuthors.length > 0) {
+                enhancedAuthor = enhancedAuthors.join(' and ');
+            } else if (!enhancedAuthor || enhancedAuthor === "Unknown") {
+                enhancedAuthor = "Unknown";
             }
             
             return `[ID:${s.id}] TITLE: ${s.title}
              URL: ${s.link}
-             DETECTED_AUTHOR: ${enhancedAuthor || s.meta.author} 
+             DETECTED_AUTHOR: ${enhancedAuthor} 
              DETECTED_DATE: ${enhancedDate || s.meta.published}
              SITE_NAME: ${s.meta.siteName || 'Unknown'}
+             AUTHOR_COUNT: ${enhancedAuthors.length || (s.meta.author && s.meta.author !== "Unknown" ? 1 : 0)}
              TEXT_SNIPPET: ${s.content.substring(0, 500).replace(/\n/g, ' ')}...`;
         }).join('\n\n');
 
@@ -74,20 +82,38 @@ const FormatService = {
         if (style.toLowerCase().includes("chicago")) {
             styleRules = `
                 STYLE: Chicago Manual of Style (Notes & Bibliography).
-                BIBLIOGRAPHY FORMAT: Author Last, First. "Title of Article." *Publisher/Site Name*, Publication Date. URL.
-                IN-TEXT FORMAT: (Author, Year) or (Author, n.d.) if date unknown.
+                BIBLIOGRAPHY FORMAT: 
+                  - 1 author: Author Last, First. "Title." *Publisher*, Date. URL.
+                  - 2 authors: Author1 Last, First, and Author2 First Last. "Title." *Publisher*, Date. URL.
+                  - 3+ authors: Author1 Last, First, et al. "Title." *Publisher*, Date. URL.
+                IN-TEXT FORMAT: 
+                  - 1 author: (Author, Year)
+                  - 2 authors: (Author1 and Author2, Year)
+                  - 3+ authors: (Author1 et al., Year)
             `;
         } else if (style.toLowerCase().includes("mla")) {
             styleRules = `
                 STYLE: MLA 9th Edition.
-                BIBLIOGRAPHY FORMAT: Author Last, First. "Title of Article." *Container Title*, Publication Date, URL.
-                IN-TEXT FORMAT: (Author) or (Author, Year) -- PREFER (Author, Year) for clarity.
+                BIBLIOGRAPHY FORMAT:
+                  - 1 author: Author Last, First. "Title." *Container*, Date, URL.
+                  - 2 authors: Author1 Last, First, and Author2 First Last. "Title." *Container*, Date, URL.
+                  - 3+ authors: Author1 Last, First, et al. "Title." *Container*, Date, URL.
+                IN-TEXT FORMAT:
+                  - 1 author: (Author, Year)
+                  - 2 authors: (Author1 and Author2, Year)
+                  - 3+ authors: (Author1 et al., Year)
             `;
         } else if (style.toLowerCase().includes("apa")) {
             styleRules = `
                 STYLE: APA 7th Edition.
-                BIBLIOGRAPHY FORMAT: Author, A. A. (Year, Month Day). Title of article. *Site Name*. URL
-                IN-TEXT FORMAT: (Author, Year).
+                BIBLIOGRAPHY FORMAT:
+                  - 1 author: Author, A. A. (Year). Title. *Site Name*. URL
+                  - 2 authors: Author1, A. A., & Author2, B. B. (Year). Title. *Site Name*. URL
+                  - 3+ authors: Author1, A. A., Author2, B. B., & Author3, C. C. (Year). Title. *Site Name*. URL
+                IN-TEXT FORMAT:
+                  - 1 author: (Author, Year)
+                  - 2 authors: (Author1 & Author2, Year)
+                  - 3+ authors: (Author1 et al., Year)
             `;
         }
 
@@ -101,16 +127,30 @@ const FormatService = {
             TEXT: "${context}"
             
             CRITICAL INSTRUCTIONS:
-            1. **IN-TEXT CITATION**: The "citation_text" field MUST contain the Date whenever possible.
-               - CORRECT: (West, 2018)
-               - CORRECT: (Smith, 2024)
-               - ONLY IF NO DATE FOUND: (Smith, n.d.)
-               - WRONG: (Smith) without date when date is available
+            1. **MULTIPLE AUTHORS HANDLING**:
+               - Check DETECTED_AUTHOR field carefully
+               - If it contains " and " (e.g., "Darrell M. West and John R. Allen"), this is TWO authors
+               - Extract LAST NAMES ONLY for in-text citations
+               - Examples:
+                 * "Darrell M. West and John R. Allen" → (West and Allen, Year)
+                 * "John Smith, Jane Doe, and Bob Lee" → (Smith et al., Year)
+                 * "Mary Johnson" → (Johnson, Year)
+               - For APA style with 2 authors, use "&" instead of "and": (West & Allen, Year)
             
-            2. **METADATA FORENSICS - FOLLOW THIS EXACT PROCESS**:
+            2. **IN-TEXT CITATION**: The "citation_text" field MUST contain the Date whenever possible.
+               - CORRECT: (West and Allen, 2018)
+               - CORRECT: (Smith et al., 2024)
+               - CORRECT: (Johnson, 2024)
+               - ONLY IF NO DATE FOUND: (Author, n.d.)
+               - WRONG: (West, 2018) when Allen is also an author
+               - WRONG: Missing date when date is available in TEXT_SNIPPET
+            
+            3. **METADATA FORENSICS - FOLLOW THIS EXACT PROCESS**:
                Step A - Check DETECTED_AUTHOR:
-                 - If "Unknown", look at TEXT_SNIPPET for patterns like "By [Name]", "Author: [Name]", or proper names
-                 - Use the first credible author name you find
+                 - If contains " and ", split into multiple authors
+                 - Extract last names for in-text citation
+                 - If "Unknown", look at TEXT_SNIPPET for patterns like "By [Name]", "Author: [Name]"
+                 - Look for multiple authors separated by "and"
                
                Step B - Check DETECTED_DATE:
                  - If "n.d.", look carefully at TEXT_SNIPPET for ANY year (2024, 2023, 2018, etc.)
@@ -120,29 +160,33 @@ const FormatService = {
                
                Step C - Double-check:
                  - Before finalizing each citation, verify you've extracted all available metadata
+                 - Verify author count matches the number of authors found
                  - A date in TEXT_SNIPPET means the citation should have a year, not "n.d."
             
-            3. **FORMATTED CITATIONS**:
-               - The value in "formatted_citations" must be the FULL bibliographic entry.
+            4. **FORMATTED CITATIONS**:
+               - The value in "formatted_citations" must be the FULL bibliographic entry with ALL authors
+               - Include ALL author names in bibliography (don't abbreviate to "et al." unless 3+ authors)
                - **MANDATORY**: End every entry with: "URL (Accessed ${today})".
             
-            4. **EXAMPLE OF CORRECT DATE EXTRACTION**:
-               If TEXT_SNIPPET contains "April 24, 2018" and DETECTED_DATE is "n.d.", 
-               you should extract "2018" and use:
-               - citation_text: "(West, 2018)"
-               - formatted_citations: "West, Darrell M. 'Title.' Brookings, April 24, 2018. URL (Accessed ${today})"
+            5. **EXAMPLES OF CORRECT MULTI-AUTHOR HANDLING**:
+               Example 1: DETECTED_AUTHOR: "Darrell M. West and John R. Allen", DETECTED_DATE: "April 24, 2018"
+               - citation_text: "(West and Allen, 2018)"
+               - formatted_citations: "West, Darrell M., and John R. Allen. 'How artificial intelligence is transforming the world.' Brookings, April 24, 2018. [URL] (Accessed ${today})"
+               
+               Example 2: DETECTED_AUTHOR: "Smith, Jones, and Brown", Date: "2024"
+               - citation_text: "(Smith et al., 2024)"
+               - formatted_citations: "Smith, A., Jones, B., and Brown, C. 'Title.' Publisher, 2024. [URL] (Accessed ${today})"
             
             OUTPUT: Return strictly JSON.
             {
               "insertions": [
-                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Author, Year)" }
+                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Author(s), Year)" }
               ],
-              "formatted_citations": { "1": "Author, Name. \"Title.\" Publisher, Date. URL (Accessed ${today})" }
+              "formatted_citations": { "1": "Full Author Names. \"Title.\" Publisher, Date. URL (Accessed ${today})" }
             }
         `;
     }
 };
-
 // ==========================================================================
 // MODULE: TEXT PROCESSOR (The Pipeline)
 // ==========================================================================
