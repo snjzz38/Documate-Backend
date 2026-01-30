@@ -1,3 +1,8 @@
+// api/features/citation.js
+import { GoogleSearchAPI } from '../utils/googleSearch.js';
+import { ScraperAPI } from '../utils/scraper.js';
+import { GroqAPI } from '../utils/groqAPI.js';
+
 // ==========================================================================
 // MODULE: FORMAT SERVICE (The Prompt Logic)
 // ==========================================================================
