@@ -10,83 +10,17 @@ const FormatService = {
     buildPrompt(type, style, context, sources) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
-        // Enhanced context builder with better metadata extraction
-        const sourceContext = sources.map(s => {
-            // Pre-extract date from content if DETECTED_DATE is n.d.
-            let enhancedDate = s.meta.published;
-            if (!enhancedDate || enhancedDate === "n.d.") {
-                // Look for date patterns in the content
-                const datePatterns = [
-                    /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
-                    /\b(20\d{2})\b/,  // Years 2000-2099
-                    /\d{1,2}\/\d{1,2}\/\d{4}/,
-                    /\d{4}-\d{2}-\d{2}/
-                ];
-                
-                for (const pattern of datePatterns) {
-                    const match = s.content.match(pattern);
-                    if (match) {
-                        enhancedDate = match[0];
-                        break;
-                    }
-                }
-            }
-            
-            // Pre-extract ALL authors from content - FIXED REGEX
-            let enhancedAuthors = [];
-            let enhancedAuthor = s.meta.author;
-            
-            // Check if meta author is just the site name (like "Brookings")
-            const isSiteName = s.meta.author && (
-                s.meta.author === s.meta.siteName || 
-                s.meta.author.toLowerCase().includes(s.meta.siteName.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
-            );
-            
-            if (!s.meta.author || s.meta.author === "Unknown" || isSiteName) {
-                // Look for actual author names in content
-                // Pattern for "Name and Name" format
-                const andPattern = /([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
-                const andMatch = s.content.match(andPattern);
-                
-                if (andMatch) {
-                    enhancedAuthors.push(andMatch[1].trim());
-                    enhancedAuthors.push(andMatch[2].trim());
-                } else {
-                    // Try other patterns
-                    const byPattern = /(?:By|Author(?:s)?:)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/i;
-                    const byMatch = s.content.match(byPattern);
-                    
-                    if (byMatch) {
-                        enhancedAuthors.push(byMatch[1].trim());
-                    } else {
-                        // Pattern for standalone proper names near the beginning
-                        const namePattern = /^.{0,500}([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/;
-                        const nameMatch = s.content.match(namePattern);
-                        if (nameMatch) {
-                            enhancedAuthors.push(nameMatch[1].trim());
-                        }
-                    }
-                }
-                
-                // Remove duplicates and common false positives
-                enhancedAuthors = [...new Set(enhancedAuthors)].filter(name => 
-                    !name.match(/^(Senior|Fellow|Center|Technology|Innovation|Subscribe|Search|Share|Print)/)
-                );
-                
-                if (enhancedAuthors.length > 0) {
-                    enhancedAuthor = enhancedAuthors.join(' and ');
-                }
-            }
-            
-            return `[ID:${s.id}]
-TITLE: ${s.title}
-URL: ${s.link}
-SITE_NAME: ${s.meta.siteName || 'Unknown'}
-DETECTED_AUTHOR: ${enhancedAuthor} 
-DETECTED_DATE: ${enhancedDate || s.meta.published}
-AUTHOR_COUNT: ${enhancedAuthors.length || (enhancedAuthor && enhancedAuthor !== "Unknown" && !isSiteName ? 1 : 0)}
-TEXT_CONTENT: ${s.content.substring(0, 600).replace(/\n/g, ' ')}...`;
-        }).join('\n\n---\n\n');
+        // CRITICAL FIX: Increased substring to 1000 chars. 
+        // Brookings/News sites often put the date in the first 2 paragraphs.
+        // The AI needs to see this text to extract the date if metadata fails.
+        const sourceContext = sources.map(s => 
+            `[ID:${s.id}] 
+             TITLE: ${s.title}
+             URL: ${s.link}
+             META_AUTHOR: ${s.meta.author} 
+             META_DATE: ${s.meta.published}
+             TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`
+        ).join('\n\n');
 
         // --- 1. QUOTES ---
         if (type === 'quotes') {
@@ -99,132 +33,58 @@ TEXT_CONTENT: ${s.content.substring(0, 600).replace(/\n/g, ' ')}...`;
 
         // --- 2. CITATIONS ---
         
-        // Define strict style templates to prevent MLA/Chicago mix-ups
-        let styleRules = "";
+        // STRICT STYLE TEMPLATES (Fixes the MLA/Chicago mixing)
+        let styleInstructions = "";
         if (style.toLowerCase().includes("chicago")) {
-            styleRules = `
-                STYLE: Chicago Manual of Style (Notes & Bibliography).
-                BIBLIOGRAPHY FORMAT: 
-                  - 1 author: Author Last, First. "Title." *Publisher*, Date. URL.
-                  - 2 authors: Author1 Last, First, and Author2 First Last. "Title." *Publisher*, Date. URL.
-                  - 3+ authors: Author1 Last, First, et al. "Title." *Publisher*, Date. URL.
-                IN-TEXT FORMAT: 
-                  - 1 author: (Author, Year)
-                  - 2 authors: (Author1 and Author2, Year)
-                  - 3+ authors: (Author1 et al., Year)
+            styleInstructions = `
+                STYLE: Chicago (Notes & Bibliography).
+                FORMAT: Author First Last. "Title." Publisher, Date. URL.
+                IN-TEXT: (Author, Year).
             `;
         } else if (style.toLowerCase().includes("mla")) {
-            styleRules = `
+            styleInstructions = `
                 STYLE: MLA 9th Edition.
-                BIBLIOGRAPHY FORMAT:
-                  - 1 author: Author Last, First. "Title." *Container*, Date, URL.
-                  - 2 authors: Author1 Last, First, and Author2 First Last. "Title." *Container*, Date, URL.
-                  - 3+ authors: Author1 Last, First, et al. "Title." *Container*, Date, URL.
-                IN-TEXT FORMAT:
-                  - 1 author: (Author, Year)
-                  - 2 authors: (Author1 and Author2, Year)
-                  - 3+ authors: (Author1 et al., Year)
+                FORMAT: Author Last, First. "Title." *Container*, Date, URL.
+                IN-TEXT: (Author, Year).
             `;
-        } else if (style.toLowerCase().includes("apa")) {
-            styleRules = `
-                STYLE: APA 7th Edition.
-                BIBLIOGRAPHY FORMAT:
-                  - 1 author: Author, A. A. (Year). Title. *Site Name*. URL
-                  - 2 authors: Author1, A. A., & Author2, B. B. (Year). Title. *Site Name*. URL
-                  - 3+ authors: Author1, A. A., Author2, B. B., & Author3, C. C. (Year). Title. *Site Name*. URL
-                IN-TEXT FORMAT:
-                  - 1 author: (Author, Year)
-                  - 2 authors: (Author1 & Author2, Year)
-                  - 3+ authors: (Author1 et al., Year)
-            `;
+        } else {
+            styleInstructions = `STYLE: APA 7th Edition. Format: Author. (Year). Title. URL.`;
         }
 
         return `
             TASK: Insert citations into the text.
-            ${styleRules}
+            ${styleInstructions}
             
             SOURCE DATA:
             ${sourceContext}
             
-            TEXT TO CITE: "${context}"
+            TEXT: "${context}"
             
-            CRITICAL INSTRUCTIONS:
+            CRITICAL METADATA RULES (TEXT FORENSICS):
+            1. **IGNORE "n.d."**: If the "TEXT_CONTENT" contains a date (e.g., "April 24, 2018" or "Jan 2025"), USE THAT YEAR.
+            2. **FIND THE AUTHOR**: If "META_AUTHOR" is an Organization (e.g. "Brookings", "Microsoft"), look at "TEXT_CONTENT". 
+               - If it says "By Darrell M. West", the author is "West, Darrell M."
+               - If it says "Written by John Doe", the author is "Doe, John".
             
-            1. **MULTIPLE AUTHORS HANDLING**:
-               - Check DETECTED_AUTHOR field carefully
-               - If it contains " and " (e.g., "Darrell M. West and John R. Allen"), this is TWO authors
-               - Extract LAST NAMES ONLY for in-text citations
-               - Examples:
-                 * "Darrell M. West and John R. Allen" → (West and Allen, Year)
-                 * "John Smith, Jane Doe, and Bob Lee" → (Smith et al., Year)
-                 * "Mary Johnson" → (Johnson, Year)
-               - For APA style with 2 authors, use "&" instead of "and": (West & Allen, Year)
+            OUTPUT RULES:
+            1. **Cite Every Claim**: Insert citations [1], [2] etc.
+            2. **Full Bibliography**: In "formatted_citations", provide the COMPLETE entry.
+            3. **Access Date**: MANDATORY. End every citation with "URL (Accessed ${today})".
+            4. **Strict JSON**: Return ONLY valid JSON.
             
-            2. **IN-TEXT CITATION FORMATTING**:
-               - The "citation_text" field MUST contain the Date whenever possible
-               - CORRECT: (West and Allen, 2018)
-               - CORRECT: (Smith et al., 2024)
-               - CORRECT: (Johnson, 2024)
-               - ONLY IF NO DATE FOUND: (Author, n.d.)
-               - WRONG: (West, 2018) when Allen is also an author
-               - WRONG: Missing date when date is available
-            
-            3. **METADATA FORENSICS**:
-               Step A - Author Extraction:
-                 - If DETECTED_AUTHOR contains " and ", this means MULTIPLE authors
-                 - Look in TEXT_CONTENT for author names near the beginning
-                 - Common patterns: "Name and Name", "By Name", "Author: Name"
-                 - Ignore site names (like "Brookings") unless no real author is found
-               
-               Step B - Date Extraction:
-                 - If DETECTED_DATE is "n.d.", search TEXT_CONTENT for dates
-                 - Look for: "April 24, 2018", "2018", "January 2024", etc.
-                 - Extract the YEAR and use it
-                 - If you find a date, DO NOT use "n.d."
-               
-               Step C - Verification:
-                 - Double-check AUTHOR_COUNT to ensure you have all authors
-                 - Verify the extracted date makes sense (2000-2026 range)
-            
-            4. **URL HANDLING - EXTREMELY IMPORTANT**:
-               - NEVER use placeholder text like "[URL]", "[link]", or "URL"
-               - ALWAYS use the ACTUAL URL from the URL field
-               - The formatted citation MUST include the complete, real URL
-               - Example: https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/
-            
-            5. **FORMATTED CITATIONS REQUIREMENTS**:
-               - Include the COMPLETE bibliographic entry with ALL authors
-               - Use the REAL URL, not a placeholder
-               - End with: "URL (Accessed ${today})"
-               - Example: "West, Darrell M., and John R. Allen. 'How artificial intelligence is transforming the world.' Brookings, April 24, 2018. https://www.brookings.edu/articles/... (Accessed ${today})"
-            
-            6. **EXAMPLE - Brookings Article**:
-               Given:
-               - DETECTED_AUTHOR: "Darrell M. West and John R. Allen"
-               - DETECTED_DATE: "April 24, 2018"
-               - URL: https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/
-               
-               Output:
-               - citation_text: "(West and Allen, 2018)"
-               - formatted_citations: "West, Darrell M., and John R. Allen. 'How artificial intelligence is transforming the world.' Brookings, April 24, 2018. https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/ (Accessed ${today})"
-            
-            OUTPUT FORMAT: Return strictly valid JSON with NO placeholders.
+            JSON STRUCTURE:
             {
               "insertions": [
-                { "anchor": "exact phrase from text", "source_id": 1, "citation_text": "(Author(s), Year)" }
+                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(West, 2018)" }
               ],
-              "formatted_citations": { 
-                "1": "Complete bibliographic entry with REAL URL (Accessed ${today})"
-              }
+              "formatted_citations": { "1": "West, Darrell M. \"How AI transforms the world.\" Brookings, 2018. https://brookings.edu... (Accessed ${today})" }
             }
-            
-            REMEMBER: Use REAL URLs from the URL field, not placeholders!
         `;
     }
 };
 
 // ==========================================================================
-// MODULE: TEXT PROCESSOR (The Pipeline)
+// MODULE: PIPELINE SERVICE (Processing & Fallbacks)
 // ==========================================================================
 const PipelineService = {
     ensureAccessDate(text) {
@@ -234,53 +94,20 @@ const PipelineService = {
         return `${text} (Accessed ${today})`;
     },
 
-    // Generates a backup citation if AI returns "Unknown" or fails
+    // Generates a clean fallback citation if AI fails
     generateFallback(source) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
-        // Try to extract authors from content
         let author = source.meta.author;
-        const isSiteName = author && (
-            author === source.meta.siteName || 
-            author.toLowerCase().includes(source.meta.siteName.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
-        );
-        
-        if (!author || author === "Unknown" || isSiteName) {
-            // Try to find author in content
-            const authorMatch = source.content.match(/([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
-            if (authorMatch) {
-                author = `${authorMatch[1]} and ${authorMatch[2]}`;
-            } else {
-                const singleAuthor = source.content.match(/(?:By|Author:)\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
-                if (singleAuthor) {
-                    author = singleAuthor[1];
-                } else {
-                    // Use site name as last resort
-                    author = source.meta.siteName || "Unknown Source";
-                }
-            }
+        // Logic: If author is "Unknown" or looks like a filename, try Site Name
+        if (!author || author === "Unknown" || author.includes(".com")) {
+            author = source.meta.siteName || "Unknown Source";
         }
         
         let date = source.meta.published;
-        if (!date || date === "n.d.") {
-            // Try to find date in content
-            const dateMatch = source.content.match(/(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/);
-            if (dateMatch) {
-                date = dateMatch[0];
-            } else {
-                const yearMatch = source.content.match(/\b(20\d{2})\b/);
-                date = yearMatch ? yearMatch[1] : "n.d.";
-            }
-        }
+        if (!date || date === "n.d.") date = "n.d.";
 
-        // Use actual URL, not placeholder
-        const url = source.link;
-        
-        // Use the actual title from source, not user text
-        const title = source.title || "Untitled";
-        
-        // Default to a generic clean format with REAL URL
-        return `${author}. "${title}". ${source.meta.siteName}. ${date}. ${url} (Accessed ${today})`;
+        return `${author}. (${date}). "${source.title}". ${source.link} (Accessed ${today})`;
     },
 
     processInsertions(context, insertions, sources, formattedMap, outputType) {
@@ -297,7 +124,7 @@ const PipelineService = {
             tokens.push({ word: match[0].toLowerCase(), start: match.index, end: match.index + match[0].length });
         }
 
-        // 2. Sort Insertions
+        // 2. Map Insertions
         const validInsertions = (insertions || [])
             .map(item => {
                 if (!item.anchor || !item.source_id) return null;
@@ -323,73 +150,37 @@ const PipelineService = {
             
             usedSourceIds.add(source.id);
             
-            // Get Citation String
-            let citString = formattedMap[source.id];
+            // Get citation string (AI provided OR Programmatic Fallback)
+            let citationString = formattedMap[source.id];
             
-            // Validation: If AI returned invalid citation, overwrite it
-            const isInvalid = !citString || 
-                            citString.length < 10 || 
-                            citString.includes('[URL]') || 
-                            citString.includes('[link]') ||
-                            citString.startsWith('Author.') ||
-                            citString.includes('"The rise of artificial') ||
-                            citString.includes('"Powered by advances');
-            
-            if (isInvalid) {
-                citString = this.generateFallback(source);
+            // Validity Check: If AI gave a junk citation, use fallback
+            if (!citationString || citationString.length < 10 || citationString.includes("Unknown")) {
+                citationString = this.generateFallback(source);
             }
-            citString = this.ensureAccessDate(citString);
+            citationString = this.ensureAccessDate(citationString);
 
             let insertContent = "";
             if (outputType === 'footnotes') {
-                const s = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
+                const s = { '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹' };
                 const numStr = footnoteCounter.toString();
                 insertContent = numStr.split('').map(d => s[d]||'').join('');
                 
-                footnotesList.push(`${footnoteCounter}. ${citString}`);
+                footnotesList.push(`${footnoteCounter}. ${citationString}`);
                 footnoteCounter++;
             } else {
-                // IN-TEXT LOGIC
+                // In-Text Logic: Use AI text or fallback to (Author, Year)
                 let inText = item.citation_text;
-                
-                // Check if citation_text is also invalid
-                if (!inText || inText.length < 3 || inText === '(Author, n.d.)' || inText.includes('Author')) {
-                    // Extract author from source
-                    let auth = source.meta.author;
-                    
-                    // Check if it's actually site name, try to get real author
-                    const isSiteName = auth === source.meta.siteName || 
-                                     (auth && auth.toLowerCase().includes(source.meta.siteName.toLowerCase().replace(/\.(com|org|edu|net)/, '')));
-                    
-                    if (!auth || auth === "Unknown" || isSiteName) {
-                        const authorMatch = source.content.match(/([A-Z][a-z]+)\s+[A-Z]\.?\s+[A-Z][a-z]+\s+and/);
-                        auth = authorMatch ? authorMatch[1] : (source.meta.siteName || "Unknown");
-                    } else if (auth.includes(' and ')) {
-                        // Multiple authors - get first last name
-                        auth = auth.split(' and ')[0].split(' ').pop();
-                    } else {
-                        // Single author - get last name
-                        auth = auth.split(' ').pop();
-                    }
-                    
-                    // Extract year from date
-                    let yr = "n.d.";
-                    if (source.meta.published && source.meta.published !== "n.d.") {
-                        yr = source.meta.published.substring(0, 4);
-                    } else {
-                        // Try to find year in content
-                        const yearMatch = source.content.match(/\b(20\d{2})\b/);
-                        if (yearMatch) yr = yearMatch[1];
-                    }
-                    
-                    inText = `(${auth}, ${yr})`;
+                if (!inText || !inText.match(/\d{4}/)) { // If no year found
+                     const auth = source.meta.author !== "Unknown" ? source.meta.author.split(' ')[0] : source.meta.siteName;
+                     const yr = source.meta.published !== "n.d." ? source.meta.published.substring(0,4) : "n.d.";
+                     inText = `(${auth}, ${yr})`;
                 }
                 insertContent = " " + inText;
             }
             resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
         });
 
-        // 4. Build Footer
+        // 4. Build Footer (Used -> Unused)
         let footer = "";
         
         if (outputType === 'footnotes') {
@@ -399,39 +190,18 @@ const PipelineService = {
             sources.forEach(s => {
                 if (usedSourceIds.has(s.id)) {
                     let cit = formattedMap[s.id] || this.generateFallback(s);
-                    
-                    // Check for invalid citations
-                    const isInvalid = cit.includes('[URL]') || 
-                                    cit.includes('[link]') ||
-                                    cit.startsWith('Author.') ||
-                                    cit.includes('"The rise of artificial') ||
-                                    cit.includes('"Powered by advances');
-                    
-                    if (isInvalid) {
-                        cit = this.generateFallback(s);
-                    }
                     footer += this.ensureAccessDate(cit) + "\n\n";
                 }
             });
         }
 
+        // Unused Sources
         if (usedSourceIds.size < sources.length) {
             footer += "\n\n### Further Reading (Unused)\n";
             sources.forEach(s => {
                 if (!usedSourceIds.has(s.id)) {
                     let cit = formattedMap[s.id] || this.generateFallback(s);
-                    
-                    // Check for invalid citations
-                    const isInvalid = cit.includes('[URL]') || 
-                                    cit.includes('[link]') ||
-                                    cit.startsWith('Author.') ||
-                                    cit.includes('"The rise of artificial') ||
-                                    cit.includes('"Powered by advances');
-                    
-                    if (isInvalid) {
-                        cit = this.generateFallback(s);
-                    }
-                    footer += this.ensureAccessDate(cit) + "\n\n";
+                    footer += this.ensureAccessDate(cit) + "\n\n"; 
                 }
             });
         }
