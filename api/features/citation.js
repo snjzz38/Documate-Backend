@@ -10,14 +10,53 @@ const FormatService = {
     buildPrompt(type, style, context, sources) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
-        // Context builder
-        const sourceContext = sources.map(s => 
-            `[ID:${s.id}] TITLE: ${s.title}
+        // Enhanced context builder with better metadata extraction
+        const sourceContext = sources.map(s => {
+            // Pre-extract date from content if DETECTED_DATE is n.d.
+            let enhancedDate = s.meta.published;
+            if (!enhancedDate || enhancedDate === "n.d.") {
+                // Look for date patterns in the content
+                const datePatterns = [
+                    /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
+                    /\b(20\d{2})\b/,  // Years 2000-2099
+                    /\d{1,2}\/\d{1,2}\/\d{4}/,
+                    /\d{4}-\d{2}-\d{2}/
+                ];
+                
+                for (const pattern of datePatterns) {
+                    const match = s.content.match(pattern);
+                    if (match) {
+                        enhancedDate = match[0];
+                        break;
+                    }
+                }
+            }
+            
+            // Pre-extract author from content if DETECTED_AUTHOR is Unknown
+            let enhancedAuthor = s.meta.author;
+            if (!enhancedAuthor || enhancedAuthor === "Unknown") {
+                const authorPatterns = [
+                    /By\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/,
+                    /Author:\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i,
+                    /Written by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i
+                ];
+                
+                for (const pattern of authorPatterns) {
+                    const match = s.content.match(pattern);
+                    if (match) {
+                        enhancedAuthor = match[1];
+                        break;
+                    }
+                }
+            }
+            
+            return `[ID:${s.id}] TITLE: ${s.title}
              URL: ${s.link}
-             DETECTED_AUTHOR: ${s.meta.author} 
-             DETECTED_DATE: ${s.meta.published}
-             TEXT_SNIPPET: ${s.content.substring(0, 400).replace(/\n/g, ' ')}...`
-        ).join('\n\n');
+             DETECTED_AUTHOR: ${enhancedAuthor || s.meta.author} 
+             DETECTED_DATE: ${enhancedDate || s.meta.published}
+             SITE_NAME: ${s.meta.siteName || 'Unknown'}
+             TEXT_SNIPPET: ${s.content.substring(0, 500).replace(/\n/g, ' ')}...`;
+        }).join('\n\n');
 
         // --- 1. QUOTES ---
         if (type === 'quotes') {
@@ -62,25 +101,43 @@ const FormatService = {
             TEXT: "${context}"
             
             CRITICAL INSTRUCTIONS:
-            1. **IN-TEXT CITATION**: The "citation_text" field MUST contain the Date.
+            1. **IN-TEXT CITATION**: The "citation_text" field MUST contain the Date whenever possible.
+               - CORRECT: (West, 2018)
                - CORRECT: (Smith, 2024)
-               - CORRECT: (Smith, n.d.)
-               - WRONG: (Smith)
+               - ONLY IF NO DATE FOUND: (Smith, n.d.)
+               - WRONG: (Smith) without date when date is available
             
-            2. **METADATA FORENSICS**:
-               - If DETECTED_AUTHOR is "Unknown", look at the TEXT_SNIPPET. If it says "By John Doe", use "John Doe".
-               - If DETECTED_DATE is "n.d.", look at TEXT_SNIPPET for a year (e.g., 2024, 2023). Use that year.
+            2. **METADATA FORENSICS - FOLLOW THIS EXACT PROCESS**:
+               Step A - Check DETECTED_AUTHOR:
+                 - If "Unknown", look at TEXT_SNIPPET for patterns like "By [Name]", "Author: [Name]", or proper names
+                 - Use the first credible author name you find
+               
+               Step B - Check DETECTED_DATE:
+                 - If "n.d.", look carefully at TEXT_SNIPPET for ANY year (2024, 2023, 2018, etc.)
+                 - Look for full dates like "April 24, 2018" or "January 2024"
+                 - Extract the YEAR and use it in the citation
+                 - If you find a date in TEXT_SNIPPET, YOU MUST USE IT - do NOT leave it as "n.d."
+               
+               Step C - Double-check:
+                 - Before finalizing each citation, verify you've extracted all available metadata
+                 - A date in TEXT_SNIPPET means the citation should have a year, not "n.d."
             
             3. **FORMATTED CITATIONS**:
                - The value in "formatted_citations" must be the FULL bibliographic entry.
                - **MANDATORY**: End every entry with: "URL (Accessed ${today})".
             
+            4. **EXAMPLE OF CORRECT DATE EXTRACTION**:
+               If TEXT_SNIPPET contains "April 24, 2018" and DETECTED_DATE is "n.d.", 
+               you should extract "2018" and use:
+               - citation_text: "(West, 2018)"
+               - formatted_citations: "West, Darrell M. 'Title.' Brookings, April 24, 2018. URL (Accessed ${today})"
+            
             OUTPUT: Return strictly JSON.
             {
               "insertions": [
-                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Smith, 2024)" }
+                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Author, Year)" }
               ],
-              "formatted_citations": { "1": "Smith, John. \"Title.\" Publisher, 2024. URL (Accessed ${today})" }
+              "formatted_citations": { "1": "Author, Name. \"Title.\" Publisher, Date. URL (Accessed ${today})" }
             }
         `;
     }
