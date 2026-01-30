@@ -9,47 +9,37 @@ const USER_AGENTS = [
 /**
  * UTILITY: Smart Sentence Extractor
  * Grabs a chunk of text but extends it until it finds a sentence ending.
- * Rule: Ends when a letter/quote is followed by a dot.
  */
 function getSmartChunk(fullText, startIndex, targetLength) {
     if (startIndex >= fullText.length) return "";
 
-    // 1. Grab the rough chunk
     let chunk = fullText.substr(startIndex, targetLength);
-    
-    // 2. Look ahead up to 500 chars to find a clean sentence end
-    // We look for a Letter (a-z) or Quote (") followed immediately by a Dot (.)
     const buffer = fullText.substr(startIndex + targetLength, 500);
     
-    // Regex: Match [Letter or Quote] followed by [Dot]
-    // ([a-zA-Z"”]) captures the char before the dot
-    // \. matches the dot
+    // Look for a letter/quote followed by a dot
     const match = buffer.match(/([a-zA-Z"”])\./);
 
     if (match) {
-        // Extend chunk to include the buffer up to the match index + 2 (char + dot)
         return chunk + buffer.substring(0, match.index + 2);
     }
-
-    // Fallback: If no sentence end found, just return chunk with ellipsis
-    return chunk + "...";
+    return chunk + (chunk.endsWith('.') ? '' : '...');
 }
 
 /**
  * UTILITY: Metadata Regex Fallback
- * If Cheerio fails, look for patterns in the raw text.
+ * Scans raw text for "By [Name]" and "Date".
  */
 function extractTextMetadata(text) {
     let author = null;
     let date = null;
 
-    // Author: Look for "By [Name]" or "Written by [Name]"
-    // Matches "By John Doe" or "By J. Doe"
+    // Improved Author Regex: Matches "By Darrell M. West" or "By John Doe"
+    // Allows optional middle initial (A.)
     const authorMatch = text.match(/(?:By|Written by)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s+|\s+)[A-Z][a-z]+)/);
     if (authorMatch) author = authorMatch[1];
 
-    // Date: Look for "April 24, 2018" or "Jan 12, 2024"
-    const dateMatch = text.match(/([A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4})/);
+    // Date Regex: Matches "April 24, 2018" or "Jan. 12, 2024"
+    const dateMatch = text.match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
     if (dateMatch) date = dateMatch[1];
 
     return { author, date };
@@ -57,15 +47,20 @@ function extractTextMetadata(text) {
 
 export const ScraperAPI = {
     async scrape(sources) {
-        // Limit sources to avoid timeouts
         const targetSources = sources.slice(0, 8);
 
         const promises = targetSources.map(async (source) => {
             try {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000); 
+                // Sanitize URL (Fixes the double URL issue)
+                let cleanLink = source.link.trim();
+                if (cleanLink.includes('http') && cleanLink.lastIndexOf('http') > 0) {
+                    cleanLink = cleanLink.substring(cleanLink.lastIndexOf('http'));
+                }
 
-                const res = await fetch(source.link, {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 6000); 
+
+                const res = await fetch(cleanLink, {
                     signal: controller.signal,
                     headers: { 
                         'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
@@ -78,7 +73,7 @@ export const ScraperAPI = {
 
                 // PDF Handler
                 const contentType = res.headers.get('content-type') || '';
-                if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
+                if (contentType.includes('application/pdf') || cleanLink.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
                     return this._formatResult(pdfData.text, source, "PDF Document", "n.d.");
@@ -90,9 +85,12 @@ export const ScraperAPI = {
 
             } catch (e) {
                 // FAIL SAFE: Use Snippet if blocked/failed
+                // Fallback to empty string if snippet is undefined (Debug Mode fix)
+                const safeSnippet = source.snippet || "No preview available.";
+                
                 return {
                     ...source,
-                    content: `[Summary]: ${source.snippet} (Full content unavailable)`,
+                    content: `[Summary]: ${safeSnippet} (Full content unavailable)`,
                     meta: { author: "Unknown", published: "n.d.", siteName: "Unknown" }
                 };
             }
@@ -106,37 +104,38 @@ export const ScraperAPI = {
         const $ = cheerio.load(html);
         
         // 1. Clean Garbage
-        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup, .menu').remove();
+        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup, .menu, #cookie-banner').remove();
 
         // 2. Extract Text
         const rawText = $('body').text().replace(/\s+/g, ' ').trim();
 
         // 3. Metadata Extraction (Meta Tags + Regex Fallback)
         let author = $('meta[name="author"]').attr('content') || 
-                     $('meta[property="og:site_name"]').attr('content');
+                     $('meta[property="og:site_name"]').attr('content') ||
+                     $('a[rel="author"]').first().text();
         
         let date = $('meta[property="article:published_time"]').attr('content') || 
                    $('time').first().attr('datetime');
 
-        // If Meta tags failed, check the text content using Regex (Brookings fix)
-        if (!author || author === "Unknown" || !date || date === "n.d.") {
-            const textMeta = extractTextMetadata(rawText.substring(0, 1000));
-            if (!author || author === "Unknown") author = textMeta.author || "Unknown";
-            if (!date || date === "n.d.") date = textMeta.date || "n.d.";
+        // Regex Fallback
+        if (!author || author.length < 3 || author === "Unknown") {
+            const textMeta = extractTextMetadata(rawText.substring(0, 1500));
+            if (textMeta.author) author = textMeta.author;
+            if (!date && textMeta.date) date = textMeta.date;
         }
 
-        // 4. Smart Chunking Strategy
+        // 4. Smart Chunking (1000 Start + 2x 250 Mid)
         const len = rawText.length;
         
         // Chunk A: Intro (Metadata heavy) - 1000 chars
         let finalContent = getSmartChunk(rawText, 0, 1000);
 
         if (len > 3000) {
-            // Chunk B: 33% mark - 250 chars
+            // Chunk B: 33% mark
             const p1 = Math.floor(len * 0.33);
             finalContent += `\n... [Section 2] ...\n${getSmartChunk(rawText, p1, 250)}`;
 
-            // Chunk C: 66% mark - 250 chars
+            // Chunk C: 66% mark
             const p2 = Math.floor(len * 0.66);
             finalContent += `\n... [Section 3] ...\n${getSmartChunk(rawText, p2, 250)}`;
         }
@@ -152,9 +151,7 @@ export const ScraperAPI = {
         };
     },
 
-    // PDF Helper
     _formatResult(rawText, source, author, date) {
-        // Reuse the same smart chunking for PDFs
         const safeText = rawText.replace(/\s+/g, ' ').trim();
         let finalContent = getSmartChunk(safeText, 0, 1000);
         
