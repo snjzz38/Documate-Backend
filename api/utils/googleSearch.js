@@ -1,5 +1,6 @@
 // api/utils/googleSearch.js
 export const GoogleSearchAPI = {
+    // Block social media and non-academic noise
     BLOCKLIST: " -filetype:pdf -site:instagram.com -site:facebook.com -site:tiktok.com -site:twitter.com -site:pinterest.com -site:reddit.com -site:quora.com -site:wikipedia.org -site:youtube.com",
     BANNED_DOMAINS: ['instagram', 'facebook', 'tiktok', 'twitter', 'x.com', 'pinterest', 'reddit', 'quora', 'youtube', 'vimeo', 'linkedin'],
 
@@ -9,7 +10,7 @@ export const GoogleSearchAPI = {
         const cleanQuery = query.split(/\s+/).slice(0, 8).join(' '); 
         const finalQuery = `${cleanQuery} ${this.BLOCKLIST}`;
         
-        // Fetch 2 pages (20 results) to ensure we have enough after filtering
+        // Fetch 2 pages (20 results) to ensure we have enough after deduplication
         const [page1, page2] = await Promise.all([
             this._fetchPage(finalQuery, 1, apiKey, cx),
             this._fetchPage(finalQuery, 11, apiKey, cx)
@@ -50,7 +51,7 @@ export const GoogleSearchAPI = {
             } catch (e) {}
         });
         
-        // Return 10 sources (Fixed from 8)
+        // STRICTLY RETURN 10 SOURCES
         return unique.slice(0, 10);
     }
 };
