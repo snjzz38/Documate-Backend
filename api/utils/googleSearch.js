@@ -9,7 +9,7 @@ export const GoogleSearchAPI = {
         const cleanQuery = query.split(/\s+/).slice(0, 8).join(' '); 
         const finalQuery = `${cleanQuery} ${this.BLOCKLIST}`;
         
-        // Fetch 2 pages (20 results) to ensure we survive deduplication
+        // Fetch 2 pages (20 results) to ensure we have enough after filtering
         const [page1, page2] = await Promise.all([
             this._fetchPage(finalQuery, 1, apiKey, cx),
             this._fetchPage(finalQuery, 11, apiKey, cx)
@@ -50,7 +50,7 @@ export const GoogleSearchAPI = {
             } catch (e) {}
         });
         
-        // Return exactly 10 if we have them, or as many as we found
+        // Return 10 sources (Fixed from 8)
         return unique.slice(0, 10);
     }
 };
