@@ -1,3 +1,4 @@
+// api/utils/scraper.js
 import * as cheerio from 'cheerio';
 import PdfParse from 'pdf-parse/lib/pdf-parse.js';
 
@@ -8,11 +9,13 @@ const USER_AGENTS = [
 
 export const ScraperAPI = {
     async scrape(sources) {
-        const promises = sources.map(async (source) => {
+        // Limit to top 8 sources to save tokens
+        const targetSources = sources.slice(0, 8);
+
+        const promises = targetSources.map(async (source) => {
             try {
-                // 1. Try to fetch the full page
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000); 
+                const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout
 
                 const res = await fetch(source.link, {
                     signal: controller.signal,
@@ -25,7 +28,7 @@ export const ScraperAPI = {
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-                // 2. Handle PDF
+                // PDF Handler
                 const contentType = res.headers.get('content-type') || '';
                 if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
@@ -33,24 +36,16 @@ export const ScraperAPI = {
                     return this._formatResult(pdfData.text, source, "PDF Document", "n.d.");
                 }
 
-                // 3. Handle HTML
+                // HTML Handler
                 const html = await res.text();
                 return this._parseHtml(html, source);
 
             } catch (e) {
-                // --- CRITICAL FALLBACK ---
-                // If scrape fails, use the Google Search Snippet so the AI has SOMETHING to read.
-                console.warn(`Scrape failed for ${source.link}, using snippet.`);
+                // FALLBACK: Use Google Snippet if scrape fails
                 return {
                     ...source,
-                    title: source.title || "Source",
-                    // Combine snippet + title to give context
-                    content: `[Summary from Search Result]: ${source.snippet} \n\n (Full text could not be scraped, use this summary for citation).`,
-                    meta: { 
-                        author: "Unknown", 
-                        published: "n.d.", 
-                        siteName: new URL(source.link).hostname.replace('www.', '') 
-                    }
+                    content: `[Summary]: ${source.snippet || "No content available."}`,
+                    meta: { author: "Unknown", published: "n.d.", siteName: "Unknown" }
                 };
             }
         });
@@ -61,9 +56,9 @@ export const ScraperAPI = {
 
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
-        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup').remove();
+        // Aggressive Cleaning
+        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup, .menu, #comments').remove();
 
-        // Metadata Heuristics
         let author = $('meta[name="author"]').attr('content') || 
                      $('meta[property="og:site_name"]').attr('content') || 
                      "Unknown";
@@ -77,20 +72,22 @@ export const ScraperAPI = {
     },
 
     _formatResult(rawText, source, author, date) {
-        // Start + Mid + End Chunking
-        let finalContent = rawText.substring(0, 1500);
-        if (rawText.length > 3000) {
+        // SAFETY LIMIT: 1500 chars max per source
+        // This prevents Groq 400 errors caused by token overflow
+        let finalContent = rawText.substring(0, 1000); 
+        
+        if (rawText.length > 2000) {
+             // Add a middle chunk for better context
             const mid = Math.floor(rawText.length / 2);
-            finalContent += `\n... [Middle] ...\n${rawText.substring(mid, mid + 600)}`;
-            finalContent += `\n... [End] ...\n${rawText.substring(rawText.length - 600)}`;
+            finalContent += ` ... ${rawText.substring(mid, mid + 500)}`;
         }
 
         return {
             ...source,
-            content: finalContent || source.snippet, // Backup check
+            content: finalContent,
             meta: { 
-                author: author.trim(), 
-                published: date, 
+                author: author.trim().substring(0, 50), // Cap metadata length too
+                published: date.substring(0, 20),
                 siteName: new URL(source.link).hostname.replace('www.', '') 
             }
         };
