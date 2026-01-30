@@ -32,7 +32,7 @@ const FormatService = {
                 }
             }
             
-            // Pre-extract ALL authors from content - IMPROVED LOGIC
+            // Pre-extract ALL authors from content - FIXED REGEX
             let enhancedAuthors = [];
             let enhancedAuthor = s.meta.author;
             
@@ -44,23 +44,27 @@ const FormatService = {
             
             if (!s.meta.author || s.meta.author === "Unknown" || isSiteName) {
                 // Look for actual author names in content
-                const authorPatterns = [
-                    // Pattern for "Name and Name" format (like "Darrell M. West and John R. Allen")
-                    /([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/g,
-                    // Pattern for "By Name" or "Author: Name"
-                    /(?:By|Author(?:s)?:)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/gi,
-                    // Pattern for standalone proper names near the beginning
-                    /^.{0,500}([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/
-                ];
+                // Pattern for "Name and Name" format
+                const andPattern = /([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
+                const andMatch = s.content.match(andPattern);
                 
-                for (const pattern of authorPatterns) {
-                    const matches = [...s.content.matchAll(pattern)];
-                    if (matches.length > 0) {
-                        matches.forEach(match => {
-                            if (match[1]) enhancedAuthors.push(match[1].trim());
-                            if (match[2]) enhancedAuthors.push(match[2].trim());
-                        });
-                        if (enhancedAuthors.length > 0) break;
+                if (andMatch) {
+                    enhancedAuthors.push(andMatch[1].trim());
+                    enhancedAuthors.push(andMatch[2].trim());
+                } else {
+                    // Try other patterns
+                    const byPattern = /(?:By|Author(?:s)?:)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/i;
+                    const byMatch = s.content.match(byPattern);
+                    
+                    if (byMatch) {
+                        enhancedAuthors.push(byMatch[1].trim());
+                    } else {
+                        // Pattern for standalone proper names near the beginning
+                        const namePattern = /^.{0,500}([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/;
+                        const nameMatch = s.content.match(namePattern);
+                        if (nameMatch) {
+                            enhancedAuthors.push(nameMatch[1].trim());
+                        }
                     }
                 }
                 
