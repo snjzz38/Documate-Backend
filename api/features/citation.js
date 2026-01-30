@@ -8,12 +8,28 @@ const PromptBuilder = {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         const srcData = JSON.stringify(sources);
 
-        // --- Branch A: Quotes ---
+        // --- BRANCH A: QUOTES ---
         if (type === 'quotes') {
             return `TASK: Extract Quotes. CONTEXT: "${context.substring(0, 300)}..." DATA: ${srcData} RULES: Output strictly in order ID 1 to 10. Format: **[ID] Title** - URL \n > "Quote..."`;
         }
 
-        // --- Branch B: Citations ---
+        // --- BRANCH B: BIBLIOGRAPHY ONLY (Plain Text) ---
+        if (type === 'bibliography') {
+            return `
+                TASK: Create a Bibliography / Works Cited page.
+                STYLE: ${style}
+                SOURCE DATA: ${srcData}
+                
+                RULES:
+                1. Include ALL sources from the provided data.
+                2. Sort alphabetically by author/title.
+                3. Format strictly according to ${style}.
+                4. **MANDATORY**: End every entry with: "URL (Accessed ${today})".
+                5. **OUTPUT**: Return a clean PLAIN TEXT list. Do NOT return JSON. Do NOT use markdown code blocks.
+            `;
+        }
+
+        // --- BRANCH C: CITATION INSERTION (Strict JSON) ---
         return `
             TASK: Insert citations into the text.
             STYLE: ${style} (Prefer Footnotes/Chicago style)
@@ -24,7 +40,7 @@ const PromptBuilder = {
             1. **MANDATORY**: Cite every factual claim.
             2. If Author is missing, use the Publisher. If Date is missing, use "n.d.".
             3. **FORMATTING**: In "formatted_citations", the value MUST be the full bibliographic entry ending with "URL (Accessed ${today})".
-            4. **STRICT JSON**: Do not include markdown \`\`\`json tags. Do not explain your logic. Return ONLY the JSON object.
+            4. **STRICT JSON**: Do not include markdown \`\`\`json tags. Return ONLY the JSON object.
             
             JSON STRUCTURE:
             {
@@ -46,7 +62,7 @@ const TextProcessor = {
         let usedSourceIds = new Set();
         let footnotesList = [];
 
-        // 1. Tokenize for Fuzzy Matching
+        // 1. Tokenize
         const tokens = [];
         const tokenRegex = /[a-z0-9]+/gi;
         let match;
@@ -62,7 +78,6 @@ const TextProcessor = {
                 if (!anchorWords) return null;
                 
                 let bestIndex = -1;
-                // Sliding window search
                 for (let i = 0; i <= tokens.length - anchorWords.length; i++) {
                     let matchFound = true;
                     for (let j = 0; j < anchorWords.length; j++) {
@@ -73,7 +88,7 @@ const TextProcessor = {
                 return bestIndex !== -1 ? { ...item, insertIndex: bestIndex } : null;
             })
             .filter(Boolean)
-            .sort((a, b) => b.insertIndex - a.insertIndex); // Sort descending to prevent offset issues
+            .sort((a, b) => b.insertIndex - a.insertIndex);
 
         // 3. Apply Insertions
         validInsertions.forEach(item => {
@@ -88,7 +103,6 @@ const TextProcessor = {
                 const s = { '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹' };
                 const numStr = footnoteCounter.toString();
                 insertContent = numStr.split('').map(d => s[d]||'').join('');
-                
                 footnotesList.push(`${footnoteCounter}. ${citationString}`);
                 footnoteCounter++;
             } else {
@@ -97,7 +111,7 @@ const TextProcessor = {
             resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
         });
 
-        // 4. Build Footer (Clean Bibliography)
+        // 4. Build Footer
         let footer = "";
         
         if (outputType === 'footnotes') {
@@ -111,13 +125,12 @@ const TextProcessor = {
             });
         }
 
-        // 5. Unused Sources (Clean Format, No Bullets)
         if (usedSourceIds.size < sources.length) {
             footer += "\n\n### Further Reading\n";
             sources.forEach(s => {
                 if (!usedSourceIds.has(s.id)) {
                     const cit = formattedMap[s.id] || `${s.title}. ${s.link}`;
-                    footer += `${cit}\n\n`; // Plain text, double spaced
+                    footer += `${cit}\n\n`;
                 }
             });
         }
@@ -138,37 +151,42 @@ export default async function handler(req, res) {
         const SEARCH_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
 
-        // Quotes Mode
+        // --- 1. QUOTES MODE ---
         if (preLoadedSources?.length > 0) {
             const prompt = PromptBuilder.build('quotes', null, context, preLoadedSources);
             const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
             return res.status(200).json({ success: true, text: result });
         }
 
-        // Citation Mode
+        // --- 2. SEARCH & SCRAPE ---
         const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX);
         const richSources = await ScraperAPI.scrape(rawSources);
         
+        // --- 3. GENERATE ---
         const prompt = PromptBuilder.build(outputType, style, context, richSources);
-        const isJson = outputType !== 'bibliography';
+        
+        // Logic: Only use JSON Mode if we are doing In-text or Footnotes
+        const isJson = (outputType !== 'bibliography');
         
         const aiResponse = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, isJson);
 
         let finalOutput = aiResponse;
-        
-        if (isJson) {
+
+        // --- 4. FORMAT RESPONSE ---
+        if (outputType === 'bibliography') {
+            // Cleanup: Sometimes AI puts markdown code blocks even when asked not to
+            finalOutput = aiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        } 
+        else {
+            // Citation Insertion Logic
             try {
-                // ROBUST JSON EXTRACTION
-                // Find the first '{' and last '}' to ignore any AI preamble
                 const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
                 const jsonStr = jsonMatch ? jsonMatch[0] : aiResponse;
-                
                 const data = JSON.parse(jsonStr);
                 finalOutput = TextProcessor.merge(context, data.insertions, richSources, data.formatted_citations, outputType);
             } catch (e) {
-                console.error("JSON Parse Error:", e.message);
-                console.log("Raw AI Response:", aiResponse);
-                // Fallback: Return raw response but cleaner
+                console.error("JSON Parse Error", e);
+                // Fallback: Just return the raw text if JSON fails
                 finalOutput = aiResponse.replace(/```json/g, '').replace(/```/g, '');
             }
         }
