@@ -1,4 +1,3 @@
-// api/debug/scrape.js
 import { ScraperAPI } from '../utils/scraper.js';
 
 export default async function handler(req, res) {
@@ -12,8 +11,13 @@ export default async function handler(req, res) {
         const { url } = req.body;
         if (!url) throw new Error("URL is required");
 
-        // Scrape the single URL
-        const sources = [{ title: "Debug", link: url }];
+        // FIX: Add a dummy snippet so the scraper doesn't print "undefined" on failure
+        const sources = [{ 
+            title: "Debug Preview", 
+            link: url, 
+            snippet: "Debug Mode - Content fetch attempted." 
+        }];
+        
         const result = await ScraperAPI.scrape(sources);
 
         return res.status(200).json({ success: true, data: result[0] });
