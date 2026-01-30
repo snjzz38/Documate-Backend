@@ -10,14 +10,13 @@ const FormatService = {
     buildPrompt(type, style, context, sources) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
-        // Context builder: Included more text characters (600) to ensure dates are captured
+        // Context builder
         const sourceContext = sources.map(s => 
-            `[ID:${s.id}] 
-             TITLE: ${s.title}
+            `[ID:${s.id}] TITLE: ${s.title}
              URL: ${s.link}
-             META_AUTHOR: ${s.meta.author} 
-             META_DATE: ${s.meta.published}
-             TEXT_CONTENT: ${s.content.substring(0, 600).replace(/\n/g, ' ')}...`
+             DETECTED_AUTHOR: ${s.meta.author} 
+             DETECTED_DATE: ${s.meta.published}
+             TEXT_SNIPPET: ${s.content.substring(0, 400).replace(/\n/g, ' ')}...`
         ).join('\n\n');
 
         // --- 1. QUOTES ---
@@ -31,14 +30,26 @@ const FormatService = {
 
         // --- 2. CITATIONS ---
         
-        // Define strict style templates
+        // Define strict style templates to prevent MLA/Chicago mix-ups
         let styleRules = "";
         if (style.toLowerCase().includes("chicago")) {
-            styleRules = `STYLE: Chicago Manual of Style (Notes & Bibliography). Format: Author. "Title." Publisher, Date. URL.`;
+            styleRules = `
+                STYLE: Chicago Manual of Style (Notes & Bibliography).
+                BIBLIOGRAPHY FORMAT: Author Last, First. "Title of Article." *Publisher/Site Name*, Publication Date. URL.
+                IN-TEXT FORMAT: (Author, Year) or (Author, n.d.) if date unknown.
+            `;
         } else if (style.toLowerCase().includes("mla")) {
-            styleRules = `STYLE: MLA 9th Edition. Format: Author. "Title." *Container*, Date, URL.`;
+            styleRules = `
+                STYLE: MLA 9th Edition.
+                BIBLIOGRAPHY FORMAT: Author Last, First. "Title of Article." *Container Title*, Publication Date, URL.
+                IN-TEXT FORMAT: (Author) or (Author, Year) -- PREFER (Author, Year) for clarity.
+            `;
         } else if (style.toLowerCase().includes("apa")) {
-            styleRules = `STYLE: APA 7th Edition. Format: Author. (Year). Title. Site. URL.`;
+            styleRules = `
+                STYLE: APA 7th Edition.
+                BIBLIOGRAPHY FORMAT: Author, A. A. (Year, Month Day). Title of article. *Site Name*. URL
+                IN-TEXT FORMAT: (Author, Year).
+            `;
         }
 
         return `
@@ -50,28 +61,26 @@ const FormatService = {
             
             TEXT: "${context}"
             
-            CRITICAL METADATA RULES (READ CAREFULLY):
-            1. **TRUST TEXT OVER META**: The "META_DATE" often says "n.d." incorrectly.
-               - LOOK at the "TEXT_CONTENT".
-               - IF text says: "Darrell M. West... April 24, 2018" -> The Date is **2018**.
-               - IF text says: "Published Jan 12, 2024" -> The Date is **2024**.
-               - ONLY use "n.d." if the text content truly has no date.
+            CRITICAL INSTRUCTIONS:
+            1. **IN-TEXT CITATION**: The "citation_text" field MUST contain the Date.
+               - CORRECT: (Smith, 2024)
+               - CORRECT: (Smith, n.d.)
+               - WRONG: (Smith)
             
-            2. **AUTHOR EXTRACTION**:
-               - IF "META_AUTHOR" is "Unknown" or the Site Name, check "TEXT_CONTENT" for "By [Name]".
-               - Example: Text "By Darrell M. West" -> Author is "West, Darrell M."
+            2. **METADATA FORENSICS**:
+               - If DETECTED_AUTHOR is "Unknown", look at the TEXT_SNIPPET. If it says "By John Doe", use "John Doe".
+               - If DETECTED_DATE is "n.d.", look at TEXT_SNIPPET for a year (e.g., 2024, 2023). Use that year.
             
-            OUTPUT RULES:
-            1. **IN-TEXT**: Use (Author, Year). Example: (West, 2018).
-            2. **FORMATTED CITATIONS**: Full bibliographic entry ending with "URL (Accessed ${today})".
-            3. **STRICT JSON**: Return ONLY valid JSON.
+            3. **FORMATTED CITATIONS**:
+               - The value in "formatted_citations" must be the FULL bibliographic entry.
+               - **MANDATORY**: End every entry with: "URL (Accessed ${today})".
             
-            JSON STRUCTURE:
+            OUTPUT: Return strictly JSON.
             {
               "insertions": [
-                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(West, 2018)" }
+                { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Smith, 2024)" }
               ],
-              "formatted_citations": { "1": "West, Darrell M. \"How AI transforms the world.\" Brookings, 2018. https://brookings.edu... (Accessed ${today})" }
+              "formatted_citations": { "1": "Smith, John. \"Title.\" Publisher, 2024. URL (Accessed ${today})" }
             }
         `;
     }
