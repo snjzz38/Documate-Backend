@@ -6,61 +6,36 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 ];
 
-/**
- * UTILITY: Smart Sentence Extractor
- * Grabs a chunk of text but extends it until it finds a sentence ending.
- */
 function getSmartChunk(fullText, startIndex, targetLength) {
     if (startIndex >= fullText.length) return "";
-
     let chunk = fullText.substr(startIndex, targetLength);
     const buffer = fullText.substr(startIndex + targetLength, 500);
-    
-    // Look for a letter/quote followed by a dot
     const match = buffer.match(/([a-zA-Z"”])\./);
-
-    if (match) {
-        return chunk + buffer.substring(0, match.index + 2);
-    }
+    if (match) return chunk + buffer.substring(0, match.index + 2);
     return chunk + (chunk.endsWith('.') ? '' : '...');
 }
 
-/**
- * UTILITY: Metadata Regex Fallback
- * Scans raw text for "By [Name]" and "Date".
- */
 function extractTextMetadata(text) {
     let author = null;
     let date = null;
-
-    // Improved Author Regex: Matches "By Darrell M. West" or "By John Doe"
-    // Allows optional middle initial (A.)
     const authorMatch = text.match(/(?:By|Written by)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s+|\s+)[A-Z][a-z]+)/);
     if (authorMatch) author = authorMatch[1];
-
-    // Date Regex: Matches "April 24, 2018" or "Jan. 12, 2024"
     const dateMatch = text.match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
     if (dateMatch) date = dateMatch[1];
-
     return { author, date };
 }
 
 export const ScraperAPI = {
     async scrape(sources) {
-        const targetSources = sources.slice(0, 8);
+        // Process up to 10 sources
+        const targetSources = sources.slice(0, 10);
 
         const promises = targetSources.map(async (source) => {
             try {
-                // Sanitize URL (Fixes the double URL issue)
-                let cleanLink = source.link.trim();
-                if (cleanLink.includes('http') && cleanLink.lastIndexOf('http') > 0) {
-                    cleanLink = cleanLink.substring(cleanLink.lastIndexOf('http'));
-                }
-
                 const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 6000); 
+                const timeout = setTimeout(() => controller.abort(), 5000); 
 
-                const res = await fetch(cleanLink, {
+                const res = await fetch(source.link, {
                     signal: controller.signal,
                     headers: { 
                         'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
@@ -71,27 +46,21 @@ export const ScraperAPI = {
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-                // PDF Handler
                 const contentType = res.headers.get('content-type') || '';
-                if (contentType.includes('application/pdf') || cleanLink.endsWith('.pdf')) {
+                if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
                     return this._formatResult(pdfData.text, source, "PDF Document", "n.d.");
                 }
 
-                // HTML Handler
                 const html = await res.text();
                 return this._parseHtml(html, source);
 
             } catch (e) {
-                // FAIL SAFE: Use Snippet if blocked/failed
-                // Fallback to empty string if snippet is undefined (Debug Mode fix)
-                const safeSnippet = source.snippet || "No preview available.";
-                
                 return {
                     ...source,
-                    content: `[Summary]: ${safeSnippet} (Full content unavailable)`,
-                    meta: { author: "Unknown", published: "n.d.", siteName: "Unknown" }
+                    content: `[Summary]: ${source.snippet || "No content available."}`,
+                    meta: { author: "Unknown", published: "n.d.", siteName: new URL(source.link).hostname }
                 };
             }
         });
@@ -103,41 +72,39 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // 1. Clean Garbage
-        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup, .menu, #cookie-banner').remove();
+        // 1. aggressive Junk Removal
+        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup, .menu, noscript').remove();
+        $('[aria-hidden="true"]').remove();
+        $('div[style*="display:none"]').remove();
+        
+        // Remove "Enable JavaScript" warnings specifically
+        $('div, p, span').filter((i, el) => {
+            const t = $(el).text().toLowerCase();
+            return t.includes('please enable javascript') || t.includes('browser does not support');
+        }).remove();
 
-        // 2. Extract Text
         const rawText = $('body').text().replace(/\s+/g, ' ').trim();
 
-        // 3. Metadata Extraction (Meta Tags + Regex Fallback)
+        // 2. Metadata Extraction
         let author = $('meta[name="author"]').attr('content') || 
-                     $('meta[property="og:site_name"]').attr('content') ||
-                     $('a[rel="author"]').first().text();
+                     $('meta[property="og:site_name"]').attr('content');
         
         let date = $('meta[property="article:published_time"]').attr('content') || 
                    $('time').first().attr('datetime');
 
-        // Regex Fallback
-        if (!author || author.length < 3 || author === "Unknown") {
-            const textMeta = extractTextMetadata(rawText.substring(0, 1500));
-            if (textMeta.author) author = textMeta.author;
-            if (!date && textMeta.date) date = textMeta.date;
+        if (!author || author === "Unknown" || !date || date === "n.d.") {
+            const textMeta = extractTextMetadata(rawText.substring(0, 1000));
+            if (!author || author === "Unknown") author = textMeta.author || "Unknown";
+            if (!date || date === "n.d.") date = textMeta.date || "n.d.";
         }
 
-        // 4. Smart Chunking (1000 Start + 2x 250 Mid)
+        // 3. Smart Chunking
         const len = rawText.length;
-        
-        // Chunk A: Intro (Metadata heavy) - 1000 chars
-        let finalContent = getSmartChunk(rawText, 0, 1000);
+        let finalContent = getSmartChunk(rawText, 0, 1000); // Intro
 
         if (len > 3000) {
-            // Chunk B: 33% mark
-            const p1 = Math.floor(len * 0.33);
-            finalContent += `\n... [Section 2] ...\n${getSmartChunk(rawText, p1, 250)}`;
-
-            // Chunk C: 66% mark
-            const p2 = Math.floor(len * 0.66);
-            finalContent += `\n... [Section 3] ...\n${getSmartChunk(rawText, p2, 250)}`;
+            finalContent += `\n... ${getSmartChunk(rawText, Math.floor(len * 0.33), 300)}`;
+            finalContent += `\n... ${getSmartChunk(rawText, Math.floor(len * 0.66), 300)}`;
         }
 
         return {
@@ -156,8 +123,8 @@ export const ScraperAPI = {
         let finalContent = getSmartChunk(safeText, 0, 1000);
         
         if (safeText.length > 3000) {
-             const p1 = Math.floor(safeText.length * 0.33);
-             finalContent += `\n... [Mid] ...\n${getSmartChunk(safeText, p1, 250)}`;
+             const p1 = Math.floor(safeText.length * 0.5);
+             finalContent += `\n... ${getSmartChunk(safeText, p1, 500)}`;
         }
 
         return {
