@@ -163,6 +163,35 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
         
         let styleRules = "";
         let styleExamples = "";
+        let citationStrategy = "";
+        
+        // Different strategy for footnotes vs in-text
+        if (type === 'footnotes') {
+            citationStrategy = `
+                FOOTNOTE CITATION STRATEGY:
+                - You can cite the SAME source MULTIPLE times throughout the text
+                - Each time you cite a source, it gets a NEW superscript number
+                - Each citation appears as a separate numbered footnote at the bottom
+                - Example: If you cite Source ID:1 three times, you'll have:
+                  * First citation: ¹ (footnote 1 lists the source)
+                  * Second citation: ³ (footnote 3 lists the SAME source again)
+                  * Third citation: ⁶ (footnote 6 lists the SAME source again)
+                - This means your insertions array can have MULTIPLE entries with the same source_id
+                - This is ENCOURAGED for important sources - cite them 1-3 times in different locations
+            `;
+        } else {
+            citationStrategy = `
+                IN-TEXT CITATION STRATEGY:
+                - You can cite the SAME source MULTIPLE times throughout the text
+                - The citation text stays the same each time (e.g., "(West and Allen 2018)")
+                - Example: If Source ID:1 is highly relevant, you might cite it 2-3 times:
+                  * "Climate change is urgent (West and Allen 2018). ... other text ... This requires action (West and Allen 2018)."
+                - This means your insertions array can have MULTIPLE entries with the same source_id
+                - Each insertion just needs a different anchor point in the text
+                - The same source only appears ONCE in the formatted_citations/bibliography
+                - This is ENCOURAGED for authoritative sources - cite them 1-3 times in different sections
+            `;
+        }
         
         if (style.toLowerCase().includes("chicago")) {
             styleRules = `
@@ -207,11 +236,14 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
                 - citation_text: "(West and Allen 2018)"
                 - formatted_citations: "West, Darrell M., and John R. Allen. \\"How Artificial Intelligence Is Transforming the World.\\" *Brookings*. April 24, 2018. https://www.brookings.edu/articles/how-artificial-intelligence-is-transforming-the-world/."
                 
-                Example 3 (Multiple Authors):
-                - ALL_AUTHORS: "Adib Bin Rashid | Ashfakul Karim Kausik | Another Author"
-                - DETECTED_DATE: "2024"
-                - citation_text: "(Rashid et al. 2024)"
-                - formatted_citations: "Rashid, Adib Bin, et al. \\"AI Revolutionizing Industries Worldwide.\\" *ScienceDirect*. 2024. https://www.sciencedirect.com/..."
+                Example 3 (Same Source Cited Multiple Times):
+                - This source is cited 3 times in different locations
+                - insertions: [
+                    { "anchor": "first relevant phrase", "source_id": 1, "citation_text": "(West and Allen 2018)" },
+                    { "anchor": "second relevant phrase", "source_id": 1, "citation_text": "(West and Allen 2018)" },
+                    { "anchor": "third relevant phrase", "source_id": 1, "citation_text": "(West and Allen 2018)" }
+                  ]
+                - But formatted_citations only has ONE entry for source_id 1
             `;
         } else if (style.toLowerCase().includes("mla")) {
             styleRules = `
@@ -246,6 +278,7 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
         return `
             TASK: Insert citations into the text using ${style} format.
             ${styleRules}
+            ${citationStrategy}
             ${styleExamples}
             
             SOURCE DATA (${sources.length} sources available):
@@ -255,23 +288,22 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             
             CRITICAL INSTRUCTIONS:
             
-            0. **MAXIMIZE SOURCE USAGE**:
+            0. **CITATION DISTRIBUTION & REUSE**:
                - You have ${sources.length} sources available
-               - Try to use AT LEAST ${Math.max(4, Math.floor(sources.length * 0.6))} sources
-               - Look for opportunities to cite multiple sources in the text
-               - Don't leave most sources unused - they were provided for a reason
-               - Find different points in the text that can be supported by different sources
+               - Try to use AT LEAST ${Math.max(4, Math.floor(sources.length * 0.6))} DIFFERENT sources
+               - For particularly authoritative or relevant sources, cite them MULTIPLE times (1-3 insertions per source)
+               - Spread citations throughout the text - don't cluster them all in one section
+               - Example with 10 sources: Use 6-7 different sources, citing the most important ones 2-3 times each
+               - This gives you ~10-15 total citation insertions even though you're only using 6-7 unique sources
             
             1. **MULTIPLE AUTHORS - READ ALL_AUTHORS FIELD**:
                - The ALL_AUTHORS field shows ALL authors separated by " | "
                - Count the separators: "Author1 | Author2" = 2 authors (NOT 1!)
                - You MUST include ALL authors listed in ALL_AUTHORS field
-               - WRONG: Using only first author when multiple exist
                - EXAMPLES:
                  * ALL_AUTHORS: "Adam Bohr | Kaveh Memarzadeh" → 2 AUTHORS → (Bohr and Memarzadeh 2020)
                  * ALL_AUTHORS: "Darrell M. West | John R. Allen" → 2 AUTHORS → (West and Allen 2018)
                  * ALL_AUTHORS: "Adib Bin Rashid | Ashfakul Karim Kausik | Third Author" → 3+ AUTHORS → (Rashid et al. 2024)
-                 * ALL_AUTHORS: "Adam Bohr" → 1 AUTHOR → (Bohr 2020)
             
             2. **IN-TEXT CITATION FORMAT**:
                - Chicago: NO COMMA between author and year: (West and Allen 2018) NOT (West and Allen, 2018)
@@ -283,7 +315,7 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
                - Follow the EXACT format shown in examples
                - Include ALL author full names (unless 3+, then use et al.)
                - Check DOI field - if DOI exists, use https://doi.org/DOI instead of URL
-               - Use proper punctuation and italics
+               - Each source appears ONLY ONCE in formatted_citations (even if cited multiple times in text)
             
             4. **METADATA EXTRACTION**:
                - Count authors in ALL_AUTHORS by counting "|" separators
@@ -298,24 +330,28 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             OUTPUT FORMAT: Return strictly valid JSON.
             {
               "insertions": [
-                { "anchor": "exact phrase", "source_id": 1, "citation_text": "(Authors Year)" },
-                { "anchor": "another phrase", "source_id": 2, "citation_text": "(Authors Year)" },
-                ...aim for at least ${Math.max(4, Math.floor(sources.length * 0.6))} insertions
+                { "anchor": "phrase 1", "source_id": 1, "citation_text": "(Authors Year)" },
+                { "anchor": "phrase 2", "source_id": 2, "citation_text": "(Authors Year)" },
+                { "anchor": "phrase 3", "source_id": 1, "citation_text": "(Authors Year)" },  // Same source cited again!
+                { "anchor": "phrase 4", "source_id": 3, "citation_text": "(Authors Year)" },
+                ...aim for ${Math.floor(sources.length * 1.2)} total insertions by citing key sources multiple times
               ],
               "formatted_citations": { 
-                "1": "Complete Chicago bibliography entry.",
-                "2": "Complete Chicago bibliography entry.",
+                "1": "Complete bibliography entry for source 1 (appears once even if cited multiple times)",
+                "2": "Complete bibliography entry for source 2",
+                "3": "Complete bibliography entry for source 3",
                 ...
               }
             }
             
-            VERIFY: Before outputting, check that:
+            VERIFY: 
             1. ALL authors from ALL_AUTHORS are included
-            2. You're using most of the available sources (not leaving them all unused)
+            2. You're using most available sources (60%+)
+            3. Important sources are cited 2-3 times in different locations
+            4. Each source appears ONCE in formatted_citations regardless of citation frequency
         `;
     }
 };
-
 // ==========================================================================
 // MODULE: TEXT PROCESSOR (The Pipeline)
 // ==========================================================================
