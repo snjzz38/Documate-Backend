@@ -7,55 +7,73 @@ const USER_AGENTS = [
 ];
 
 /**
- * HELPER: Extract metadata using JSON-LD (Schema.org) & Meta Tags.
- * JSON-LD is the gold standard for modern news sites.
+ * HELPER: Smart Chunk Extractor
+ * Grabs text starting at 'index' and extends until it finds a sentence ending.
+ * Looks for: Period/Question/Exclamation + Space/Quote.
  */
-function extractMetadata($) {
+function getSmartChunk(fullText, startIndex, targetLength) {
+    if (startIndex >= fullText.length) return "";
+    
+    // 1. Cut the rough slice
+    let chunk = fullText.substr(startIndex, targetLength);
+    
+    // 2. Scan the NEXT 500 chars to find a clean stop
+    const buffer = fullText.substr(startIndex + targetLength, 500);
+    
+    // Regex: Match [Letter/Digit/Quote] followed immediately by [.?!] and then [Space or End of String]
+    const match = buffer.match(/([a-zA-Z0-9"”])([.?!])(?:\s|$)/);
+
+    if (match) {
+        // match.index is where the char before punctuation starts
+        // match[0].length handles the punctuation + space
+        // We want to cut right after the punctuation
+        const cutIndex = match.index + 2; 
+        return chunk + buffer.substring(0, cutIndex);
+    }
+
+    // Fallback: If no sentence end found, just add ellipsis
+    return chunk + "...";
+}
+
+/**
+ * HELPER: Metadata Extraction (JSON-LD > Meta Tags > Text Regex)
+ */
+function extractMetadata($, rawText) {
     let author = null;
     let date = null;
 
-    // 1. Try JSON-LD (Schema.org) - Best for Brookings/News sites
+    // 1. JSON-LD (Best for News/Brookings)
     try {
         const jsonLd = $('script[type="application/ld+json"]').html();
         if (jsonLd) {
             const data = JSON.parse(jsonLd);
             const obj = Array.isArray(data) ? data[0] : data;
-            
-            // Extract Author
             if (obj.author) {
-                if (typeof obj.author === 'string') author = obj.author;
-                else if (Array.isArray(obj.author)) author = obj.author[0]?.name;
-                else if (obj.author.name) author = obj.author.name;
+                author = typeof obj.author === 'string' ? obj.author : (obj.author.name || obj.author[0]?.name);
             }
-            
-            // Extract Date
-            date = obj.datePublished || obj.dateCreated || obj.uploadDate;
+            date = obj.datePublished || obj.dateCreated;
         }
-    } catch (e) { /* Ignore JSON parse errors */ }
+    } catch (e) {}
 
     // 2. Meta Tags (Fallback)
     if (!author) {
         author = $('meta[name="author"]').attr('content') || 
                  $('meta[property="og:site_name"]').attr('content') ||
-                 $('a[class*="author"]').first().text();
+                 $('a[rel="author"]').first().text();
     }
-    
     if (!date) {
         date = $('meta[property="article:published_time"]').attr('content') || 
-               $('meta[name="date"]').attr('content') ||
                $('time').first().attr('datetime');
     }
 
-    // 3. Text Scraping (Last Resort)
+    // 3. Text Forensics (Last Resort)
     if (!date || date === "n.d.") {
-        // Look for "April 24, 2018" pattern in the first 1000 chars of body
-        const bodyStart = $('body').text().substring(0, 1500);
-        const dateMatch = bodyStart.match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
+        const dateMatch = rawText.substring(0, 1500).match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
         if (dateMatch) date = dateMatch[1];
     }
 
     return { 
-        author: author || "Unknown", 
+        author: author ? author.trim() : "Unknown", 
         date: date || "n.d." 
     };
 }
@@ -80,12 +98,13 @@ export const ScraperAPI = {
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-                // PDF Handling
                 const contentType = res.headers.get('content-type') || '';
+                
+                // PDF Handling
                 if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
-                    return this._formatPdfResult(pdfData.text, source);
+                    return this._formatResult(pdfData.text, source);
                 }
 
                 // HTML Handling
@@ -108,99 +127,60 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // 1. Extract Metadata FIRST (before cleaning)
-        const meta = extractMetadata($);
-
-        // 2. Aggressive Noise Removal
-        // Remove Standard Garbage
-        $('script, style, nav, footer, iframe, svg, header, form, button').remove();
-        $('.ad, .popup, .menu, .share, .social, .subscribe, .cookie, .banner, .hidden').remove();
-        $('[aria-hidden="true"]').remove();
+        // 1. Remove Junk (Nav, Footer, Scripts)
+        $('script, style, nav, footer, iframe, svg, header, aside, form, button, noscript').remove();
+        $('.ad, .popup, .menu, .share, .social, .subscribe, .cookie, .banner, .related, .sidebar').remove();
         
-        // --- SPECIFIC FIX: Remove "Related Content" sections ---
-        // Brookings and others use classes like 'related-content', 'related-stories', 'sidebar'
-        $('.related, .related-content, .related-stories, .related-posts').remove();
-        $('.sidebar, .widget, .module, .recommends, .read-more').remove();
-        $('#related, #sidebar, #comments').remove();
-        
-        // Remove lists of links that look like navigation/related items
-        $('ul[class*="menu"], ul[class*="related"]').remove();
+        // 2. Get Raw Text & Cleanup Whitespace
+        const rawText = $('body').text().replace(/\s+/g, ' ').trim();
 
-        // 3. Targeted Content Selection
-        // Try to find the specific "Article Body" before falling back to generic tags
-        let contentObj = $('.post-body, .article-body, .entry-content, .story-body, [itemprop="articleBody"]');
-        
-        // If no specific class found, try generic semantic tags
-        if (contentObj.length === 0) contentObj = $('article');
-        if (contentObj.length === 0) contentObj = $('[role="main"]');
-        if (contentObj.length === 0) contentObj = $('body'); 
+        // 3. Extract Metadata
+        const meta = extractMetadata($, rawText);
 
-        // 4. Semantic Paragraph Extraction
-        // Only grab <p> tags to avoid getting lists of names/links
-        const paragraphs = [];
-        contentObj.find('p').each((i, el) => {
-            const text = $(el).text().trim();
-            // Filter out short noise (e.g., "Read more", "By Name") and very long link lists
-            if (text.length > 60 && !text.toLowerCase().startsWith("copyright")) {
-                paragraphs.push(text);
-            }
-        });
-
-        // 5. Content Assembly
-        let finalContent = "";
-
-        if (paragraphs.length > 0) {
-            // A. Intro: First 3 paragraphs (good for summary)
-            const intro = paragraphs.slice(0, 3).join('\n\n');
-            finalContent = intro;
-
-            // B. Random Sections: Pick 2 paragraphs from the middle/end
-            // We ensure we don't pick the intro paragraphs again
-            if (paragraphs.length > 6) {
-                const bodyParas = paragraphs.slice(3);
-                
-                if (bodyParas.length >= 2) {
-                    const idx1 = Math.floor(Math.random() * bodyParas.length);
-                    let idx2 = Math.floor(Math.random() * bodyParas.length);
-                    // Ensure distinct
-                    while (idx2 === idx1 && bodyParas.length > 1) {
-                        idx2 = Math.floor(Math.random() * bodyParas.length);
-                    }
-                    
-                    finalContent += `\n\n... [Section A] ...\n${bodyParas[idx1]}`;
-                    finalContent += `\n\n... [Section B] ...\n${bodyParas[idx2]}`;
-                }
-            }
-        } else {
-            // Fallback: Raw Text (if no <p> tags found)
-            const raw = $('body').text().replace(/\s+/g, ' ').trim();
-            finalContent = raw.substring(0, 1500);
-        }
-
-        return {
-            ...originalSource,
-            content: finalContent,
-            meta: { 
-                author: meta.author ? meta.author.trim() : "Unknown", 
-                published: meta.date ? meta.date.substring(0, 20) : "n.d.", 
-                siteName: new URL(originalSource.link).hostname.replace('www.', '') 
-            }
-        };
+        return this._formatResult(rawText, originalSource, meta);
     },
 
-    _formatPdfResult(rawText, source) {
-        const safeText = rawText.replace(/\s+/g, ' ').trim();
-        let finalContent = safeText.substring(0, 1000); 
+    _formatResult(rawText, source, metaOverride = null) {
+        const len = rawText.length;
         
-        if (safeText.length > 3000) {
-             const mid = Math.floor(safeText.length * 0.4);
-             finalContent += `\n... [PDF Excerpt] ...\n${safeText.substring(mid, mid + 600)}`;
+        // --- THE STRATEGY ---
+        // 1. Start: First 1000 chars (Intro/Summary)
+        let finalContent = getSmartChunk(rawText, 0, 1000);
+
+        if (len > 3000) {
+            const mid = Math.floor(len / 2);
+
+            // 2. Random Excerpt A: Somewhere between 1000 and Middle
+            // Range: 1000 to (Mid - 300)
+            const rangeA = mid - 1000 - 300;
+            if (rangeA > 0) {
+                const startA = 1000 + Math.floor(Math.random() * rangeA);
+                finalContent += `\n\n... [Excerpt A] ...\n${getSmartChunk(rawText, startA, 300)}`;
+            }
+
+            // 3. Random Excerpt B: Somewhere between Middle and End
+            // Range: Mid to (Len - 300)
+            const rangeB = len - mid - 300;
+            if (rangeB > 0) {
+                const startB = mid + Math.floor(Math.random() * rangeB);
+                finalContent += `\n\n... [Excerpt B] ...\n${getSmartChunk(rawText, startB, 300)}`;
+            }
         }
+
+        // Use override meta (from HTML scrape) or defaults (from PDF/Plain text)
+        const meta = metaOverride || { 
+            author: "PDF Document", 
+            date: "n.d." 
+        };
 
         return {
             ...source,
             content: finalContent,
-            meta: { author: "PDF Document", published: "n.d.", siteName: "PDF" }
+            meta: { 
+                author: meta.author, 
+                published: meta.date, 
+                siteName: new URL(source.link).hostname.replace('www.', '') 
+            }
         };
     }
 };
