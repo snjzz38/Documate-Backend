@@ -41,9 +41,7 @@ const FormatService = {
             );
             
             if (!s.meta.author || s.meta.author === "Unknown" || isSiteName) {
-                // Search for authors in content - look for multiple patterns
-                
-                // Pattern 1: "Name and Name" at start
+                // Search for authors in content
                 const andPattern = /^.{0,300}([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
                 const andMatch = s.content.match(andPattern);
                 
@@ -52,7 +50,6 @@ const FormatService = {
                     enhancedAuthors.push(andMatch[2].trim());
                 }
                 
-                // Pattern 2: Look for "By Name, Name" format
                 if (enhancedAuthors.length === 0) {
                     const byPattern = /By\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)(?:,?\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+))?/i;
                     const byMatch = s.content.match(byPattern);
@@ -76,7 +73,6 @@ const FormatService = {
                 } else if (enhancedAuthor.includes(', and ')) {
                     enhancedAuthors = enhancedAuthor.split(/, and |, /).map(a => a.trim());
                 } else if (enhancedAuthor.includes(',')) {
-                    // Try comma-separated
                     const parts = enhancedAuthor.split(',').map(a => a.trim());
                     if (parts.length === 2 && parts[0].split(' ').length >= 2 && parts[1].split(' ').length >= 2) {
                         enhancedAuthors = parts;
@@ -93,7 +89,7 @@ const FormatService = {
             const doiMatch = s.content.match(/doi\.org\/([^\s]+)|DOI:\s*([^\s]+)/i);
             if (doiMatch) {
                 doi = doiMatch[1] || doiMatch[2];
-                doi = doi.replace(/[.,;]+$/, ''); // Remove trailing punctuation
+                doi = doi.replace(/[.,;]+$/, '');
             }
             
             return `[ID:${s.id}]
@@ -117,7 +113,53 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             `;
         }
 
-        // --- 2. CITATIONS ---
+        // --- 2. BIBLIOGRAPHY ONLY MODE ---
+        if (type === 'bibliography') {
+            let bibStyleRules = "";
+            
+            if (style.toLowerCase().includes("chicago")) {
+                bibStyleRules = `
+                    STYLE: Chicago Manual of Style (17th Edition)
+                    FORMAT: LastName, FirstName. "Article Title." *Website Name*. Month Day, Year. URL or https://doi.org/DOI.
+                    - For 2 authors: LastName1, FirstName1, and FirstName2 LastName2.
+                    - For 3+ authors: LastName1, FirstName1, et al.
+                `;
+            } else if (style.toLowerCase().includes("mla")) {
+                bibStyleRules = `
+                    STYLE: MLA 9th Edition
+                    FORMAT: LastName, FirstName. "Article Title." *Container Title*, Date, URL.
+                    - For 2 authors: LastName1, FirstName1, and FirstName2 LastName2.
+                    - For 3+ authors: LastName1, FirstName1, et al.
+                `;
+            } else if (style.toLowerCase().includes("apa")) {
+                bibStyleRules = `
+                    STYLE: APA 7th Edition
+                    FORMAT: Author, A. A. (Year). Title of article. *Site Name*. URL
+                    - For 2 authors: Author1, A. A., & Author2, B. B.
+                    - For 3+ authors: List all authors
+                `;
+            }
+            
+            return `
+                TASK: Generate a bibliography for ALL ${sources.length} sources.
+                ${bibStyleRules}
+                
+                SOURCES:
+                ${sourceContext}
+                
+                INSTRUCTIONS:
+                - Create a properly formatted bibliography entry for EACH source (ID 1 through ${sources.length})
+                - Use ALL authors from ALL_AUTHORS field
+                - Include DOI if available (not "none")
+                - Format in alphabetical order by last name
+                - Output ONLY the bibliography entries, NO explanations or thinking
+                - Each entry on a new line, separated by blank line
+                
+                OUTPUT: Return ONLY the formatted bibliography entries, nothing else.
+            `;
+        }
+
+        // --- 3. IN-TEXT CITATIONS & FOOTNOTES ---
         
         let styleRules = "";
         let styleExamples = "";
@@ -206,12 +248,19 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             ${styleRules}
             ${styleExamples}
             
-            SOURCE DATA:
+            SOURCE DATA (${sources.length} sources available):
             ${sourceContext}
             
             TEXT TO CITE: "${context}"
             
             CRITICAL INSTRUCTIONS:
+            
+            0. **MAXIMIZE SOURCE USAGE**:
+               - You have ${sources.length} sources available
+               - Try to use AT LEAST ${Math.max(4, Math.floor(sources.length * 0.6))} sources
+               - Look for opportunities to cite multiple sources in the text
+               - Don't leave most sources unused - they were provided for a reason
+               - Find different points in the text that can be supported by different sources
             
             1. **MULTIPLE AUTHORS - READ ALL_AUTHORS FIELD**:
                - The ALL_AUTHORS field shows ALL authors separated by " | "
@@ -235,7 +284,6 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
                - Include ALL author full names (unless 3+, then use et al.)
                - Check DOI field - if DOI exists, use https://doi.org/DOI instead of URL
                - Use proper punctuation and italics
-               - DO NOT add "(Accessed Date)" for Chicago format - it's not standard
             
             4. **METADATA EXTRACTION**:
                - Count authors in ALL_AUTHORS by counting "|" separators
@@ -250,14 +298,20 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             OUTPUT FORMAT: Return strictly valid JSON.
             {
               "insertions": [
-                { "anchor": "exact phrase", "source_id": 1, "citation_text": "(Authors Year)" }
+                { "anchor": "exact phrase", "source_id": 1, "citation_text": "(Authors Year)" },
+                { "anchor": "another phrase", "source_id": 2, "citation_text": "(Authors Year)" },
+                ...aim for at least ${Math.max(4, Math.floor(sources.length * 0.6))} insertions
               ],
               "formatted_citations": { 
-                "1": "Complete Chicago bibliography entry."
+                "1": "Complete Chicago bibliography entry.",
+                "2": "Complete Chicago bibliography entry.",
+                ...
               }
             }
             
-            VERIFY: Before outputting, check that ALL authors from ALL_AUTHORS are included!
+            VERIFY: Before outputting, check that:
+            1. ALL authors from ALL_AUTHORS are included
+            2. You're using most of the available sources (not leaving them all unused)
         `;
     }
 };
