@@ -7,30 +7,50 @@ const USER_AGENTS = [
 ];
 
 /**
- * HELPER: Extract metadata from raw HTML before cleaning.
- * This ensures we capture Bylines/Dates that might be in <div> or <span> tags 
- * which get stripped by the main content cleaner.
+ * HELPER: Extract metadata using JSON-LD (Schema.org) & Meta Tags.
+ * JSON-LD is the gold standard for modern news sites.
  */
 function extractMetadata($) {
-    // 1. Meta Tags (Standard)
-    let author = $('meta[name="author"]').attr('content') || 
-                 $('meta[property="og:site_name"]').attr('content');
-    let date = $('meta[property="article:published_time"]').attr('content') || 
-               $('time').first().attr('datetime');
+    let author = null;
+    let date = null;
 
-    // 2. Text Forensics (Fallbacks)
-    // Scan headers/bylines specifically
-    if (!author || author === "Unknown") {
-        const byline = $('[class*="author"], [class*="byline"]').first().text().trim();
-        if (byline.length > 3 && byline.length < 50) {
-            author = byline.replace(/^By\s+/i, '');
+    // 1. Try JSON-LD (Schema.org) - Best for Brookings/News sites
+    try {
+        const jsonLd = $('script[type="application/ld+json"]').html();
+        if (jsonLd) {
+            const data = JSON.parse(jsonLd);
+            const obj = Array.isArray(data) ? data[0] : data;
+            
+            // Extract Author
+            if (obj.author) {
+                if (typeof obj.author === 'string') author = obj.author;
+                else if (Array.isArray(obj.author)) author = obj.author[0]?.name;
+                else if (obj.author.name) author = obj.author.name;
+            }
+            
+            // Extract Date
+            date = obj.datePublished || obj.dateCreated || obj.uploadDate;
         }
+    } catch (e) { /* Ignore JSON parse errors */ }
+
+    // 2. Meta Tags (Fallback)
+    if (!author) {
+        author = $('meta[name="author"]').attr('content') || 
+                 $('meta[property="og:site_name"]').attr('content') ||
+                 $('a[class*="author"]').first().text();
     }
     
-    // 3. Date Regex fallback on the whole body (for "April 24, 2018")
+    if (!date) {
+        date = $('meta[property="article:published_time"]').attr('content') || 
+               $('meta[name="date"]').attr('content') ||
+               $('time').first().attr('datetime');
+    }
+
+    // 3. Text Scraping (Last Resort)
     if (!date || date === "n.d.") {
-        const bodyText = $('body').text().substring(0, 1500); // Check header area
-        const dateMatch = bodyText.match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
+        // Look for "April 24, 2018" pattern in the first 1000 chars of body
+        const bodyStart = $('body').text().substring(0, 1500);
+        const dateMatch = bodyStart.match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
         if (dateMatch) date = dateMatch[1];
     }
 
@@ -60,16 +80,15 @@ export const ScraperAPI = {
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-                // PDF Handler
+                // PDF Handling
                 const contentType = res.headers.get('content-type') || '';
                 if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
-                    // PDFs don't have HTML structure, so we use the smart chunker on raw text
                     return this._formatPdfResult(pdfData.text, source);
                 }
 
-                // HTML Handler
+                // HTML Handling
                 const html = await res.text();
                 return this._parseHtml(html, source);
 
@@ -89,68 +108,73 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // 1. Metadata Extraction (Do this BEFORE destructive cleaning)
+        // 1. Extract Metadata FIRST (before cleaning)
         const meta = extractMetadata($);
 
-        // 2. Garbage Removal (UI elements)
-        $('script, style, nav, footer, iframe, svg, header, aside, form, button').remove();
-        $('.ad, .popup, .menu, .share-buttons, .subscribe, .newsletter, .cookie-banner').remove();
+        // 2. Aggressive Noise Removal
+        // Remove Standard Garbage
+        $('script, style, nav, footer, iframe, svg, header, form, button').remove();
+        $('.ad, .popup, .menu, .share, .social, .subscribe, .cookie, .banner, .hidden').remove();
         $('[aria-hidden="true"]').remove();
+        
+        // --- SPECIFIC FIX: Remove "Related Content" sections ---
+        // Brookings and others use classes like 'related-content', 'related-stories', 'sidebar'
+        $('.related, .related-content, .related-stories, .related-posts').remove();
+        $('.sidebar, .widget, .module, .recommends, .read-more').remove();
+        $('#related, #sidebar, #comments').remove();
+        
+        // Remove lists of links that look like navigation/related items
+        $('ul[class*="menu"], ul[class*="related"]').remove();
 
-        // 3. MAIN CONTENT FINDER
-        // We look for specific containers to avoid scraping sidebars/footers
-        let contentObj = $('article');
+        // 3. Targeted Content Selection
+        // Try to find the specific "Article Body" before falling back to generic tags
+        let contentObj = $('.post-body, .article-body, .entry-content, .story-body, [itemprop="articleBody"]');
+        
+        // If no specific class found, try generic semantic tags
+        if (contentObj.length === 0) contentObj = $('article');
         if (contentObj.length === 0) contentObj = $('[role="main"]');
-        if (contentObj.length === 0) contentObj = $('.main-content, .entry-content, #content');
-        if (contentObj.length === 0) contentObj = $('body'); // Fallback
+        if (contentObj.length === 0) contentObj = $('body'); 
 
-        // 4. SEMANTIC PARAGRAPH EXTRACTION
-        // Instead of grabbing raw text, we grab <p> tags. 
-        // This ensures we get actual sentences and skip navigation links/lists.
+        // 4. Semantic Paragraph Extraction
+        // Only grab <p> tags to avoid getting lists of names/links
         const paragraphs = [];
         contentObj.find('p').each((i, el) => {
             const text = $(el).text().trim();
-            // Filter out short garbage (e.g. "Read more", "Share", dates in lists)
-            if (text.length > 50) {
+            // Filter out short noise (e.g., "Read more", "By Name") and very long link lists
+            if (text.length > 60 && !text.toLowerCase().startsWith("copyright")) {
                 paragraphs.push(text);
             }
         });
 
-        // 5. CONTENT ASSEMBLY (Intro + 2 Random Core Chunks)
+        // 5. Content Assembly
         let finalContent = "";
 
         if (paragraphs.length > 0) {
-            // A. Intro: First 2-3 paragraphs (approx 1000 chars)
-            // Usually contains the thesis/summary
-            let charCount = 0;
-            let introParas = [];
-            for (let i = 0; i < paragraphs.length; i++) {
-                introParas.push(paragraphs[i]);
-                charCount += paragraphs[i].length;
-                if (charCount > 1000) break;
-            }
-            finalContent = introParas.join('\n\n');
+            // A. Intro: First 3 paragraphs (good for summary)
+            const intro = paragraphs.slice(0, 3).join('\n\n');
+            finalContent = intro;
 
-            // B. Random Central Chunks (if content is long enough)
+            // B. Random Sections: Pick 2 paragraphs from the middle/end
+            // We ensure we don't pick the intro paragraphs again
             if (paragraphs.length > 6) {
-                const remainingParas = paragraphs.slice(introParas.length);
-                if (remainingParas.length > 2) {
-                    // Pick 2 random distinct paragraphs from the body
-                    const idx1 = Math.floor(Math.random() * remainingParas.length);
-                    let idx2 = Math.floor(Math.random() * remainingParas.length);
-                    // Ensure they aren't the same
-                    while (idx2 === idx1 && remainingParas.length > 1) {
-                        idx2 = Math.floor(Math.random() * remainingParas.length);
+                const bodyParas = paragraphs.slice(3);
+                
+                if (bodyParas.length >= 2) {
+                    const idx1 = Math.floor(Math.random() * bodyParas.length);
+                    let idx2 = Math.floor(Math.random() * bodyParas.length);
+                    // Ensure distinct
+                    while (idx2 === idx1 && bodyParas.length > 1) {
+                        idx2 = Math.floor(Math.random() * bodyParas.length);
                     }
-
-                    finalContent += `\n\n... [Excerpt A] ...\n${remainingParas[idx1]}`;
-                    finalContent += `\n\n... [Excerpt B] ...\n${remainingParas[idx2]}`;
+                    
+                    finalContent += `\n\n... [Section A] ...\n${bodyParas[idx1]}`;
+                    finalContent += `\n\n... [Section B] ...\n${bodyParas[idx2]}`;
                 }
             }
         } else {
-            // Fallback: If no <p> tags found, use raw body text logic
-            const rawBody = $('body').text().replace(/\s+/g, ' ').trim();
-            finalContent = rawBody.substring(0, 1500);
+            // Fallback: Raw Text (if no <p> tags found)
+            const raw = $('body').text().replace(/\s+/g, ' ').trim();
+            finalContent = raw.substring(0, 1500);
         }
 
         return {
@@ -165,9 +189,8 @@ export const ScraperAPI = {
     },
 
     _formatPdfResult(rawText, source) {
-        // PDF Chunking Logic
         const safeText = rawText.replace(/\s+/g, ' ').trim();
-        let finalContent = safeText.substring(0, 1200); // Intro
+        let finalContent = safeText.substring(0, 1000); 
         
         if (safeText.length > 3000) {
              const mid = Math.floor(safeText.length * 0.4);
