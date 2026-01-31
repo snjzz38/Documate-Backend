@@ -1,3 +1,4 @@
+// api/utils/scraper.js
 import * as cheerio from 'cheerio';
 import PdfParse from 'pdf-parse/lib/pdf-parse.js';
 
@@ -7,42 +8,75 @@ const USER_AGENTS = [
 ];
 
 /**
- * HELPER: Smart Chunk Extractor
- * Grabs text starting at 'index' and extends until it finds a sentence ending.
- * Looks for: Period/Question/Exclamation + Space/Quote.
+ * HELPER: Find the nearest valid sentence start.
+ * Logic: Search for [Letter/Number/Quote] + [./!/?] + [Space] + [Capital Letter].
+ * Returns the index of the Capital Letter.
  */
-function getSmartChunk(fullText, startIndex, targetLength) {
-    if (startIndex >= fullText.length) return "";
+function findSentenceStart(text, searchFromIndex) {
+    if (searchFromIndex >= text.length) return -1;
+
+    // Scan a buffer of 500 chars to find a start
+    const buffer = text.substring(searchFromIndex, searchFromIndex + 500);
     
-    // 1. Cut the rough slice
-    let chunk = fullText.substr(startIndex, targetLength);
-    
-    // 2. Scan the NEXT 500 chars to find a clean stop
-    const buffer = fullText.substr(startIndex + targetLength, 500);
-    
-    // Regex: Match [Letter/Digit/Quote] followed immediately by [.?!] and then [Space or End of String]
-    const match = buffer.match(/([a-zA-Z0-9"”])([.?!])(?:\s|$)/);
+    // Regex explanation:
+    // ([a-z0-9"”'])   -> Capture group 1: Ends with letter, number, or quote
+    // [.!?]           -> Literal punctuation
+    // \s+             -> Whitespace
+    // ([A-Z])         -> Capture group 2: Starts with Capital Letter
+    const match = buffer.match(/([a-z0-9"”'])[.!?]\s+([A-Z])/);
 
     if (match) {
-        // match.index is where the char before punctuation starts
-        // match[0].length handles the punctuation + space
-        // We want to cut right after the punctuation
-        const cutIndex = match.index + 2; 
-        return chunk + buffer.substring(0, cutIndex);
+        // match.index = start of the pattern (the ending letter of prev sentence)
+        // We want the index of Capture Group 2 (The Capital Letter)
+        // match[0] is the whole string "d. The"
+        // We calculate offset to the Capital Letter
+        const splitIndex = match[0].lastIndexOf(match[2]);
+        return searchFromIndex + match.index + splitIndex;
     }
 
-    // Fallback: If no sentence end found, just add ellipsis
-    return chunk + "...";
+    return -1; // No valid start found in buffer
 }
 
 /**
- * HELPER: Metadata Extraction (JSON-LD > Meta Tags > Text Regex)
+ * HELPER: Extract a semantic chunk.
+ * 1. Adjusts start to nearest sentence beginning.
+ * 2. Extends end to nearest sentence completion.
+ */
+function getSmartChunk(fullText, approxStart, targetLength) {
+    // 1. Find a clean start
+    let start = findSentenceStart(fullText, approxStart);
+    
+    // If no sentence start found (or we are at 0), just fallback to approxStart
+    if (start === -1) {
+        if (approxStart === 0) start = 0; // Allow index 0 for Intro
+        else return ""; // Skip if we can't find a sentence in the middle
+    }
+
+    // 2. Cut the rough slice
+    let chunk = fullText.substr(start, targetLength);
+    
+    // 3. Find a clean end (Letter/Quote + Punctuation + Space/EOF)
+    const buffer = fullText.substr(start + targetLength, 300);
+    const endMatch = buffer.match(/([a-z0-9"”'])[.!?](?:\s|$)/);
+
+    if (endMatch) {
+        const cutIndex = endMatch.index + endMatch[1].length + 1; // Include punctuation
+        chunk += buffer.substring(0, cutIndex);
+    } else {
+        chunk += "...";
+    }
+
+    return chunk;
+}
+
+/**
+ * HELPER: Extract metadata using JSON-LD & Meta Tags.
  */
 function extractMetadata($, rawText) {
     let author = null;
     let date = null;
 
-    // 1. JSON-LD (Best for News/Brookings)
+    // 1. JSON-LD
     try {
         const jsonLd = $('script[type="application/ld+json"]').html();
         if (jsonLd) {
@@ -55,7 +89,7 @@ function extractMetadata($, rawText) {
         }
     } catch (e) {}
 
-    // 2. Meta Tags (Fallback)
+    // 2. Meta Tags
     if (!author) {
         author = $('meta[name="author"]').attr('content') || 
                  $('meta[property="og:site_name"]').attr('content') ||
@@ -66,7 +100,7 @@ function extractMetadata($, rawText) {
                $('time').first().attr('datetime');
     }
 
-    // 3. Text Forensics (Last Resort)
+    // 3. Text Forensics
     if (!date || date === "n.d.") {
         const dateMatch = rawText.substring(0, 1500).match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
         if (dateMatch) date = dateMatch[1];
@@ -100,14 +134,12 @@ export const ScraperAPI = {
 
                 const contentType = res.headers.get('content-type') || '';
                 
-                // PDF Handling
                 if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
                     return this._formatResult(pdfData.text, source);
                 }
 
-                // HTML Handling
                 const html = await res.text();
                 return this._parseHtml(html, source);
 
@@ -127,14 +159,11 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // 1. Remove Junk (Nav, Footer, Scripts)
+        // Remove Junk
         $('script, style, nav, footer, iframe, svg, header, aside, form, button, noscript').remove();
         $('.ad, .popup, .menu, .share, .social, .subscribe, .cookie, .banner, .related, .sidebar').remove();
         
-        // 2. Get Raw Text & Cleanup Whitespace
         const rawText = $('body').text().replace(/\s+/g, ' ').trim();
-
-        // 3. Extract Metadata
         const meta = extractMetadata($, rawText);
 
         return this._formatResult(rawText, originalSource, meta);
@@ -143,35 +172,38 @@ export const ScraperAPI = {
     _formatResult(rawText, source, metaOverride = null) {
         const len = rawText.length;
         
-        // --- THE STRATEGY ---
-        // 1. Start: First 1000 chars (Intro/Summary)
+        // 1. Intro: Always 0-1000 (Best for metadata/thesis)
         let finalContent = getSmartChunk(rawText, 0, 1000);
 
+        // 2. Central Chunks (Avoid Footer Junk)
         if (len > 3000) {
-            const mid = Math.floor(len / 2);
+            // Define the "Safe Zone" (End at 85% to avoid footers/references)
+            const safeEnd = Math.floor(len * 0.85);
+            const bodyStart = 1200; // Skip intro overlap
 
-            // 2. Random Excerpt A: Somewhere between 1000 and Middle
-            // Range: 1000 to (Mid - 300)
-            const rangeA = mid - 1000 - 300;
-            if (rangeA > 0) {
-                const startA = 1000 + Math.floor(Math.random() * rangeA);
-                finalContent += `\n\n... [Excerpt A] ...\n${getSmartChunk(rawText, startA, 300)}`;
-            }
+            if (safeEnd > bodyStart + 500) {
+                const zoneSize = safeEnd - bodyStart;
+                const midPoint = bodyStart + Math.floor(zoneSize / 2);
 
-            // 3. Random Excerpt B: Somewhere between Middle and End
-            // Range: Mid to (Len - 300)
-            const rangeB = len - mid - 300;
-            if (rangeB > 0) {
-                const startB = mid + Math.floor(Math.random() * rangeB);
-                finalContent += `\n\n... [Excerpt B] ...\n${getSmartChunk(rawText, startB, 300)}`;
+                // Excerpt A: Random point in First Half of Safe Zone
+                const rangeA = midPoint - bodyStart;
+                if (rangeA > 200) {
+                    const startA = bodyStart + Math.floor(Math.random() * (rangeA - 100));
+                    const chunkA = getSmartChunk(rawText, startA, 350);
+                    if (chunkA) finalContent += `\n\n... [Excerpt A] ...\n${chunkA}`;
+                }
+
+                // Excerpt B: Random point in Second Half of Safe Zone
+                const rangeB = safeEnd - midPoint;
+                if (rangeB > 200) {
+                    const startB = midPoint + Math.floor(Math.random() * (rangeB - 100));
+                    const chunkB = getSmartChunk(rawText, startB, 350);
+                    if (chunkB) finalContent += `\n\n... [Excerpt B] ...\n${chunkB}`;
+                }
             }
         }
 
-        // Use override meta (from HTML scrape) or defaults (from PDF/Plain text)
-        const meta = metaOverride || { 
-            author: "PDF Document", 
-            date: "n.d." 
-        };
+        const meta = metaOverride || { author: "PDF Document", date: "n.d." };
 
         return {
             ...source,
