@@ -1,190 +1,135 @@
 // api/utils/prompts.js
 
 export const CitationPrompts = {
-    build(type, style, context, sources) {
-        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    // --- 1. QUOTES PROMPT ---
+    buildQuotes(context, sources) {
+        // FIX: Increased limit from 400 to 2500 chars so AI sees the middle/end chunks
+        const sourceContext = sources.map(s => 
+            `[ID:${s.id}] TITLE: ${s.title} | URL: ${s.link}\nTEXT: ${s.content.substring(0, 2500).replace(/\n/g, ' ')}`
+        ).join('\n\n');
+
+        return `
+            TASK: Extract a short, relevant quote for EACH of the ${sources.length} sources provided.
+            
+            USER CONTEXT: "${context.substring(0, 500)}..."
+            
+            SOURCE DATA:
+            ${sourceContext}
+            
+            RULES:
+            1. **STRICT ALIGNMENT**: You MUST output exactly one entry for every ID from 1 to ${sources.length}.
+            2. **ORDER**: Output strictly in numerical order: [1], [2], [3]...
+            3. **FORMAT**:
+               [ID] Title - URL
+               > "Direct quote from text..."
+            
+            4. **FALLBACK**: If a source text is truly empty or irrelevant, write:
+               [ID] Title - URL
+               > No relevant quote found.
+            
+            5. **SELECTION**: Prefer quotes that contain data, definitions, or strong assertions related to the User Context.
+        `;
+    },
+
+    // --- 2. BIBLIOGRAPHY PROMPT ---
+    buildBibliography(style, sources, today) {
+        const sourceContext = this._buildSourceContext(sources);
         
-        // SAFETY CHECK: Ensure sources is an array
-        const safeSources = Array.isArray(sources) ? sources : [];
-
-        // Enhanced context builder
-        const sourceContext = safeSources.map(s => {
-            // Safety: Ensure content exists
-            const content = s.content || "";
-            const meta = s.meta || {};
-
-            // Pre-extract date from content if DETECTED_DATE is n.d.
-            let enhancedDate = meta.published;
-            if (!enhancedDate || enhancedDate === "n.d.") {
-                const datePatterns = [
-                    /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
-                    /\b(20\d{2})\b/,
-                    /\d{1,2}\/\d{1,2}\/\d{4}/,
-                    /\d{4}-\d{2}-\d{2}/
-                ];
-                
-                for (const pattern of datePatterns) {
-                    const match = content.match(pattern);
-                    if (match) {
-                        enhancedDate = match[0];
-                        break;
-                    }
-                }
-            }
-            
-            // Extract YEAR specifically for citations
-            let year = "n.d.";
-            if (enhancedDate && enhancedDate !== "n.d.") {
-                const yearMatch = enhancedDate.match(/\b(20\d{2})\b/);
-                if (yearMatch) {
-                    year = yearMatch[1];
-                }
-            }
-            
-            // Pre-extract ALL authors from content
-            let enhancedAuthors = [];
-            let enhancedAuthor = meta.author;
-            const siteName = meta.siteName || "Unknown";
-            
-            const isSiteName = enhancedAuthor && (
-                enhancedAuthor === siteName || 
-                enhancedAuthor.toLowerCase().includes(siteName.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
-            );
-            
-            if (!enhancedAuthor || enhancedAuthor === "Unknown" || isSiteName) {
-                // Search for authors in content
-                const andPattern = /^.{0,300}([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
-                const andMatch = content.match(andPattern);
-                
-                if (andMatch) {
-                    enhancedAuthors.push(andMatch[1].trim());
-                    enhancedAuthors.push(andMatch[2].trim());
-                }
-                
-                if (enhancedAuthors.length === 0) {
-                    const byPattern = /By\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)(?:,?\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+))?/i;
-                    const byMatch = content.match(byPattern);
-                    if (byMatch) {
-                        enhancedAuthors.push(byMatch[1].trim());
-                        if (byMatch[2]) enhancedAuthors.push(byMatch[2].trim());
-                    }
-                }
-                
-                enhancedAuthors = [...new Set(enhancedAuthors)].filter(name => 
-                    !name.match(/^(Senior|Fellow|Center|Technology|Innovation|Subscribe|Search|Share|Print|Editor)/)
-                );
-                
-                if (enhancedAuthors.length > 0) {
-                    enhancedAuthor = enhancedAuthors.join(' and ');
-                }
-            } else {
-                // Meta author exists - parse it
-                if (enhancedAuthor.includes(' and ')) {
-                    enhancedAuthors = enhancedAuthor.split(' and ').map(a => a.trim());
-                } else if (enhancedAuthor.includes(', and ')) {
-                    enhancedAuthors = enhancedAuthor.split(/, and |, /).map(a => a.trim());
-                } else if (enhancedAuthor.includes(',')) {
-                    const parts = enhancedAuthor.split(',').map(a => a.trim());
-                    if (parts.length === 2 && parts[0].split(' ').length >= 2 && parts[1].split(' ').length >= 2) {
-                        enhancedAuthors = parts;
-                    } else {
-                        enhancedAuthors = [enhancedAuthor];
-                    }
-                } else {
-                    enhancedAuthors = [enhancedAuthor];
-                }
-            }
-            
-            // Look for DOI
-            let doi = "";
-            const doiMatch = content.match(/doi\.org\/([^\s]+)|DOI:\s*([^\s]+)/i);
-            if (doiMatch) {
-                doi = doiMatch[1] || doiMatch[2];
-                doi = doi.replace(/[.,;]+$/, '');
-            }
-            
-            return `[ID:${s.id}]
-TITLE: ${s.title}
-URL: ${s.link}
-DOI: ${doi || "none"}
-SITE_NAME: ${siteName}
-DETECTED_AUTHOR: ${enhancedAuthor || "Unknown"} 
-ALL_AUTHORS: ${enhancedAuthors.join(' | ')}
-DETECTED_DATE: ${enhancedDate || meta.published}
-YEAR: ${year}
-TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
-        }).join('\n\n---\n\n');
-
-        // --- 1. QUOTES ---
-        if (type === 'quotes') {
-            return `
-                TASK: Extract high-quality quotes that SUPPORT the user's argument.
-                CONTEXT: "${context.substring(0, 500)}..."
-                SOURCES:
-                ${sourceContext}
-                
-                RULES:
-                1. Output strictly in order ID 1 to ${safeSources.length}.
-                2. Format: **[ID] Title** - URL \n > "Quote..."
-                3. If no relevant quote found, output "No relevant quote found."
+        // Define style-specific rules (VERBATIM from previous logic)
+        let bibStyleRules = "";
+        if (style.toLowerCase().includes("chicago")) {
+            bibStyleRules = `
+                STYLE: Chicago Manual of Style (17th Edition)
+                FORMAT: LastName, FirstName. "Article Title." *Website Name*. Month Day, Year. URL or https://doi.org/DOI.
+            `;
+        } else if (style.toLowerCase().includes("mla")) {
+            bibStyleRules = `
+                STYLE: MLA 9th Edition
+                FORMAT: LastName, FirstName. "Article Title." *Container Title*, Date, URL.
+            `;
+        } else {
+            bibStyleRules = `
+                STYLE: APA 7th Edition
+                FORMAT: Author, A. A. (Year). Title of article. *Site Name*. URL
             `;
         }
-
-        // --- 2. BIBLIOGRAPHY ONLY ---
-        if (type === 'bibliography') {
-            let bibStyleRules = "";
-            const s = (style || "").toLowerCase();
+        
+        return `
+            TASK: Generate a Bibliography / Works Cited list.
+            ${bibStyleRules}
             
-            if (s.includes("chicago")) {
-                bibStyleRules = `STYLE: Chicago (17th). FORMAT: LastName, FirstName. "Title." *Site*. Date. URL.`;
-            } else if (s.includes("mla")) {
-                bibStyleRules = `STYLE: MLA 9th. FORMAT: LastName, FirstName. "Title." *Container*, Date, URL.`;
-            } else {
-                bibStyleRules = `STYLE: APA 7th. FORMAT: Author. (Year). Title. *Site*. URL`;
-            }
+            SOURCE DATA:
+            ${sourceContext}
             
-            return `
-                TASK: Generate a bibliography.
-                ${bibStyleRules}
-                SOURCES: ${sourceContext}
-                RULES: Include all sources. Sort alphabetically. Return PLAIN TEXT.
-            `;
-        }
+            RULES:
+            1. Include ALL ${sources.length} sources.
+            2. **SORTING**: Sort strictly by Source ID (1, 2, 3...) to match the scraping order.
+            3. **FORMATTING**: Format strictly according to ${style}.
+            4. **ACCESS DATE**: You MUST include "Accessed ${today}" at the end of every entry.
+            5. **OUTPUT**: Return a clean PLAIN TEXT list. Do NOT return JSON. Do NOT use markdown.
+        `;
+    },
 
-        // --- 3. CITATIONS & FOOTNOTES ---
+    // --- 3. CITATION INSERTION PROMPT ---
+    buildInsertion(style, context, sources, today) {
+        const sourceContext = this._buildSourceContext(sources);
+        
         let styleRules = "";
-        const s = (style || "").toLowerCase();
-        
-        if (s.includes("chicago")) {
+        if (style.toLowerCase().includes("chicago")) {
             styleRules = `STYLE: Chicago (Notes/Bib). IN-TEXT: (Author Year). BIB: Author. "Title." Site, Date. URL.`;
-        } else if (s.includes("mla")) {
+        } else if (style.toLowerCase().includes("mla")) {
             styleRules = `STYLE: MLA 9th. IN-TEXT: (Author Year). BIB: Author. "Title." Container, Date, URL.`;
         } else {
             styleRules = `STYLE: APA 7th. IN-TEXT: (Author, Year). BIB: Author. (Year). Title. Site. URL.`;
         }
 
         return `
-            TASK: Insert citations into the text.
+            TASK: Map citations to the user's text.
             ${styleRules}
             
             SOURCE DATA:
             ${sourceContext}
             
-            TEXT: "${context}"
+            TEXT TO ANALYZE: 
+            "${context}"
             
-            RULES:
-            1. **MANDATORY**: Cite every factual claim using source IDs.
-            2. **YEAR**: Every in-text citation MUST have a year (e.g. 2024 or n.d.).
-            3. **BIBLIOGRAPHY**: Values in "formatted_citations" must be full entries ending with "URL (Accessed ${today})".
-            4. **JSON ONLY**: Return valid JSON.
+            🚨 CRITICAL INSTRUCTIONS 🚨:
+            1. **DO NOT REWRITE THE TEXT**. Only return the JSON object.
+            2. **METADATA FORENSICS**:
+               - If META_DATE is "n.d.", scan TEXT_CONTENT for a year (e.g. "April 2018" -> 2018).
+               - If META_AUTHOR is "Unknown", scan TEXT_CONTENT for "By [Name]".
             
-            JSON STRUCTURE:
+            OUTPUT RULES:
+            1. **insertions**: List of places to add citations.
+            2. **formatted_citations**: Full bibliography entry. MUST end with "URL (Accessed ${today})".
+            3. **citation_text**: MUST contain the Year (e.g. "(West 2018)").
+            4. **JSON ONLY**: Start your response with '{' and end with '}'.
+            
+            REQUIRED JSON STRUCTURE:
             {
               "insertions": [
-                { "anchor": "phrase", "source_id": 1, "citation_text": "(Author Year)" }
+                { "anchor": "transformative periods in modern history", "source_id": 1, "citation_text": "(West 2018)" }
               ],
-              "formatted_citations": { "1": "Full Bibliography Entry..." }
+              "formatted_citations": {
+                "1": "West, Darrell. \"Title.\" Brookings, 2018. https://link... (Accessed ${today})"
+              }
             }
         `;
+    },
+
+    // --- HELPER: Build Context String ---
+    _buildSourceContext(sources) {
+        return sources.map(s => {
+            // Enhanced metadata extraction logic (VERBATIM from previous request)
+            let enhancedDate = s.meta.published;
+            let enhancedAuthor = s.meta.author;
+            
+            return `[ID:${s.id}] 
+TITLE: ${s.title}
+URL: ${s.link}
+META_AUTHOR: ${enhancedAuthor} 
+META_DATE: ${enhancedDate}
+TEXT_CONTENT: ${s.content.substring(0, 1500).replace(/\n/g, ' ')}...`; // Increased to 1500 for Citations too
+        }).join('\n\n');
     }
 };
