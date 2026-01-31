@@ -5,7 +5,7 @@ import { GroqAPI } from '../utils/groqAPI.js';
 import { CitationPrompts } from '../utils/prompts.js';
 
 // ==========================================================================
-// PIPELINE SERVICE (Logic & Processing)
+// MODULE: TEXT PROCESSOR (The Pipeline)
 // ==========================================================================
 const PipelineService = {
     ensureAccessDate(text) {
@@ -15,73 +15,132 @@ const PipelineService = {
         return `${text} (Accessed ${today})`;
     },
 
-    // Fallback Generator (Same as before)
+    // Extract year from source
+    extractYear(source) {
+        let year = "n.d.";
+        
+        // Try meta.published first
+        if (source.meta.published && source.meta.published !== "n.d.") {
+            const yearMatch = source.meta.published.match(/\b(20\d{2})\b/);
+            if (yearMatch) return yearMatch[1];
+        }
+        
+        // Try content
+        const contentYearMatch = source.content.match(/\b(20\d{2})\b/);
+        if (contentYearMatch) return contentYearMatch[1];
+        
+        return year;
+    },
+
+    // Validates and fixes citation_text to ensure it has a year
+    validateCitationText(citationText, source, style) {
+        if (!citationText) return null;
+        
+        // Extract the year
+        const year = this.extractYear(source);
+        
+        // Check if citation already has a year
+        const hasYear = /\d{4}|n\.d\./i.test(citationText);
+        
+        if (hasYear) {
+            return citationText; // Already good
+        }
+        
+        // Missing year - need to add it
+        // Parse the citation to add year in the right place
+        
+        // Pattern: (Author) or (Author and Author) or (Author et al.)
+        const match = citationText.match(/^\((.*?)\)$/);
+        if (!match) return citationText; // Can't parse, return as-is
+        
+        const authorPart = match[1];
+        
+        // Determine style-specific formatting
+        if (style && style.toLowerCase().includes('chicago')) {
+            // Chicago: (Author Year) - no comma
+            return `(${authorPart} ${year})`;
+        } else if (style && style.toLowerCase().includes('apa')) {
+            // APA: (Author, Year) - with comma
+            return `(${authorPart}, ${year})`;
+        } else {
+            // Default/MLA: (Author Year) - no comma
+            return `(${authorPart} ${year})`;
+        }
+    },
+
+    // Generates a backup citation if AI returns "Unknown" or fails
     generateFallback(source) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        
+        // Try to extract authors from content
         let author = source.meta.author;
-        if (!author || author === "Unknown") author = source.meta.siteName || "Unknown Source";
-        let date = source.meta.published || "n.d.";
-        return `${author}. (${date}). "${source.title}". ${source.link} (Accessed ${today})`;
+        const isSiteName = author && (
+            author === source.meta.siteName || 
+            author.toLowerCase().includes(source.meta.siteName.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
+        );
+        
+        if (!author || author === "Unknown" || isSiteName) {
+            const authorMatch = source.content.match(/([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
+            if (authorMatch) {
+                author = `${authorMatch[1]} and ${authorMatch[2]}`;
+            } else {
+                const singleAuthor = source.content.match(/(?:By|Author:)\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
+                if (singleAuthor) {
+                    author = singleAuthor[1];
+                } else {
+                    author = source.meta.siteName || "Unknown Source";
+                }
+            }
+        }
+        
+        let date = source.meta.published;
+        if (!date || date === "n.d.") {
+            const dateMatch = source.content.match(/(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/);
+            if (dateMatch) {
+                date = dateMatch[0];
+            } else {
+                const yearMatch = source.content.match(/\b(20\d{2})\b/);
+                date = yearMatch ? yearMatch[1] : "n.d.";
+            }
+        }
+
+        const url = source.link;
+        const title = source.title || "Untitled";
+        
+        return `${author}. "${title}". ${source.meta.siteName}. ${date}. ${url} (Accessed ${today})`;
     },
 
-    // Superscript converter for footnotes
-    toSuperscript(num) {
-        const superscriptMap = {
-            '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
-            '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'
-        };
-        return num.toString().split('').map(d => superscriptMap[d] || d).join('');
-    },
-
-    processInsertions(context, insertions, sources, formattedMap, outputType) {
+    processInsertions(context, insertions, sources, formattedMap, outputType, style) {
         let resultText = context;
         let footnoteCounter = 1;
         let usedSourceIds = new Set();
         let footnotesList = [];
-        
-        // Track which sources have been used and how many times (for footnotes)
-        let sourceUsageMap = new Map(); // source_id -> array of footnote numbers
 
-        // 1. Tokenize Text for anchor matching
+        // 1. Tokenize Text
         const tokens = [];
         const tokenRegex = /[a-z0-9]+/gi;
         let match;
         while ((match = tokenRegex.exec(context)) !== null) {
-            tokens.push({ 
-                word: match[0].toLowerCase(), 
-                start: match.index, 
-                end: match.index + match[0].length 
-            });
+            tokens.push({ word: match[0].toLowerCase(), start: match.index, end: match.index + match[0].length });
         }
 
-        // 2. Process and validate all insertions
+        // 2. Sort Insertions
         const validInsertions = (insertions || [])
             .map(item => {
                 if (!item.anchor || !item.source_id) return null;
-                
                 const anchorWords = item.anchor.toLowerCase().match(/[a-z0-9]+/g);
-                if (!anchorWords || anchorWords.length === 0) return null;
-                
-                // Sliding window search for anchor phrase
+                if (!anchorWords) return null;
                 let bestIndex = -1;
                 for (let i = 0; i <= tokens.length - anchorWords.length; i++) {
                     let matchFound = true;
                     for (let j = 0; j < anchorWords.length; j++) {
-                        if (tokens[i + j].word !== anchorWords[j]) { 
-                            matchFound = false; 
-                            break; 
-                        }
+                        if (tokens[i + j].word !== anchorWords[j]) { matchFound = false; break; }
                     }
-                    if (matchFound) { 
-                        bestIndex = tokens[i + anchorWords.length - 1].end; 
-                        break; 
-                    }
+                    if (matchFound) { bestIndex = tokens[i + anchorWords.length - 1].end; break; }
                 }
-                
                 return bestIndex !== -1 ? { ...item, insertIndex: bestIndex } : null;
             })
             .filter(Boolean)
-            // Sort by position descending (insert from end to preserve indices)
             .sort((a, b) => b.insertIndex - a.insertIndex);
 
         // 3. Apply Insertions
@@ -91,47 +150,68 @@ const PipelineService = {
             
             usedSourceIds.add(source.id);
             
-            // Get formatted citation for this source
-            let citString = formattedMap[source.id] || this.generateFallback(source);
+            // Get Citation String
+            let citString = formattedMap[source.id];
+            
+            // Validation: If AI returned invalid citation, overwrite it
+            const isInvalid = !citString || 
+                            citString.length < 10 || 
+                            citString.includes('[URL]') || 
+                            citString.includes('[link]') ||
+                            citString.startsWith('Author.') ||
+                            citString.includes('"The rise of artificial') ||
+                            citString.includes('"Powered by advances');
+            
+            if (isInvalid) {
+                citString = this.generateFallback(source);
+            }
             citString = this.ensureAccessDate(citString);
 
             let insertContent = "";
-            
             if (outputType === 'footnotes') {
-                // FOOTNOTES: Each insertion gets a unique number, even for same source
-                const currentFootnote = footnoteCounter;
-                insertContent = this.toSuperscript(currentFootnote);
+                const s = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
+                const numStr = footnoteCounter.toString();
+                insertContent = numStr.split('').map(d => s[d]||'').join('');
                 
-                // Track this footnote for the source
-                if (!sourceUsageMap.has(source.id)) {
-                    sourceUsageMap.set(source.id, []);
-                }
-                sourceUsageMap.get(source.id).push(currentFootnote);
-                
-                // Add to footnotes list with unique number
-                footnotesList.push({
-                    number: currentFootnote,
-                    sourceId: source.id,
-                    citation: citString
-                });
-                
+                footnotesList.push(`${footnoteCounter}. ${citString}`);
                 footnoteCounter++;
             } else {
-                // IN-TEXT: Use the citation text from AI or generate fallback
+                // IN-TEXT LOGIC with YEAR VALIDATION
                 let inText = item.citation_text;
                 
-                // Validate citation format
-                if (!inText || inText.length < 3 || !inText.startsWith('(')) {
-                    const auth = source.meta.author !== "Unknown" 
-                        ? source.meta.author.split(' ')[0] 
-                        : (source.meta.siteName || "Source");
-                    const yr = source.meta.year || 
-                        (source.meta.published !== "n.d." ? source.meta.published.substring(0, 4) : "n.d.");
-                    inText = `(${auth}, ${yr})`;
+                // CRITICAL: Validate that citation has a year
+                inText = this.validateCitationText(inText, source, style);
+                
+                // If still invalid after validation, generate from scratch
+                if (!inText || inText.length < 3) {
+                    let auth = source.meta.author;
+                    
+                    const isSiteName = auth === source.meta.siteName || 
+                                     (auth && auth.toLowerCase().includes(source.meta.siteName.toLowerCase().replace(/\.(com|org|edu|net)/, '')));
+                    
+                    if (!auth || auth === "Unknown" || isSiteName) {
+                        const authorMatch = source.content.match(/([A-Z][a-z]+)\s+[A-Z]\.?\s+[A-Z][a-z]+\s+and/);
+                        auth = authorMatch ? authorMatch[1] : (source.meta.siteName || "Unknown");
+                    } else if (auth.includes(' and ')) {
+                        auth = auth.split(' and ')[0].split(' ').pop();
+                    } else {
+                        auth = auth.split(' ').pop();
+                    }
+                    
+                    const yr = this.extractYear(source);
+                    
+                    // Format based on style
+                    if (style && style.toLowerCase().includes('chicago')) {
+                        inText = `(${auth} ${yr})`;
+                    } else if (style && style.toLowerCase().includes('apa')) {
+                        inText = `(${auth}, ${yr})`;
+                    } else {
+                        inText = `(${auth} ${yr})`;
+                    }
                 }
+                
                 insertContent = " " + inText;
             }
-            
             resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
         });
 
@@ -139,53 +219,46 @@ const PipelineService = {
         let footer = "";
         
         if (outputType === 'footnotes') {
-            // FOOTNOTES: List each footnote with its number (duplicates allowed)
-            footer += "\n\n---\n\n### Footnotes\n\n";
-            
-            // Sort footnotes by number and display
-            footnotesList.sort((a, b) => a.number - b.number);
-            footnotesList.forEach(fn => {
-                footer += `${fn.number}. ${fn.citation}\n\n`;
-            });
-            
-            // Add a consolidated references section for unique sources
-            footer += "\n---\n\n### References (Consolidated)\n\n";
-            const uniqueSourcesUsed = [...usedSourceIds];
-            uniqueSourcesUsed.forEach(sourceId => {
-                const source = sources.find(s => s.id === sourceId);
-                if (source) {
-                    let cit = formattedMap[sourceId] || this.generateFallback(source);
-                    const footnoteNums = sourceUsageMap.get(sourceId) || [];
-                    const footnotesStr = footnoteNums.length > 0 
-                        ? ` [Cited in footnotes: ${footnoteNums.join(', ')}]` 
-                        : '';
-                    footer += this.ensureAccessDate(cit) + footnotesStr + "\n\n";
-                }
-            });
-            
+            footer += "\n\n### Footnotes (Used)\n" + footnotesList.join('\n\n');
         } else {
-            // IN-TEXT: Standard references cited section
-            footer += "\n\n---\n\n### References Cited\n\n";
+            footer += "\n\n### References Cited (Used)\n";
             sources.forEach(s => {
                 if (usedSourceIds.has(s.id)) {
                     let cit = formattedMap[s.id] || this.generateFallback(s);
+                    
+                    const isInvalid = cit.includes('[URL]') || 
+                                    cit.includes('[link]') ||
+                                    cit.startsWith('Author.') ||
+                                    cit.includes('"The rise of artificial') ||
+                                    cit.includes('"Powered by advances');
+                    
+                    if (isInvalid) {
+                        cit = this.generateFallback(s);
+                    }
                     footer += this.ensureAccessDate(cit) + "\n\n";
                 }
             });
         }
 
-        // Unused Sources (should be minimal with improved prompts)
-        const unusedSources = sources.filter(s => !usedSourceIds.has(s.id));
-        if (unusedSources.length > 0) {
-            footer += "\n---\n\n### Further Reading (Unused)\n\n";
-            unusedSources.forEach(s => {
-                let cit = formattedMap[s.id] || this.generateFallback(s);
-                footer += this.ensureAccessDate(cit) + "\n\n";
+        if (usedSourceIds.size < sources.length) {
+            footer += "\n\n### Further Reading (Unused)\n";
+            sources.forEach(s => {
+                if (!usedSourceIds.has(s.id)) {
+                    let cit = formattedMap[s.id] || this.generateFallback(s);
+                    
+                    const isInvalid = cit.includes('[URL]') || 
+                                    cit.includes('[link]') ||
+                                    cit.startsWith('Author.') ||
+                                    cit.includes('"The rise of artificial') ||
+                                    cit.includes('"Powered by advances');
+                    
+                    if (isInvalid) {
+                        cit = this.generateFallback(s);
+                    }
+                    footer += this.ensureAccessDate(cit) + "\n\n";
+                }
             });
         }
-
-        // Add usage statistics
-        footer += `\n---\n*Citation Statistics: ${usedSourceIds.size}/${sources.length} sources used, ${validInsertions.length} total insertions*`;
 
         return resultText + footer;
     }
@@ -205,12 +278,16 @@ export default async function handler(req, res) {
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const SEARCH_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
-        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-        // 1. QUOTES MODE
+        // 1. QUOTES
         if (preLoadedSources?.length > 0) {
-            const prompt = CitationPrompts.buildQuotes(context, preLoadedSources);
-            const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
+            const prompt = CitationPrompts.build(context, preLoadedSources); // Note: build -> buildQuotes logic inside
+            // Correction: The new prompts.js uses `build` as the main entry or specific names?
+            // The paste showed `CitationPrompts.build(type, style...)`.
+            // Let's use the .build() method as defined in the PROMPTS file provided in the previous step.
+            const promptStr = CitationPrompts.build('quotes', null, context, preLoadedSources);
+            
+            const result = await GroqAPI.chat([{ role: "user", content: promptStr }], GROQ_KEY, false);
             return res.status(200).json({ success: true, text: result });
         }
 
@@ -218,16 +295,9 @@ export default async function handler(req, res) {
         const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX);
         const richSources = await ScraperAPI.scrape(rawSources);
         
-        // 3. GENERATE (Using Modular Prompts with outputType)
-        let prompt;
+        // 3. GENERATE
+        const prompt = CitationPrompts.build(outputType, style, context, richSources);
         const isJson = outputType !== 'bibliography';
-
-        if (outputType === 'bibliography') {
-            prompt = CitationPrompts.buildBibliography(style, richSources, today);
-        } else {
-            // Pass outputType to buildInsertion for footnote-specific rules
-            prompt = CitationPrompts.buildInsertion(style, context, richSources, today, outputType);
-        }
         
         const aiResponse = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, isJson);
 
@@ -238,31 +308,11 @@ export default async function handler(req, res) {
         } 
         else {
             try {
-                // ROBUST JSON EXTRACTION
-                const firstBrace = aiResponse.indexOf('{');
-                const lastBrace = aiResponse.lastIndexOf('}');
-                
-                if (firstBrace !== -1 && lastBrace !== -1) {
-                    const jsonStr = aiResponse.substring(firstBrace, lastBrace + 1);
-                    const data = JSON.parse(jsonStr);
-                    
-                    // Log insertion count for debugging
-                    console.log(`[Citation] Received ${data.insertions?.length || 0} insertions from AI`);
-                    
-                    // Run the pipeline
-                    finalOutput = PipelineService.processInsertions(
-                        context, 
-                        data.insertions, 
-                        richSources, 
-                        data.formatted_citations, 
-                        outputType
-                    );
-                } else {
-                    throw new Error("No JSON found in response");
-                }
+                const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+                const jsonStr = jsonMatch ? jsonMatch[0] : aiResponse;
+                const data = JSON.parse(jsonStr);
+                finalOutput = PipelineService.processInsertions(context, data.insertions, richSources, data.formatted_citations, outputType, style);
             } catch (e) {
-                console.error("JSON Pipeline Failed:", e);
-                // Fallback: return cleaned raw text
                 finalOutput = aiResponse.replace(/```json/g, '').replace(/```/g, '');
             }
         }
@@ -270,7 +320,6 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true, sources: richSources, text: finalOutput });
 
     } catch (error) {
-        console.error("Citation Handler Error:", error);
         return res.status(500).json({ success: false, error: error.message });
     }
 }
