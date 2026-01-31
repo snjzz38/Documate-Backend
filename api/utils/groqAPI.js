@@ -2,9 +2,14 @@
 
 // Ordered by reliability
 const GROQ_MODELS = [
-    "llama-3.3-70b-versatile", // Best for complex tasks
-    "llama-3.1-8b-instant",    // Fast, good fallback
-    "mixtral-8x7b-32768"       // Large context window
+  "qwen/qwen3-32b",
+  "llama-3.1-8b-instant",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "meta-llama/llama-guard-4-12b",
+  "meta-llama/llama-prompt-guard-2-22m",
+  "meta-llama/llama-prompt-guard-2-86m",
+  "moonshotai/kimi-k2-instruct-0905”,
 ];
 
 export const GroqAPI = {
