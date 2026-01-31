@@ -115,65 +115,106 @@ YEAR: ${year}
 TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
         }).join('\n\n---\n\n');
 
-        // ======================================================================
-        // MODE 1: QUOTES EXTRACTION
-        // ======================================================================
-        if (type === 'quotes') {
-            return `
-TASK: Extract high-quality quotes that SUPPORT the user's argument/perspective.
+// ======================================================================
+// MODE 1: QUOTES EXTRACTION
+// ======================================================================
+if (type === 'quotes') {
+    return `
+TASK: Extract substantial, meaningful quotes from each source.
 
 USER'S TEXT CONTEXT: "${context.substring(0, 500)}..."
 
 SOURCES:
 ${sourceContext}
 
-CRITICAL QUOTE EXTRACTION RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 MANDATORY: Extract quotes from ALL ${safeSources.length} sources
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. **QUOTE LENGTH**: Extract SUBSTANTIAL quotes (2-4 sentences, 50-150 words)
-   - NOT single sentences unless exceptionally powerful
-   - Look for complete thoughts, arguments, or explanations
-   - Include context that makes the quote meaningful
+QUOTE EXTRACTION RULES:
 
-2. **RELEVANCE**: Quotes must DIRECTLY SUPPORT the user's argument
-   - Analyze the user's perspective from their text
-   - Find quotes that provide evidence, data, or expert opinion aligned with their view
-   - Avoid generic or tangential quotes
+1. **QUOTE LENGTH**: Extract SUBSTANTIAL passages (50-200 words)
+   - Target: 2-5 complete sentences per quote
+   - Include full context and complete thoughts
+   - Do NOT extract single sentences or fragments
+   - Longer quotes are better than shorter ones
 
-3. **QUALITY CRITERIA**:
-   - Prefer quotes with specific data, statistics, or concrete examples
-   - Choose authoritative statements from experts or organizations
-   - Select quotes that add credibility to the user's argument
-   - Avoid vague or generic statements
+2. **RELEVANCE**: Extract quotes that are related to the topic
+   - The user's text is about: climate change urgency
+   - Extract ANY substantive content related to this topic
+   - Include supporting evidence, data, expert opinions
+   - Include context, background, or explanatory content
+   - EVEN include contrasting viewpoints or skeptical perspectives
+   - The quote does NOT need to perfectly agree with the user's argument
 
-4. **EXTRACTION GUIDELINES**:
-   - Extract the FULL relevant passage, not fragments
-   - Include complete sentences with proper context
-   - If a source has multiple good quotes, extract 2-3 separate quotes
-   - Ensure quotes are self-contained and make sense on their own
+3. **WHAT TO EXTRACT**:
+   ✓ Statistical data and research findings
+   ✓ Expert statements and authoritative claims
+   ✓ Explanations of causes, effects, or solutions
+   ✓ Policy recommendations or action plans
+   ✓ Historical context or background information
+   ✓ Contrasting viewpoints or alternative perspectives
+   ✓ Case studies or specific examples
+   ✓ Urgency statements or calls to action
 
-5. **FORMAT** (Output strictly in order ID 1 to ${safeSources.length}):
-   **[ID] Title** - URL
-   > "Complete quote with full context and multiple sentences. This should be substantial and directly support the user's argument."
-   
-   OR if no relevant quote:
-   **[ID] Title** - URL
-   > No relevant quote found that supports the argument.
+4. **WHAT TO AVOID**:
+   ✗ Generic introductory text ("Welcome to our site...")
+   ✗ Navigation or menu text
+   ✗ Biographical information about authors (unless relevant)
+   ✗ Copyright notices or disclaimers
+   ✗ Partial sentences or fragments
 
-EXAMPLE OUTPUT:
+5. **EXTRACTION STRATEGY**:
+   - Read the ENTIRE TEXT_CONTENT carefully
+   - Look for the most substantive, informative passages
+   - Extract the FULL passage, not just pieces
+   - If multiple good passages exist, extract 2-3 separate quotes
+   - Ensure each quote stands alone and makes sense
 
-**[1] Climate Change Impacts** - https://example.com
-> "Recent studies demonstrate that global temperatures have risen by 1.1°C since pre-industrial times, with the past decade being the warmest on record. This warming has led to increased frequency of extreme weather events, including hurricanes, droughts, and wildfires. The scientific consensus is clear: human activities, particularly the burning of fossil fuels, are the primary driver of these changes, and immediate action is required to prevent catastrophic consequences."
+6. **WHEN NO GOOD QUOTE EXISTS**:
+   - ONLY say "No relevant quote found" if:
+     * The TEXT_CONTENT is empty or gibberish
+     * The content is entirely navigation/menu text
+     * The content is completely unrelated to climate/environment
+   - Otherwise, EXTRACT SOMETHING substantial from the text
 
-**[2] Economic Costs** - https://example2.com
-> "The economic impact of climate inaction is staggering. Without significant mitigation efforts, global GDP could decline by up to 23% by 2100, with developing nations facing even steeper losses. These projections underscore the urgent need for policy intervention and sustainable development strategies."
+7. **OUTPUT FORMAT** (strictly in order ID 1 to ${safeSources.length}):
 
-IMPORTANT: 
-- Extract LONGER quotes (50-150 words) that provide substantial evidence
-- Ensure each quote SUPPORTS the user's argument
-- Quality over quantity - better to have fewer strong quotes than many weak ones
-- Read the full TEXT_CONTENT to find the best passages
-            `;
-        }
+**[ID] Title** - URL
+> "Complete quote spanning multiple sentences. This should be a substantial passage that provides meaningful information about the topic. Include full context and complete thoughts. Make sure the quote is 50-200 words and consists of 2-5 complete sentences that flow together naturally."
+
+OR if truly no content:
+**[ID] Title** - URL
+> No relevant quote found that supports the argument.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EXAMPLE EXTRACTIONS (showing different types of valuable quotes):
+
+**[1] IPCC Climate Report**
+> "The Intergovernmental Panel on Climate Change reports that global temperatures have risen 1.1°C since pre-industrial times, with the majority of warming occurring in the past 40 years. This warming is unequivocally caused by human activities, primarily the burning of fossil fuels. Without immediate and drastic reductions in greenhouse gas emissions, the world is on track to exceed 1.5°C of warming by 2030, triggering irreversible climate impacts including sea level rise, extreme weather events, and widespread ecosystem collapse."
+
+**[2] Economic Analysis**
+> "The economic costs of climate inaction far exceed the costs of mitigation. Studies estimate that unmitigated climate change could reduce global GDP by 23% by 2100, with developing nations facing disproportionate impacts. In contrast, transitioning to renewable energy and implementing adaptation measures would cost approximately 1-2% of global GDP annually. These investments would not only prevent catastrophic damages but also create millions of jobs in clean energy sectors and improve public health outcomes."
+
+**[3] Skeptical Perspective** (Note: even contrasting views are valuable!)
+> "Some researchers and policy analysts argue that climate models overstate the urgency of the crisis, pointing to historical periods of natural climate variability. They suggest that adaptation strategies may be more cost-effective than aggressive mitigation efforts, and that economic development should take priority in developing nations. However, this perspective represents a minority view within the scientific community, with the vast majority of climate scientists emphasizing the need for immediate action to prevent catastrophic warming."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CRITICAL REMINDERS:
+
+✓ Extract quotes from ALL ${safeSources.length} sources (don't skip most of them!)
+✓ Make quotes 50-200 words (2-5 sentences)
+✓ Include complete thoughts with full context
+✓ Extract ANY substantive climate-related content
+✓ Don't be overly restrictive about "supporting the argument"
+✓ Even contrasting viewpoints are valuable for a complete picture
+✓ Only say "No relevant quote" if content is truly empty/unrelated
+
+Your goal is to provide the user with substantial, informative quotes they can use in their research - not to filter out most sources!
+    `;
+}
 
         // ======================================================================
         // MODE 2: BIBLIOGRAPHY ONLY
