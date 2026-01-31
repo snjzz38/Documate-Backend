@@ -93,76 +93,162 @@ INSTRUCTIONS:
 `;
   },
 
-  // --- 3. CITATION INSERTION PROMPT ---
-  buildInsertion(style, context, sources, today) {
+  // --- 3. CITATION INSERTION PROMPT (ENHANCED) ---
+  buildInsertion(style, context, sources, today, outputType = 'in-text') {
     const sourceContext = this._buildSourceContext(sources);
     const styleRules = this._getStyleRules(style);
 
-    const minSourcesToUse = Math.max(8, sources.length - 2);
-    const targetInsertions = Math.floor(sources.length * 1.5);
+    // Calculate aggressive targets
+    const totalSources = sources.length;
+    const minSourcesToUse = Math.max(totalSources - 1, Math.ceil(totalSources * 0.9)); // Use 90%+ of sources
+    const targetInsertions = Math.max(totalSources * 2, 15); // At least 2x sources or 15 insertions
+    
+    // Count approximate sentences/claims in context for insertion density
+    const sentenceCount = (context.match(/[.!?]+/g) || []).length;
+    const targetDensity = Math.max(Math.floor(sentenceCount * 0.6), targetInsertions); // Cite ~60% of sentences
+
+    const footnoteRules = outputType === 'footnotes' ? `
+FOOTNOTE-SPECIFIC RULES:
+- The SAME source CAN and SHOULD be cited multiple times with DIFFERENT footnote numbers
+- Each insertion gets its own unique footnote number (1, 2, 3, 4, etc.)
+- If Source ID 3 is cited in three places, it will have three different footnote numbers
+- This is standard academic practice - duplicate source citations are EXPECTED
+- Example: "Climate change is accelerating¹ ... Sea levels are rising² ... Action is needed³" where ¹²³ might all cite the same UN report
+` : '';
 
     return `
-TASK: Insert citations into the user's text using ${style} format.
+TASK: Insert ${style} citations into the user's text. Your goal is MAXIMUM COVERAGE using ALL available sources.
 
 ${styleRules}
 
-SOURCE DATA (${sources.length} sources):
+${footnoteRules}
+
+═══════════════════════════════════════════════════════════════
+SOURCE DATA (${totalSources} sources available - USE THEM ALL):
+═══════════════════════════════════════════════════════════════
 ${sourceContext}
 
+═══════════════════════════════════════════════════════════════
 TEXT TO CITE:
+═══════════════════════════════════════════════════════════════
 "${context}"
 
-🎯 PRIMARY GOAL:
-- Use AT LEAST ${minSourcesToUse} different sources
-- Aim for ~${targetInsertions} total citation insertions
-- Cite key sources multiple times when appropriate
-- Spread citations across intro, body, and conclusion
+═══════════════════════════════════════════════════════════════
+🎯 AGGRESSIVE CITATION TARGETS (MANDATORY):
+═══════════════════════════════════════════════════════════════
 
+1. SOURCE COVERAGE: Use AT LEAST ${minSourcesToUse} out of ${totalSources} sources (${Math.round(minSourcesToUse/totalSources*100)}%+)
+2. INSERTION COUNT: Create AT LEAST ${targetDensity} citation insertions
+3. CITATION DENSITY: Cite approximately every 1-2 sentences
+4. DISTRIBUTION: Spread citations across ALL sections (intro, body, conclusion)
+5. REUSE SOURCES: Cite strong sources 2-4 times each in different contexts
+
+═══════════════════════════════════════════════════════════════
+WHERE TO INSERT CITATIONS (Find ALL opportunities):
+═══════════════════════════════════════════════════════════════
+
+CITE THESE (high priority):
+• Statistical claims ("CO₂ levels have reached...")
+• Causal statements ("driven by anthropogenic activities...")
+• Expert consensus ("scientific consensus is...")
+• Definitions ("characterized by long-term alterations...")
+• Predictions/projections ("potentially catastrophic...")
+• Comparisons ("highest concentration in over 800,000 years")
+• Policy references ("Paris Agreement aims to...")
+• Impact statements ("threatens coastal communities...")
+• Process descriptions ("mitigation strategies include...")
+• Scope claims ("one of the most pressing challenges...")
+
+ALSO CITE THESE (medium priority):
+• Topic introductions ("Climate change represents...")
+• Transition statements that make claims
+• Concluding assertions ("demands immediate action")
+• Any sentence containing "significant," "substantial," "major," "critical"
+• Sentences with specific numbers, percentages, or timeframes
+
+═══════════════════════════════════════════════════════════════
+SOURCE-TO-CONTENT MATCHING GUIDE:
+═══════════════════════════════════════════════════════════════
+
+For each source, identify ALL sentences it could support:
+- UN sources → climate impacts, policy, global cooperation, SDGs
+- IPCC sources → scientific data, projections, consensus statements  
+- Academic sources → research findings, methodology claims
+- Government sources → policy, regulations, official positions
+- News/research orgs → current events, surveys, public opinion
+- Health sources → health impacts, disease, food security
+- Environmental orgs → solutions, advocacy, action items
+
+═══════════════════════════════════════════════════════════════
 MANDATORY RULES:
-1. DO NOT rewrite the text.
-2. Return ONLY valid JSON.
-3. Every citation_text MUST include a YEAR or "n.d."
-4. Use ALL_AUTHORS field to determine author formatting.
-5. Use "et al." ONLY for 3+ authors.
-6. Bibliography entries appear ONCE even if cited multiple times.
-7. "Further Reading (Unused)" should be nearly empty (0–2 max).
+═══════════════════════════════════════════════════════════════
 
+1. DO NOT rewrite or modify the original text
+2. Return ONLY valid JSON (no markdown, no explanations)
+3. Every citation_text MUST include a YEAR or "n.d."
+4. Use ALL_AUTHORS field to determine author formatting
+5. Use "et al." ONLY for 3+ authors
+6. Anchor phrases must be 3-8 words, unique, and findable in text
+7. Each anchor should appear exactly once in the text
+8. Bibliography entries appear ONCE even if cited multiple times
+
+═══════════════════════════════════════════════════════════════
 OUTPUT JSON FORMAT (STRICT):
+═══════════════════════════════════════════════════════════════
+
 {
   "insertions": [
-    { "anchor": "3–6 word phrase from text", "source_id": 1, "citation_text": "(Author Year)" },
-    { "anchor": "another phrase", "source_id": 2, "citation_text": "(Author Year)" }
+    { "anchor": "exact 3-8 word phrase from text", "source_id": 1, "citation_text": "(Author Year)" },
+    { "anchor": "another exact phrase", "source_id": 2, "citation_text": "(Author Year)" },
+    { "anchor": "third phrase showing reuse", "source_id": 1, "citation_text": "(Author Year)" }
   ],
   "formatted_citations": {
-    "1": "Complete bibliography entry",
-    "2": "Complete bibliography entry"
+    "1": "Complete bibliography entry for source 1",
+    "2": "Complete bibliography entry for source 2"
   }
 }
 
-FINAL CHECKLIST (must all be YES):
-- Used ${minSourcesToUse}+ sources?
-- ~${targetInsertions} total insertions?
-- Citations evenly distributed?
-- All citations include year?
-- Output is valid JSON ONLY?
+═══════════════════════════════════════════════════════════════
+PRE-SUBMISSION CHECKLIST (ALL must be YES):
+═══════════════════════════════════════════════════════════════
+
+□ Used ${minSourcesToUse}+ different sources? 
+□ Created ${targetDensity}+ total insertions?
+□ Citations in introduction section?
+□ Citations throughout body paragraphs?
+□ Citations in conclusion?
+□ Strong sources cited multiple times?
+□ All anchor phrases are exact quotes from text?
+□ All citations include year or "n.d."?
+□ Output is valid JSON only (no extra text)?
+□ "Further Reading" section should have 0-2 sources MAX?
+
+FAILURE TO MEET THESE TARGETS IS UNACCEPTABLE. Maximize citation density.
 `;
   },
 
   // --- HELPER: Build Enhanced Source Context ---
   _buildSourceContext(sources) {
-    return sources.map(s => `
-[ID:${s.id}]
+    return sources.map(s => {
+      // Extract key themes/topics from content for better matching
+      const contentPreview = s.content.substring(0, 1500).replace(/\n/g, " ");
+      
+      return `
+[ID:${s.id}] ════════════════════════════════════════
 TITLE: ${s.title}
 URL: ${s.link}
 DOI: ${s.meta?.doi || "none"}
 SITE_NAME: ${s.meta?.siteName || "Unknown"}
 DETECTED_AUTHOR: ${s.meta?.author || "Unknown"}
-ALL_AUTHORS: ${(s.meta?.allAuthors || []).join(" | ")}
-AUTHOR_COUNT: ${(s.meta?.allAuthors || []).length}
+ALL_AUTHORS: ${(s.meta?.allAuthors || []).join(" | ") || "Unknown"}
+AUTHOR_COUNT: ${(s.meta?.allAuthors || []).length || 1}
 DETECTED_DATE: ${s.meta?.published || "n.d."}
 YEAR: ${s.meta?.year || "n.d."}
-TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, " ")}...
-`).join("\n\n---\n\n");
+
+CONTENT PREVIEW (use to match with user's text):
+${contentPreview}...
+════════════════════════════════════════════════════════════`;
+    }).join("\n\n");
   },
 
   // --- HELPER: Style Rules ---
@@ -171,37 +257,58 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, " ")}...
 
     if (s.includes("chicago")) {
       return `
+═══════════════════════════════════════════════════════════════
 STYLE: Chicago Manual of Style (17th Edition)
+═══════════════════════════════════════════════════════════════
 
-IN-TEXT:
+IN-TEXT FORMAT:
 - 1 author: (LastName Year)
 - 2 authors: (LastName1 and LastName2 Year)
 - 3+ authors: (LastName1 et al. Year)
 - No date: (LastName n.d.)
+- Organization: (Organization Name Year)
 
-IMPORTANT:
-- NO comma between author and year
+CRITICAL: NO comma between author and year in Chicago style
+
+BIBLIOGRAPHY FORMAT:
+LastName, FirstName. "Article Title." Website Name. Month Day, Year. URL.
 `;
     }
 
     if (s.includes("mla")) {
       return `
+═══════════════════════════════════════════════════════════════
 STYLE: MLA 9th Edition
+═══════════════════════════════════════════════════════════════
 
-IN-TEXT:
+IN-TEXT FORMAT:
 - 1 author: (LastName)
 - 2 authors: (LastName1 and LastName2)
 - 3+ authors: (LastName1 et al.)
+- Organization: (Organization Name)
+- NO year in parenthetical citations
+
+BIBLIOGRAPHY FORMAT:
+LastName, FirstName. "Article Title." Container Title, Date, URL.
 `;
     }
 
     return `
+═══════════════════════════════════════════════════════════════
 STYLE: APA 7th Edition
+═══════════════════════════════════════════════════════════════
 
-IN-TEXT:
+IN-TEXT FORMAT:
 - 1 author: (Author, Year)
 - 2 authors: (Author1 & Author2, Year)
 - 3+ authors: (Author1 et al., Year)
+- No date: (Author, n.d.)
+- Organization: (Organization Name, Year)
+
+CRITICAL: Use comma between author and year, use & not "and"
+
+BIBLIOGRAPHY FORMAT:
+Author, A. A. (Year). Title of article. Site Name. URL
 `;
   }
 };
