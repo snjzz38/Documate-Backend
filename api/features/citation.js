@@ -273,6 +273,59 @@ const PipelineService = {
         return `${text} (Accessed ${today})`;
     },
 
+    // Extract year from source
+    extractYear(source) {
+        let year = "n.d.";
+        
+        // Try meta.published first
+        if (source.meta.published && source.meta.published !== "n.d.") {
+            const yearMatch = source.meta.published.match(/\b(20\d{2})\b/);
+            if (yearMatch) return yearMatch[1];
+        }
+        
+        // Try content
+        const contentYearMatch = source.content.match(/\b(20\d{2})\b/);
+        if (contentYearMatch) return contentYearMatch[1];
+        
+        return year;
+    },
+
+    // Validates and fixes citation_text to ensure it has a year
+    validateCitationText(citationText, source, style) {
+        if (!citationText) return null;
+        
+        // Extract the year
+        const year = this.extractYear(source);
+        
+        // Check if citation already has a year
+        const hasYear = /\d{4}|n\.d\./i.test(citationText);
+        
+        if (hasYear) {
+            return citationText; // Already good
+        }
+        
+        // Missing year - need to add it
+        // Parse the citation to add year in the right place
+        
+        // Pattern: (Author) or (Author and Author) or (Author et al.)
+        const match = citationText.match(/^\((.*?)\)$/);
+        if (!match) return citationText; // Can't parse, return as-is
+        
+        const authorPart = match[1];
+        
+        // Determine style-specific formatting
+        if (style && style.toLowerCase().includes('chicago')) {
+            // Chicago: (Author Year) - no comma
+            return `(${authorPart} ${year})`;
+        } else if (style && style.toLowerCase().includes('apa')) {
+            // APA: (Author, Year) - with comma
+            return `(${authorPart}, ${year})`;
+        } else {
+            // Default/MLA: (Author Year) - no comma
+            return `(${authorPart} ${year})`;
+        }
+    },
+
     // Generates a backup citation if AI returns "Unknown" or fails
     generateFallback(source) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -285,7 +338,6 @@ const PipelineService = {
         );
         
         if (!author || author === "Unknown" || isSiteName) {
-            // Try to find author in content
             const authorMatch = source.content.match(/([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
             if (authorMatch) {
                 author = `${authorMatch[1]} and ${authorMatch[2]}`;
@@ -294,7 +346,6 @@ const PipelineService = {
                 if (singleAuthor) {
                     author = singleAuthor[1];
                 } else {
-                    // Use site name as last resort
                     author = source.meta.siteName || "Unknown Source";
                 }
             }
@@ -302,7 +353,6 @@ const PipelineService = {
         
         let date = source.meta.published;
         if (!date || date === "n.d.") {
-            // Try to find date in content
             const dateMatch = source.content.match(/(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/);
             if (dateMatch) {
                 date = dateMatch[0];
@@ -312,17 +362,13 @@ const PipelineService = {
             }
         }
 
-        // Use actual URL, not placeholder
         const url = source.link;
-        
-        // Use the actual title from source, not user text
         const title = source.title || "Untitled";
         
-        // Default to a generic clean format with REAL URL
         return `${author}. "${title}". ${source.meta.siteName}. ${date}. ${url} (Accessed ${today})`;
     },
 
-    processInsertions(context, insertions, sources, formattedMap, outputType) {
+    processInsertions(context, insertions, sources, formattedMap, outputType, style) {
         let resultText = context;
         let footnoteCounter = 1;
         let usedSourceIds = new Set();
@@ -388,15 +434,16 @@ const PipelineService = {
                 footnotesList.push(`${footnoteCounter}. ${citString}`);
                 footnoteCounter++;
             } else {
-                // IN-TEXT LOGIC
+                // IN-TEXT LOGIC with YEAR VALIDATION
                 let inText = item.citation_text;
                 
-                // Check if citation_text is also invalid
-                if (!inText || inText.length < 3 || inText === '(Author, n.d.)' || inText.includes('Author')) {
-                    // Extract author from source
+                // CRITICAL: Validate that citation has a year
+                inText = this.validateCitationText(inText, source, style);
+                
+                // If still invalid after validation, generate from scratch
+                if (!inText || inText.length < 3) {
                     let auth = source.meta.author;
                     
-                    // Check if it's actually site name, try to get real author
                     const isSiteName = auth === source.meta.siteName || 
                                      (auth && auth.toLowerCase().includes(source.meta.siteName.toLowerCase().replace(/\.(com|org|edu|net)/, '')));
                     
@@ -404,25 +451,23 @@ const PipelineService = {
                         const authorMatch = source.content.match(/([A-Z][a-z]+)\s+[A-Z]\.?\s+[A-Z][a-z]+\s+and/);
                         auth = authorMatch ? authorMatch[1] : (source.meta.siteName || "Unknown");
                     } else if (auth.includes(' and ')) {
-                        // Multiple authors - get first last name
                         auth = auth.split(' and ')[0].split(' ').pop();
                     } else {
-                        // Single author - get last name
                         auth = auth.split(' ').pop();
                     }
                     
-                    // Extract year from date
-                    let yr = "n.d.";
-                    if (source.meta.published && source.meta.published !== "n.d.") {
-                        yr = source.meta.published.substring(0, 4);
-                    } else {
-                        // Try to find year in content
-                        const yearMatch = source.content.match(/\b(20\d{2})\b/);
-                        if (yearMatch) yr = yearMatch[1];
-                    }
+                    const yr = this.extractYear(source);
                     
-                    inText = `(${auth}, ${yr})`;
+                    // Format based on style
+                    if (style && style.toLowerCase().includes('chicago')) {
+                        inText = `(${auth} ${yr})`;
+                    } else if (style && style.toLowerCase().includes('apa')) {
+                        inText = `(${auth}, ${yr})`;
+                    } else {
+                        inText = `(${auth} ${yr})`;
+                    }
                 }
+                
                 insertContent = " " + inText;
             }
             resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
@@ -439,7 +484,6 @@ const PipelineService = {
                 if (usedSourceIds.has(s.id)) {
                     let cit = formattedMap[s.id] || this.generateFallback(s);
                     
-                    // Check for invalid citations
                     const isInvalid = cit.includes('[URL]') || 
                                     cit.includes('[link]') ||
                                     cit.startsWith('Author.') ||
@@ -460,7 +504,6 @@ const PipelineService = {
                 if (!usedSourceIds.has(s.id)) {
                     let cit = formattedMap[s.id] || this.generateFallback(s);
                     
-                    // Check for invalid citations
                     const isInvalid = cit.includes('[URL]') || 
                                     cit.includes('[link]') ||
                                     cit.startsWith('Author.') ||
