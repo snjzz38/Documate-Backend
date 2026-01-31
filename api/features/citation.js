@@ -117,9 +117,58 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
         // --- 1. QUOTES ---
         if (type === 'quotes') {
             return `
-                TASK: Extract quotes. CONTEXT: "${context.substring(0, 300)}..."
-                SOURCES:\n${sourceContext}
-                RULES: Output strictly in order ID 1 to ${sources.length}. Format: **[ID] Title** - URL \n > "Quote..."
+                TASK: Extract high-quality quotes that SUPPORT the user's argument/perspective.
+                
+                USER'S TEXT CONTEXT: "${context.substring(0, 500)}..."
+                
+                SOURCES:
+                ${sourceContext}
+                
+                CRITICAL QUOTE EXTRACTION RULES:
+                
+                1. **QUOTE LENGTH**: Extract SUBSTANTIAL quotes (2-4 sentences, 50-150 words)
+                   - NOT single sentences unless exceptionally powerful
+                   - Look for complete thoughts, arguments, or explanations
+                   - Include context that makes the quote meaningful
+                
+                2. **RELEVANCE**: Quotes must DIRECTLY SUPPORT the user's argument
+                   - Analyze the user's perspective from their text
+                   - Find quotes that provide evidence, data, or expert opinion aligned with their view
+                   - Avoid generic or tangential quotes
+                
+                3. **QUALITY CRITERIA**:
+                   - Prefer quotes with specific data, statistics, or concrete examples
+                   - Choose authoritative statements from experts or organizations
+                   - Select quotes that add credibility to the user's argument
+                   - Avoid vague or generic statements
+                
+                4. **EXTRACTION GUIDELINES**:
+                   - Extract the FULL relevant passage, not fragments
+                   - Include complete sentences with proper context
+                   - If a source has multiple good quotes, you can extract 2-3 separate quotes from the same source
+                   - Ensure quotes are self-contained and make sense on their own
+                
+                5. **FORMAT** (Output strictly in order ID 1 to ${sources.length}):
+                   **[ID] Title** - URL
+                   > "Complete quote with full context and multiple sentences if needed. This should be substantial and directly support the user's argument."
+                   
+                   OR if no relevant quote found:
+                   **[ID] Title** - URL
+                   > No relevant quote found that supports the argument.
+                
+                EXAMPLE OUTPUT:
+                
+                **[1] Climate Change Impacts** - https://example.com
+                > "Recent studies demonstrate that global temperatures have risen by 1.1°C since pre-industrial times, with the past decade being the warmest on record. This warming has led to increased frequency of extreme weather events, including hurricanes, droughts, and wildfires. The scientific consensus is clear: human activities, particularly the burning of fossil fuels, are the primary driver of these changes, and immediate action is required to prevent catastrophic consequences."
+                
+                **[2] Economic Costs** - https://example2.com
+                > "The economic impact of climate inaction is staggering. Without significant mitigation efforts, global GDP could decline by up to 23% by 2100, with developing nations facing even steeper losses."
+                
+                IMPORTANT: 
+                - Extract LONGER quotes (50-150 words) that provide substantial evidence
+                - Ensure each quote SUPPORTS the user's argument about "${context.substring(0, 100)}..."
+                - Quality over quantity - it's better to have fewer strong quotes than many weak ones
+                - Read the full TEXT_CONTENT to find the best passages
             `;
         }
 
