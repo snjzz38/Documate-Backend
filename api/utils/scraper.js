@@ -7,48 +7,37 @@ const USER_AGENTS = [
 ];
 
 /**
- * HELPER: Find all valid sentence starts in the text.
- * Rule: A sentence starts at index 0, OR at a Capital Letter preceded by punctuation (.?!) and whitespace.
+ * HELPER: Extract metadata from raw HTML before cleaning.
+ * This ensures we capture Bylines/Dates that might be in <div> or <span> tags 
+ * which get stripped by the main content cleaner.
  */
-function findSentenceStartIndices(text) {
-    const indices = [0]; // The beginning is always a valid sentence start
-    // Regex: Match Punctuation (.?!) + Optional Quote + Whitespace + Capture Capital Letter
-    const regex = /[.!?]['"]?\s+([A-Z])/g;
-    let match;
-    
-    while ((match = regex.exec(text)) !== null) {
-        // The valid start is where the Capital Letter ([A-Z]) begins.
-        // match.index = start of punctuation
-        // match[0] = full match string (e.g., ". T")
-        // The captured group 1 is the letter. Its position is at the end of the match.
-        const letterIndex = match.index + match[0].indexOf(match[1]);
-        indices.push(letterIndex);
+function extractMetadata($) {
+    // 1. Meta Tags (Standard)
+    let author = $('meta[name="author"]').attr('content') || 
+                 $('meta[property="og:site_name"]').attr('content');
+    let date = $('meta[property="article:published_time"]').attr('content') || 
+               $('time').first().attr('datetime');
+
+    // 2. Text Forensics (Fallbacks)
+    // Scan headers/bylines specifically
+    if (!author || author === "Unknown") {
+        const byline = $('[class*="author"], [class*="byline"]').first().text().trim();
+        if (byline.length > 3 && byline.length < 50) {
+            author = byline.replace(/^By\s+/i, '');
+        }
     }
-    return indices;
-}
-
-/**
- * HELPER: Extract a chunk starting at index, extended to the nearest sentence end.
- */
-function extractSentenceChunk(text, startIndex, minLength) {
-    if (startIndex >= text.length) return "";
-
-    let endIndex = startIndex + minLength;
     
-    // Look ahead up to 500 chars to find a clean sentence ending
-    // Look for punctuation followed by space or end of string
-    const buffer = text.substring(endIndex, endIndex + 500);
-    const endMatch = buffer.match(/[.!?]['"]?(?:\s|$)/);
-
-    if (endMatch) {
-        endIndex += endMatch.index + 1; // Include the punctuation
-    } else {
-        // Fallback: stop at nearest space
-        const space = buffer.indexOf(' ');
-        if (space > -1) endIndex += space;
+    // 3. Date Regex fallback on the whole body (for "April 24, 2018")
+    if (!date || date === "n.d.") {
+        const bodyText = $('body').text().substring(0, 1500); // Check header area
+        const dateMatch = bodyText.match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
+        if (dateMatch) date = dateMatch[1];
     }
 
-    return text.substring(startIndex, endIndex);
+    return { 
+        author: author || "Unknown", 
+        date: date || "n.d." 
+    };
 }
 
 export const ScraperAPI = {
@@ -71,13 +60,16 @@ export const ScraperAPI = {
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
+                // PDF Handler
                 const contentType = res.headers.get('content-type') || '';
                 if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
-                    return this._formatResult(pdfData.text, source, "PDF Document", "n.d.");
+                    // PDFs don't have HTML structure, so we use the smart chunker on raw text
+                    return this._formatPdfResult(pdfData.text, source);
                 }
 
+                // HTML Handler
                 const html = await res.text();
                 return this._parseHtml(html, source);
 
@@ -97,74 +89,95 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // 1. Clean Garbage
-        $('script, style, nav, footer, iframe, svg, header, aside, .ad, .popup, .menu, noscript').remove();
+        // 1. Metadata Extraction (Do this BEFORE destructive cleaning)
+        const meta = extractMetadata($);
+
+        // 2. Garbage Removal (UI elements)
+        $('script, style, nav, footer, iframe, svg, header, aside, form, button').remove();
+        $('.ad, .popup, .menu, .share-buttons, .subscribe, .newsletter, .cookie-banner').remove();
         $('[aria-hidden="true"]').remove();
-        $('div:contains("Enable JavaScript")').remove();
 
-        // 2. Extract Text
-        const rawText = $('body').text().replace(/\s+/g, ' ').trim();
+        // 3. MAIN CONTENT FINDER
+        // We look for specific containers to avoid scraping sidebars/footers
+        let contentObj = $('article');
+        if (contentObj.length === 0) contentObj = $('[role="main"]');
+        if (contentObj.length === 0) contentObj = $('.main-content, .entry-content, #content');
+        if (contentObj.length === 0) contentObj = $('body'); // Fallback
 
-        // 3. Metadata Extraction
-        let author = $('meta[name="author"]').attr('content') || 
-                     $('meta[property="og:site_name"]').attr('content');
-        let date = $('meta[property="article:published_time"]').attr('content') || 
-                   $('time').first().attr('datetime');
+        // 4. SEMANTIC PARAGRAPH EXTRACTION
+        // Instead of grabbing raw text, we grab <p> tags. 
+        // This ensures we get actual sentences and skip navigation links/lists.
+        const paragraphs = [];
+        contentObj.find('p').each((i, el) => {
+            const text = $(el).text().trim();
+            // Filter out short garbage (e.g. "Read more", "Share", dates in lists)
+            if (text.length > 50) {
+                paragraphs.push(text);
+            }
+        });
 
-        if (!author || author === "Unknown") {
-            // Simple text scan fallback
-            const authMatch = rawText.substring(0, 1000).match(/(?:By|Written by)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s+|\s+)[A-Z][a-z]+)/);
-            if (authMatch) author = authMatch[1];
+        // 5. CONTENT ASSEMBLY (Intro + 2 Random Core Chunks)
+        let finalContent = "";
+
+        if (paragraphs.length > 0) {
+            // A. Intro: First 2-3 paragraphs (approx 1000 chars)
+            // Usually contains the thesis/summary
+            let charCount = 0;
+            let introParas = [];
+            for (let i = 0; i < paragraphs.length; i++) {
+                introParas.push(paragraphs[i]);
+                charCount += paragraphs[i].length;
+                if (charCount > 1000) break;
+            }
+            finalContent = introParas.join('\n\n');
+
+            // B. Random Central Chunks (if content is long enough)
+            if (paragraphs.length > 6) {
+                const remainingParas = paragraphs.slice(introParas.length);
+                if (remainingParas.length > 2) {
+                    // Pick 2 random distinct paragraphs from the body
+                    const idx1 = Math.floor(Math.random() * remainingParas.length);
+                    let idx2 = Math.floor(Math.random() * remainingParas.length);
+                    // Ensure they aren't the same
+                    while (idx2 === idx1 && remainingParas.length > 1) {
+                        idx2 = Math.floor(Math.random() * remainingParas.length);
+                    }
+
+                    finalContent += `\n\n... [Excerpt A] ...\n${remainingParas[idx1]}`;
+                    finalContent += `\n\n... [Excerpt B] ...\n${remainingParas[idx2]}`;
+                }
+            }
+        } else {
+            // Fallback: If no <p> tags found, use raw body text logic
+            const rawBody = $('body').text().replace(/\s+/g, ' ').trim();
+            finalContent = rawBody.substring(0, 1500);
         }
 
-        return this._formatResult(rawText, originalSource, author || "Unknown", date || "n.d.");
+        return {
+            ...originalSource,
+            content: finalContent,
+            meta: { 
+                author: meta.author ? meta.author.trim() : "Unknown", 
+                published: meta.date ? meta.date.substring(0, 20) : "n.d.", 
+                siteName: new URL(originalSource.link).hostname.replace('www.', '') 
+            }
+        };
     },
 
-    _formatResult(rawText, source, author, date) {
-        const len = rawText.length;
+    _formatPdfResult(rawText, source) {
+        // PDF Chunking Logic
+        const safeText = rawText.replace(/\s+/g, ' ').trim();
+        let finalContent = safeText.substring(0, 1200); // Intro
         
-        // 1. Always get the Intro (0 to ~1000 chars)
-        // This is crucial for Metadata extraction in the prompts
-        let finalContent = extractSentenceChunk(rawText, 0, 1000);
-        
-        // 2. Add Random Middle/End Chunks if text is long enough
-        if (len > 3000) {
-            // Find ALL valid sentence starts in the remaining text
-            // We start searching after the intro (index 1000)
-            const remainingTextStart = 1000;
-            const validStarts = findSentenceStartIndices(rawText)
-                .filter(idx => idx > remainingTextStart && idx < len - 500); // Ensure meaningful length
-
-            if (validStarts.length > 2) {
-                // Pick 2 random starts
-                const pick1 = validStarts[Math.floor(Math.random() * validStarts.length)];
-                
-                // Pick 2nd, ensure non-overlapping (at least 500 chars away)
-                const validStarts2 = validStarts.filter(idx => Math.abs(idx - pick1) > 600);
-                const pick2 = validStarts2.length > 0 
-                    ? validStarts2[Math.floor(Math.random() * validStarts2.length)] 
-                    : null;
-
-                // Extract & Append
-                finalContent += `\n... [Random Section A] ...\n${extractSentenceChunk(rawText, pick1, 400)}`;
-                
-                if (pick2) {
-                    finalContent += `\n... [Random Section B] ...\n${extractSentenceChunk(rawText, pick2, 400)}`;
-                }
-            } else {
-                // Fallback if not enough sentences found (weird formatting): Take middle
-                finalContent += `\n... [Middle] ...\n${extractSentenceChunk(rawText, Math.floor(len/2), 500)}`;
-            }
+        if (safeText.length > 3000) {
+             const mid = Math.floor(safeText.length * 0.4);
+             finalContent += `\n... [PDF Excerpt] ...\n${safeText.substring(mid, mid + 600)}`;
         }
 
         return {
             ...source,
             content: finalContent,
-            meta: { 
-                author: author ? author.trim() : "Unknown", 
-                published: date ? date.substring(0, 20) : "n.d.", 
-                siteName: new URL(source.link).hostname.replace('www.', '') 
-            }
+            meta: { author: "PDF Document", published: "n.d.", siteName: "PDF" }
         };
     }
 };
