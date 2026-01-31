@@ -182,30 +182,22 @@ export default async function handler(req, res) {
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         const SEARCH_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
-        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-        // 1. QUOTES
+        // --- 1. QUOTES ---
         if (preLoadedSources?.length > 0) {
-            // FIX: Correct 2-argument call
-            const prompt = CitationPrompts.buildQuotes(context, preLoadedSources);
+            // FIX: Correct 4-argument call (Quotes doesn't need style/sources, so pass null/array)
+            const prompt = CitationPrompts.build('quotes', null, context, preLoadedSources);
             const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
             return res.status(200).json({ success: true, text: result });
         }
 
-        // 2. SEARCH & SCRAPE
+        // --- 2. CITATIONS ---
         const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX);
         const richSources = await ScraperAPI.scrape(rawSources);
         
-        // 3. GENERATE
-        let prompt;
+        // FIX: Correct 4-argument call
+        const prompt = CitationPrompts.build(outputType, style, context, richSources);
         const isJson = outputType !== 'bibliography';
-
-        if (outputType === 'bibliography') {
-            prompt = CitationPrompts.buildBibliography(style, richSources, today);
-        } else {
-            // Standard Citation Insertion
-            prompt = CitationPrompts.buildInsertion(style, context, richSources, today);
-        }
         
         const aiResponse = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, isJson);
 
@@ -216,17 +208,10 @@ export default async function handler(req, res) {
         } 
         else {
             try {
-                // Find JSON block
-                const firstBrace = aiResponse.indexOf('{');
-                const lastBrace = aiResponse.lastIndexOf('}');
-                
-                if (firstBrace !== -1 && lastBrace !== -1) {
-                    const jsonStr = aiResponse.substring(firstBrace, lastBrace + 1);
-                    const data = JSON.parse(jsonStr);
-                    finalOutput = PipelineService.processInsertions(context, data.insertions, richSources, data.formatted_citations, outputType, style);
-                } else {
-                    throw new Error("No JSON found");
-                }
+                const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+                const jsonStr = jsonMatch ? jsonMatch[0] : aiResponse;
+                const data = JSON.parse(jsonStr);
+                finalOutput = PipelineService.processInsertions(context, data.insertions, richSources, data.formatted_citations, outputType, style);
             } catch (e) {
                 finalOutput = aiResponse.replace(/```json/g, '').replace(/```/g, '');
             }
