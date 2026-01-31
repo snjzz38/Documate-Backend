@@ -1,15 +1,15 @@
 // api/utils/groqAPI.js
 
-// Ordered by reliability
+// FIXED: Removed smart quote at the end of the last model
 const GROQ_MODELS = [
-  "qwen/qwen3-32b",
-  "llama-3.1-8b-instant",
-  "meta-llama/llama-4-maverick-17b-128e-instruct",
-  "meta-llama/llama-4-scout-17b-16e-instruct",
-  "meta-llama/llama-guard-4-12b",
-  "meta-llama/llama-prompt-guard-2-22m",
-  "meta-llama/llama-prompt-guard-2-86m",
-  "moonshotai/kimi-k2-instruct-0905”,
+    "qwen/qwen3-32b",
+    "llama-3.1-8b-instant",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-guard-4-12b",
+    "meta-llama/llama-prompt-guard-2-22m",
+    "meta-llama/llama-prompt-guard-2-86m",
+    "moonshotai/kimi-k2-instruct-0905" // Fixed quote here
 ];
 
 export const GroqAPI = {
@@ -18,7 +18,10 @@ export const GroqAPI = {
 
         let lastError = null;
 
-        for (const model of GROQ_MODELS) {
+        // Rotation Logic: Try models in order. If one fails, move it to the back.
+        for (let i = 0; i < GROQ_MODELS.length; i++) {
+            const currentModel = GROQ_MODELS[0];
+
             try {
                 const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                     method: "POST",
@@ -27,7 +30,7 @@ export const GroqAPI = {
                         "Content-Type": "application/json"
                     },
                     body: JSON.stringify({
-                        model: model,
+                        model: currentModel,
                         messages: messages,
                         temperature: 0.1,
                         // Only send response_format if jsonMode is true
@@ -40,10 +43,10 @@ export const GroqAPI = {
                 if (!res.ok) {
                     const errorMsg = data.error?.message || `Status ${res.status}`;
                     
-                    // IF 400 (Bad Request), it might be JSON mode failing. 
-                    // Retry immediately without rotation, but disable JSON mode for this model.
+                    // Specific handling for 400 Bad Request (often caused by strict JSON mode issues)
                     if (res.status === 400 && jsonMode) {
                         // console.warn("Groq 400 received in JSON mode. Retrying as text...");
+                        // Recursively try again with jsonMode disabled for this specific model
                         return this.chat(messages, apiKey, false);
                     }
                     
@@ -51,14 +54,16 @@ export const GroqAPI = {
                 }
 
                 let content = data.choices[0].message.content;
-                // Clean internal thought chains (DeepSeek style)
+                
+                // Clean internal thought chains (DeepSeek/Reasoning models often output these tags)
                 return content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
             } catch (e) {
                 lastError = e;
-                // Rotate model for next attempt
+                // Rotate: Move the failed model to the end of the array
                 const failed = GROQ_MODELS.shift();
                 GROQ_MODELS.push(failed);
+                // The loop continues with the new first element
             }
         }
 
