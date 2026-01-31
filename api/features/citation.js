@@ -156,17 +156,9 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
                    **[ID] Title** - URL
                    > No relevant quote found that supports the argument.
                 
-                EXAMPLE OUTPUT:
-                
-                **[1] Climate Change Impacts** - https://example.com
-                > "Recent studies demonstrate that global temperatures have risen by 1.1°C since pre-industrial times, with the past decade being the warmest on record. This warming has led to increased frequency of extreme weather events, including hurricanes, droughts, and wildfires. The scientific consensus is clear: human activities, particularly the burning of fossil fuels, are the primary driver of these changes, and immediate action is required to prevent catastrophic consequences."
-                
-                **[2] Economic Costs** - https://example2.com
-                > "The economic impact of climate inaction is staggering. Without significant mitigation efforts, global GDP could decline by up to 23% by 2100, with developing nations facing even steeper losses."
-                
                 IMPORTANT: 
                 - Extract LONGER quotes (50-150 words) that provide substantial evidence
-                - Ensure each quote SUPPORTS the user's argument about "${context.substring(0, 100)}..."
+                - Ensure each quote SUPPORTS the user's argument
                 - Quality over quantity - it's better to have fewer strong quotes than many weak ones
                 - Read the full TEXT_CONTENT to find the best passages
             `;
@@ -224,31 +216,45 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
         let styleExamples = "";
         let citationStrategy = "";
         
+        // Calculate minimum sources to use (aim for 8-10 out of 10)
+        const minSourcesToUse = Math.max(8, sources.length - 2);
+        const targetInsertions = Math.floor(sources.length * 1.5); // ~15 insertions for 10 sources
+        
         // Different strategy for footnotes vs in-text
         if (type === 'footnotes') {
             citationStrategy = `
                 FOOTNOTE CITATION STRATEGY:
-                - You can cite the SAME source MULTIPLE times throughout the text
-                - Each time you cite a source, it gets a NEW superscript number
-                - Each citation appears as a separate numbered footnote at the bottom
-                - Example: If you cite Source ID:1 three times, you'll have:
-                  * First citation: ¹ (footnote 1 lists the source)
-                  * Second citation: ³ (footnote 3 lists the SAME source again)
-                  * Third citation: ⁶ (footnote 6 lists the SAME source again)
-                - This means your insertions array can have MULTIPLE entries with the same source_id
-                - This is ENCOURAGED for important sources - cite them 1-3 times in different locations
+                - You MUST use AT LEAST ${minSourcesToUse} out of ${sources.length} sources
+                - Aim for ${targetInsertions} total citations by citing key sources 2-3 times
+                - Each citation gets a NEW superscript number and footnote entry
+                - Spread citations evenly throughout the text
+                - Don't leave 90% of sources unused - that defeats the purpose!
+                
+                DISTRIBUTION EXAMPLE (for 10 sources):
+                - Use 8-10 different sources
+                - Cite the most important ones 2-3 times each
+                - Result: ~12-15 total footnote citations
+                - "Further Reading (Unused)" should have 0-2 sources MAX
             `;
         } else {
             citationStrategy = `
                 IN-TEXT CITATION STRATEGY:
-                - You can cite the SAME source MULTIPLE times throughout the text
-                - The citation text stays the same each time (e.g., "(West and Allen 2018)")
-                - Example: If Source ID:1 is highly relevant, you might cite it 2-3 times:
-                  * "Climate change is urgent (West and Allen 2018). ... other text ... This requires action (West and Allen 2018)."
-                - This means your insertions array can have MULTIPLE entries with the same source_id
-                - Each insertion just needs a different anchor point in the text
-                - The same source only appears ONCE in the formatted_citations/bibliography
-                - This is ENCOURAGED for authoritative sources - cite them 1-3 times in different sections
+                - You MUST use AT LEAST ${minSourcesToUse} out of ${sources.length} sources
+                - Aim for ${targetInsertions} total citations by citing key sources 2-3 times
+                - The same citation text can appear multiple times (e.g., "(Smith 2020)")
+                - Spread citations evenly throughout the text (intro, body paragraphs, conclusion)
+                - Don't cluster all citations in one section
+                
+                DISTRIBUTION EXAMPLE (for 10 sources):
+                - Use 8-10 different sources
+                - Cite authoritative sources 2-3 times in different paragraphs
+                - Result: ~12-15 total in-text citations
+                - "Further Reading (Unused)" should have 0-2 sources MAX
+                
+                PARAGRAPH DISTRIBUTION GUIDE:
+                - Introduction: 2-3 citations
+                - Each body paragraph: 2-3 citations
+                - Conclusion: 1-2 citations
             `;
         }
         
@@ -261,51 +267,31 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
                   - 2 authors: LastName1, FirstName1, and FirstName2 LastName2. "Article Title." *Website Name*. Month Day, Year. URL or https://doi.org/DOI.
                   - 3+ authors: LastName1, FirstName1, et al. "Article Title." *Website Name*. Month Day, Year. URL or https://doi.org/DOI.
                 
-                KEY RULES:
-                  - Use period after author names
-                  - Article title in quotes with period inside
-                  - Website/Publisher in italics (*Name*)
-                  - Period after website name
-                  - Full date: Month Day, Year (e.g., April 24, 2018)
-                  - If DOI exists, use https://doi.org/DOI instead of regular URL
-                  - End with period after URL/DOI
-                
                 IN-TEXT FORMAT (Follow EXACTLY):
                   - 1 author: (LastName Year) - e.g., (Smith 2020)
                   - 2 authors: (LastName1 and LastName2 Year) - e.g., (West and Allen 2018)
                   - 3+ authors: (LastName1 et al. Year) - e.g., (Johnson et al. 2024)
-                  - No date: (LastName n.d.) - ONLY use this if YEAR field is "n.d."
+                  - No date: (LastName n.d.) - ONLY use if YEAR field is "n.d."
                   
-                CRITICAL: 
-                - NO COMMA between author and year in Chicago in-text citations!
-                - ALWAYS include the YEAR field value in citation_text
-                - The YEAR field is pre-extracted for you - USE IT!
+                CRITICAL: NO COMMA between author and year in Chicago!
             `;
             styleExamples = `
-                CHICAGO EXAMPLES:
+                CHICAGO CITATION PLACEMENT EXAMPLES:
                 
-                Example 1 (Source with Year):
-                - ALL_AUTHORS: "United Nations Sustainable Development"
-                - YEAR: "2030"
-                - citation_text: "(United Nations Sustainable Development 2030)" ✓ CORRECT
-                - citation_text: "(United Nations Sustainable Development)" ✗ WRONG - missing year!
+                Introduction paragraph:
+                "Climate change represents one of the most pressing challenges (United Nations 2030). The scientific consensus is clear (IPCC 2023)."
                 
-                Example 2 (Two Authors with Year):
-                - ALL_AUTHORS: "Darrell M. West | John R. Allen"
-                - YEAR: "2018"
-                - citation_text: "(West and Allen 2018)" ✓ CORRECT
-                - citation_text: "(West and Allen)" ✗ WRONG - missing year!
+                Body paragraph about causes:
+                "The principal driver is greenhouse gases (UNDP 2023). Deforestation exacerbates the issue (Greenpeace 2015)."
                 
-                Example 3 (Multiple Authors):
-                - ALL_AUTHORS: "S.M. Howden | J.-F. Soussana | F.N. Tubiello | N. Chhetri | M. Dunlop | H. Meinke"
-                - YEAR: "2007"
-                - citation_text: "(Howden et al. 2007)" ✓ CORRECT
-                - citation_text: "(Howden et al.)" ✗ WRONG - missing year!
+                Body paragraph about consequences:
+                "Rising temperatures have resulted in extreme weather (Harvard 2024). Human health is at risk (Harvard 2024)."
                 
-                Example 4 (No Date Available):
-                - ALL_AUTHORS: "Greenpeace UK"
-                - YEAR: "n.d."
-                - citation_text: "(Greenpeace UK n.d.)" ✓ CORRECT
+                Body paragraph about solutions:
+                "Mitigation strategies are essential (IPCC 2023). Adaptation measures include resilient infrastructure (Howden et al. 2007)."
+                
+                Conclusion:
+                "The time to act is now (University of Chicago Press n.d.)."
             `;
         } else if (style.toLowerCase().includes("mla")) {
             styleRules = `
@@ -313,29 +299,26 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
                 
                 BIBLIOGRAPHY FORMAT:
                   - 1 author: LastName, FirstName. "Article Title." *Container Title*, Date, URL.
-                  - 2 authors: LastName1, FirstName1, and FirstName2 LastName2. "Article Title." *Container*, Date, URL.
-                  - 3+ authors: LastName1, FirstName1, et al. "Article Title." *Container*, Date, URL.
+                  - 2 authors: LastName1, FirstName1, and FirstName2 LastName2.
+                  - 3+ authors: LastName1, FirstName1, et al.
                 
                 IN-TEXT FORMAT:
                   - 1 author: (LastName)
                   - 2 authors: (LastName1 and LastName2)
                   - 3+ authors: (LastName1 et al.)
-                  
-                NOTE: MLA typically doesn't include year in parenthetical citations unless needed for clarity
             `;
         } else if (style.toLowerCase().includes("apa")) {
             styleRules = `
                 STYLE: APA 7th Edition
                 
                 BIBLIOGRAPHY FORMAT:
-                  - 1 author: Author, A. A. (Year). Title of article. *Site Name*. URL or https://doi.org/DOI
-                  - 2 authors: Author1, A. A., & Author2, B. B. (Year). Title. *Site Name*. URL
-                  - 3+ authors: Author1, A. A., Author2, B. B., & Author3, C. C. (Year). Title. *Site Name*. URL
+                  - Use ALL authors from ALL_AUTHORS field
+                  - Include DOI when available
                 
                 IN-TEXT FORMAT:
-                  - 1 author: (Author, Year) - MUST include year!
-                  - 2 authors: (Author1 & Author2, Year) - MUST include year!
-                  - 3+ authors: (Author1 et al., Year) - MUST include year!
+                  - 1 author: (Author, Year)
+                  - 2 authors: (Author1 & Author2, Year)
+                  - 3+ authors: (Author1 et al., Year)
             `;
         }
 
@@ -350,63 +333,63 @@ TEXT_CONTENT: ${s.content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             
             TEXT TO CITE: "${context}"
             
-            🚨 MANDATORY REQUIREMENT - READ THIS CAREFULLY 🚨
-            Every source has a "YEAR" field. This is the year you MUST use in citation_text.
-            - If YEAR is "2018", your citation MUST include "2018"
-            - If YEAR is "2023", your citation MUST include "2023"
-            - If YEAR is "n.d.", your citation MUST include "n.d."
-            There is NO situation where you omit the year/date from citation_text!
+            🎯 PRIMARY GOAL: USE ${minSourcesToUse}-${sources.length} SOURCES (NOT just 1-2!)
             
-            CRITICAL INSTRUCTIONS:
+            CITATION DISTRIBUTION REQUIREMENTS:
             
-            0. **CITATION DISTRIBUTION & REUSE**:
+            1. **MANDATORY SOURCE USAGE**:
                - You have ${sources.length} sources available
-               - Try to use AT LEAST ${Math.max(4, Math.floor(sources.length * 0.6))} DIFFERENT sources
-               - For particularly authoritative or relevant sources, cite them MULTIPLE times (1-3 insertions per source)
-               - Spread citations throughout the text - don't cluster them all in one section
+               - You MUST use AT LEAST ${minSourcesToUse} different sources
+               - Target: ${targetInsertions} total citation insertions
+               - Leaving 7-8 sources unused is UNACCEPTABLE
+               - The "Further Reading (Unused)" section should be nearly EMPTY (0-2 sources max)
             
-            1. **YEAR/DATE REQUIREMENT - NON-NEGOTIABLE**:
-               - Look at the YEAR field for each source
-               - Include this YEAR in every citation_text
-               - Format for Chicago: (Author Year) with NO comma
-               - Format for APA: (Author, Year) with comma
-               - Format for MLA: (Author) typically, but include year if helpful
-               - VALIDATION: Every citation_text MUST contain a year OR "n.d."
+            2. **HOW TO ACHIEVE THIS**:
+               - Read through the ENTIRE user text
+               - Identify which sources are relevant to each section/paragraph
+               - Cite multiple sources per paragraph when appropriate
+               - For highly relevant sources, cite them 2-3 times in different locations
+               - Example: If discussing health impacts, cite Harvard 2-3 times in that section
             
-            2. **MULTIPLE AUTHORS - READ ALL_AUTHORS FIELD**:
-               - The ALL_AUTHORS field shows ALL authors separated by " | "
-               - Count the separators to determine author count
+            3. **YEAR/DATE REQUIREMENT - MANDATORY**:
+               - Every citation_text MUST include the YEAR field value
+               - Format: (Author Year) for Chicago, (Author, Year) for APA
+               - NO citations without dates unless YEAR is "n.d."
+            
+            4. **MULTIPLE AUTHORS**:
+               - Check ALL_AUTHORS field for multiple authors separated by " | "
                - Include ALL authors or use "et al." for 3+
             
-            3. **BIBLIOGRAPHY FORMAT**:
-               - Follow the EXACT format shown in examples
-               - Include ALL author full names (unless 3+, then use et al.)
-               - Check DOI field - if DOI exists, use https://doi.org/DOI
-               - Each source appears ONLY ONCE in formatted_citations
-            
-            4. **URL/DOI HANDLING**:
-               - If DOI exists and is not "none", use: https://doi.org/[DOI]
-               - Otherwise use the regular URL
-               - NEVER use placeholders like "[URL]"
+            5. **BIBLIOGRAPHY FORMAT**:
+               - Follow exact format for ${style}
+               - Include DOI if available (not "none")
+               - Each source appears ONCE in formatted_citations even if cited multiple times
             
             OUTPUT FORMAT: Return strictly valid JSON.
             {
               "insertions": [
-                { "anchor": "phrase", "source_id": 1, "citation_text": "(Author YEAR)" },  // YEAR is mandatory!
-                { "anchor": "phrase", "source_id": 2, "citation_text": "(Author YEAR)" },  // YEAR is mandatory!
-                ...
+                { "anchor": "phrase 1", "source_id": 1, "citation_text": "(Author Year)" },
+                { "anchor": "phrase 2", "source_id": 2, "citation_text": "(Author Year)" },
+                { "anchor": "phrase 3", "source_id": 3, "citation_text": "(Author Year)" },
+                { "anchor": "phrase 4", "source_id": 1, "citation_text": "(Author Year)" },  // Same source, different location
+                { "anchor": "phrase 5", "source_id": 4, "citation_text": "(Author Year)" },
+                ... continue until you have ~${targetInsertions} insertions using ${minSourcesToUse}+ different sources
               ],
-              "formatted_citations": { 
-                "1": "Complete bibliography entry.",
-                "2": "Complete bibliography entry.",
-                ...
+              "formatted_citations": {
+                "1": "Complete bibliography entry",
+                "2": "Complete bibliography entry",
+                ... one entry per unique source cited
               }
             }
             
-            FINAL CHECK before submitting:
-            ✓ Does EVERY citation_text contain a year or "n.d."?
-            ✓ Are you using 60%+ of available sources?
-            ✓ Are important sources cited 2-3 times?
+            ✅ FINAL VERIFICATION CHECKLIST:
+            □ Am I using at least ${minSourcesToUse} different sources?
+            □ Do I have around ${targetInsertions} total insertions?
+            □ Are citations spread throughout the text (not clustered)?
+            □ Does every citation_text include a year or "n.d."?
+            □ Will "Further Reading (Unused)" be nearly empty?
+            
+            If you answer NO to any of these, revise your citations before submitting!
         `;
     }
 };
