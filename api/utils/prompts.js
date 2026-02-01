@@ -1,6 +1,238 @@
 // api/utils/prompts.js
 
 export const CitationPrompts = {
+
+    // ======================================================================
+    // STEP 1: Generate formatted citations for all sources
+    // Called by citation.js for in-text and footnotes modes
+    // ======================================================================
+    buildStep1(style, sources) {
+        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        const safeSources = Array.isArray(sources) ? sources : [];
+        
+        const sourceContext = this._buildSourceContext(safeSources);
+        
+        const s = (style || "").toLowerCase();
+        let styleRules = "";
+        
+        if (s.includes("chicago")) {
+            styleRules = `
+STYLE: Chicago Manual of Style (17th Edition)
+FORMAT: LastName, FirstName. "Article Title." *Website Name*. Month Day, Year. URL.
+- 2 authors: LastName1, FirstName1, and FirstName2 LastName2.
+- 3+ authors: LastName1, FirstName1, et al.
+- If DOI exists: use https://doi.org/DOI instead of URL`;
+        } else if (s.includes("mla")) {
+            styleRules = `
+STYLE: MLA 9th Edition
+FORMAT: LastName, FirstName. "Article Title." *Container Title*, Date, URL.
+- 2 authors: LastName1, FirstName1, and FirstName2 LastName2.
+- 3+ authors: LastName1, FirstName1, et al.`;
+        } else {
+            styleRules = `
+STYLE: APA 7th Edition
+FORMAT: Author, A. A. (Year). Title of article. *Site Name*. URL
+- 2 authors: Author1, A. A., & Author2, B. B. (Year).
+- 3+ authors: List all authors with & before last`;
+        }
+        
+        return `
+TASK: Generate formatted bibliography entries for ALL ${safeSources.length} sources.
+
+${styleRules}
+
+SOURCES:
+${sourceContext}
+
+INSTRUCTIONS:
+- Create ONE bibliography entry per source
+- Use ALL authors from ALL_AUTHORS (use "et al." for 3+)
+- Include DOI if available (not "none")
+- End each entry with: (Accessed ${today})
+
+OUTPUT: Return JSON only:
+{
+  "1": "Complete formatted citation for source 1",
+  "2": "Complete formatted citation for source 2",
+  ...
+}
+`;
+    },
+
+    // ======================================================================
+    // STEP 2: Generate insertion points
+    // Called by citation.js for in-text and footnotes modes
+    // ======================================================================
+    buildStep2(outputType, style, context, sources, formattedCitations) {
+        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        const safeSources = Array.isArray(sources) ? sources : [];
+        
+        const minSourcesToUse = Math.max(8, safeSources.length - 2);
+        const targetInsertions = Math.max(Math.floor(safeSources.length * 1.5), 12);
+        
+        // Count sentences for density calculation
+        const sentenceCount = (context.match(/[.!?]+/g) || []).length;
+        const targetDensity = Math.max(Math.floor(sentenceCount * 0.5), targetInsertions);
+        
+        const sourceContext = safeSources.map(s => {
+            const meta = s.meta || {};
+            let year = meta.year || "n.d.";
+            if (year === "n.d." && meta.published && meta.published !== "n.d.") {
+                const yearMatch = meta.published.match(/\b(20\d{2})\b/);
+                if (yearMatch) year = yearMatch[1];
+            }
+            
+            let authors = [];
+            if (meta.allAuthors && meta.allAuthors.length > 0) {
+                authors = meta.allAuthors;
+            } else if (meta.author && meta.author !== "Unknown") {
+                authors = [meta.author];
+            }
+            
+            return `[ID:${s.id}] ${s.title}
+  AUTHORS: ${authors.join(' | ') || "Unknown"} (${authors.length || 1} author(s))
+  YEAR: ${year}
+  SITE: ${meta.siteName || "Unknown"}
+  CONTENT PREVIEW: ${(s.content || "").substring(0, 400).replace(/\n/g, ' ')}...`;
+        }).join('\n\n');
+        
+        const st = (style || "").toLowerCase();
+        let citationFormat = "";
+        
+        if (st.includes("chicago")) {
+            citationFormat = `
+CHICAGO IN-TEXT FORMAT (NO comma between author and year):
+- 1 author: (LastName Year) → (Smith 2020)
+- 2 authors: (LastName1 and LastName2 Year) → (West and Allen 2018)
+- 3+ authors: (LastName1 et al. Year) → (Howden et al. 2007)
+- No date: (LastName n.d.)`;
+        } else if (st.includes("mla")) {
+            citationFormat = `
+MLA IN-TEXT FORMAT:
+- 1 author: (LastName)
+- 2 authors: (LastName1 and LastName2)
+- 3+ authors: (LastName1 et al.)`;
+        } else {
+            citationFormat = `
+APA IN-TEXT FORMAT (WITH comma between author and year):
+- 1 author: (Author, Year) → (Smith, 2020)
+- 2 authors: (Author1 & Author2, Year) → (West & Allen, 2018)
+- 3+ authors: (Author1 et al., Year) → (Howden et al., 2007)`;
+        }
+        
+        const footnoteInstructions = outputType === 'footnotes' ? `
+══════════════════════════════════════════════════════════════
+FOOTNOTE MODE (CRITICAL):
+══════════════════════════════════════════════════════════════
+- Each insertion gets a UNIQUE footnote number
+- Same source CAN and SHOULD be cited multiple times with different numbers
+- Example: Source 1 cited 3 times = footnotes 1, 5, 12 (all pointing to same source)
+- This is STANDARD academic practice
+
+FOOTNOTE DISTRIBUTION TARGET:
+- Introduction: 2-3 footnotes
+- Each body paragraph: 3-5 footnotes  
+- Conclusion: 2-3 footnotes
+- Reuse your best sources 2-4 times each
+` : `
+══════════════════════════════════════════════════════════════
+IN-TEXT CITATION RULES:
+══════════════════════════════════════════════════════════════
+- Same source CAN be cited multiple times in different locations
+- Each major claim should have a citation
+- Distribute citations evenly across all paragraphs
+`;
+
+        return `
+TASK: Determine WHERE to insert citations in the user's text.
+
+${citationFormat}
+${footnoteInstructions}
+
+AVAILABLE SOURCES (${safeSources.length} total):
+${sourceContext}
+
+TEXT TO CITE:
+"${context}"
+
+═══════════════════════════════════════════════════════════════
+🎯 CITATION TARGETS (MANDATORY):
+═══════════════════════════════════════════════════════════════
+
+1. SOURCE COVERAGE: Use AT LEAST ${minSourcesToUse} out of ${safeSources.length} sources
+   → "Further Reading" should have AT MOST 2 sources
+   
+2. INSERTION COUNT: Create AT LEAST ${targetDensity} citation insertions
+   → More is better - aim for ${targetDensity + 5} if possible
+   
+3. DISTRIBUTION REQUIREMENTS:
+   • Introduction: 2-4 citations
+   • Body paragraph 1: 3-5 citations
+   • Body paragraph 2: 3-5 citations  
+   • Body paragraph 3: 3-5 citations
+   • Conclusion: 2-4 citations
+   
+4. SOURCE REUSE: Cite strongest sources 2-4 times each
+
+═══════════════════════════════════════════════════════════════
+WHERE TO INSERT CITATIONS:
+═══════════════════════════════════════════════════════════════
+
+🔴 HIGH PRIORITY - ALWAYS CITE:
+• Statistical claims and specific numbers
+• Causal statements ("driven by...", "contributes to...")
+• Scientific consensus statements
+• Definitions and key terms
+• Policy references (Paris Agreement, IPCC, etc.)
+• Impact statements (health, economic, environmental)
+• Predictions/projections
+
+🟡 MEDIUM PRIORITY:
+• Topic introductions
+• Scope claims ("one of the most pressing...")
+• Process descriptions
+• Concluding assertions
+
+═══════════════════════════════════════════════════════════════
+ANCHOR RULES:
+═══════════════════════════════════════════════════════════════
+
+1. Choose 3-8 word phrases that appear EXACTLY in the text
+2. Place anchor at END of the claim being cited
+3. Each anchor must be unique and findable
+
+═══════════════════════════════════════════════════════════════
+OUTPUT FORMAT (JSON only):
+═══════════════════════════════════════════════════════════════
+
+{
+  "insertions": [
+    { "anchor": "most pressing challenges facing", "source_id": 1, "citation_text": "(Author Year)" },
+    { "anchor": "driven by anthropogenic activities", "source_id": 2, "citation_text": "(Author Year)" },
+    { "anchor": "scientific consensus is unequivocal", "source_id": 2, "citation_text": "(Author Year)" },
+    ... continue until ${targetDensity}+ insertions using ${minSourcesToUse}+ sources
+  ]
+}
+
+═══════════════════════════════════════════════════════════════
+⚠️ PRE-SUBMISSION CHECKLIST:
+═══════════════════════════════════════════════════════════════
+
+□ ${minSourcesToUse}+ different source_ids used?
+□ ${targetDensity}+ total insertions?
+□ Citations in intro, body, AND conclusion?
+□ All anchors are exact phrases from text?
+□ All citation_text includes year or "n.d."?
+□ Output is valid JSON only?
+
+IF ANY IS NO → Add more citations before outputting!
+`;
+    },
+
+    // ======================================================================
+    // MAIN BUILD METHOD
+    // Called by citation.js for quotes and bibliography modes
+    // ======================================================================
     build(type, style, context, sources) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
@@ -8,118 +240,13 @@ export const CitationPrompts = {
         const safeSources = Array.isArray(sources) ? sources : [];
 
         // Enhanced context builder with comprehensive metadata extraction
-        const sourceContext = safeSources.map(s => {
-            const content = s.content || "";
-            const meta = s.meta || {};
+        const sourceContext = this._buildEnhancedSourceContext(safeSources);
 
-            // PRE-EXTRACT DATE
-            let enhancedDate = meta.published;
-            if (!enhancedDate || enhancedDate === "n.d.") {
-                const datePatterns = [
-                    /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
-                    /\b(20\d{2})\b/,
-                    /\d{1,2}\/\d{1,2}\/\d{4}/,
-                    /\d{4}-\d{2}-\d{2}/
-                ];
-                
-                for (const pattern of datePatterns) {
-                    const match = content.match(pattern);
-                    if (match) {
-                        enhancedDate = match[0];
-                        break;
-                    }
-                }
-            }
-            
-            // EXTRACT YEAR for citations
-            let year = "n.d.";
-            if (enhancedDate && enhancedDate !== "n.d.") {
-                const yearMatch = enhancedDate.match(/\b(20\d{2})\b/);
-                if (yearMatch) year = yearMatch[1];
-            }
-            
-            // PRE-EXTRACT ALL AUTHORS
-            let enhancedAuthors = [];
-            let enhancedAuthor = meta.author;
-            const siteName = meta.siteName || "Unknown";
-            
-            const isSiteName = enhancedAuthor && (
-                enhancedAuthor === siteName || 
-                enhancedAuthor.toLowerCase().includes(siteName.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
-            );
-            
-            if (!enhancedAuthor || enhancedAuthor === "Unknown" || isSiteName) {
-                // Pattern 1: "Name and Name"
-                const andPattern = /^.{0,300}([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
-                const andMatch = content.match(andPattern);
-                
-                if (andMatch) {
-                    enhancedAuthors.push(andMatch[1].trim());
-                    enhancedAuthors.push(andMatch[2].trim());
-                }
-                
-                // Pattern 2: "By Name"
-                if (enhancedAuthors.length === 0) {
-                    const byPattern = /By\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)(?:,?\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+))?/i;
-                    const byMatch = content.match(byPattern);
-                    if (byMatch) {
-                        enhancedAuthors.push(byMatch[1].trim());
-                        if (byMatch[2]) enhancedAuthors.push(byMatch[2].trim());
-                    }
-                }
-                
-                // Filter out false positives
-                enhancedAuthors = [...new Set(enhancedAuthors)].filter(name => 
-                    !name.match(/^(Senior|Fellow|Center|Technology|Innovation|Subscribe|Search|Share|Print|Editor)/)
-                );
-                
-                if (enhancedAuthors.length > 0) {
-                    enhancedAuthor = enhancedAuthors.join(' and ');
-                }
-            } else {
-                // Parse existing meta.author for multiple authors
-                if (enhancedAuthor.includes(' and ')) {
-                    enhancedAuthors = enhancedAuthor.split(' and ').map(a => a.trim());
-                } else if (enhancedAuthor.includes(', and ')) {
-                    enhancedAuthors = enhancedAuthor.split(/, and |, /).map(a => a.trim());
-                } else if (enhancedAuthor.includes(',')) {
-                    const parts = enhancedAuthor.split(',').map(a => a.trim());
-                    if (parts.length === 2 && parts[0].split(' ').length >= 2 && parts[1].split(' ').length >= 2) {
-                        enhancedAuthors = parts;
-                    } else {
-                        enhancedAuthors = [enhancedAuthor];
-                    }
-                } else {
-                    enhancedAuthors = [enhancedAuthor];
-                }
-            }
-            
-            // EXTRACT DOI
-            let doi = "";
-            const doiMatch = content.match(/doi\.org\/([^\s]+)|DOI:\s*([^\s]+)/i);
-            if (doiMatch) {
-                doi = doiMatch[1] || doiMatch[2];
-                doi = doi.replace(/[.,;]+$/, '');
-            }
-            
-            return `[ID:${s.id}]
-TITLE: ${s.title}
-URL: ${s.link}
-DOI: ${doi || "none"}
-SITE_NAME: ${siteName}
-DETECTED_AUTHOR: ${enhancedAuthor || "Unknown"} 
-ALL_AUTHORS: ${enhancedAuthors.join(' | ')}
-AUTHOR_COUNT: ${enhancedAuthors.length}
-DETECTED_DATE: ${enhancedDate || meta.published}
-YEAR: ${year}
-TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
-        }).join('\n\n---\n\n');
-
-// ======================================================================
-// MODE 1: QUOTES EXTRACTION
-// ======================================================================
-if (type === 'quotes') {
-    return `
+        // ======================================================================
+        // MODE 1: QUOTES EXTRACTION
+        // ======================================================================
+        if (type === 'quotes') {
+            return `
 TASK: Extract substantial, meaningful quotes from each source - VERBATIM ONLY.
 
 USER'S TEXT CONTEXT: "${context.substring(0, 500)}..."
@@ -137,13 +264,11 @@ QUOTE EXTRACTION RULES:
    - Extract text EXACTLY as it appears in TEXT_CONTENT
    - Do NOT paraphrase, rearrange, or modify ANY words
    - Do NOT combine sentences from different parts of the text
-   - Do NOT add connecting words or transitions
    - Copy the exact punctuation, capitalization, and wording
 
 2. **QUOTE LENGTH**: Extract SUBSTANTIAL passages (50-200 words)
    - Target: 2-5 complete sentences per quote
    - Extract consecutive sentences that appear together in the source
-   - If extracting multiple passages, use bullet points (see format below)
 
 3. **CONTINUOUS vs NON-CONTINUOUS QUOTES**:
    
@@ -152,59 +277,25 @@ QUOTE EXTRACTION RULES:
    
    **If sentences are SEPARATED** (from different parts of source):
    > • "First passage from beginning of article."
-   > • "Second passage from middle of article that's on a different point."
-   > • "Third passage from end of article with another key point."
+   > • "Second passage from middle of article."
+   > • "Third passage from end of article."
 
-4. **RELEVANCE**: Extract quotes related to the topic
-   - The user's text is about: climate change urgency
-   - Extract ANY substantive content related to this topic
-   - Include supporting evidence, data, expert opinions
-   - Include context, explanations, or calls to action
-   - EVEN include contrasting viewpoints or skeptical perspectives
-
-5. **WHAT TO EXTRACT**:
+4. **WHAT TO EXTRACT**:
    ✓ Statistical data and research findings
    ✓ Expert statements and authoritative claims
    ✓ Explanations of causes, effects, or solutions
    ✓ Policy recommendations or action plans
-   ✓ Historical context or background information
-   ✓ Contrasting viewpoints or alternative perspectives
-   ✓ Case studies or specific examples
    ✓ Urgency statements or calls to action
 
-6. **WHAT TO AVOID**:
-   ✗ Generic introductory text ("Welcome to our site...")
-   ✗ Navigation or menu text
-   ✗ Biographical information about authors (unless relevant)
-   ✗ Copyright notices or disclaimers
-   ✗ Partial sentences or fragments
-   ✗ PARAPHRASING or REWORDING the original text
+5. **OUTPUT FORMAT** (strictly in order ID 1 to ${safeSources.length}):
 
-7. **EXTRACTION STRATEGY**:
-   - Read the ENTIRE TEXT_CONTENT carefully
-   - Identify the most substantive, informative passages
-   - Copy the text EXACTLY as it appears
-   - If you want multiple passages, use bullet points
-   - Ensure each passage is meaningful and complete
-
-8. **WHEN NO GOOD QUOTE EXISTS**:
-   - ONLY say "No relevant quote found" if:
-     * The TEXT_CONTENT is empty or gibberish
-     * The content is entirely navigation/menu text
-     * The content is completely unrelated to climate/environment
-   - Otherwise, EXTRACT SOMETHING substantial from the text
-
-9. **OUTPUT FORMAT** (strictly in order ID 1 to ${safeSources.length}):
-
-For CONTINUOUS quotes (consecutive sentences):
 **[ID] Title** - URL
-> "Exact text from source copied verbatim. Multiple sentences that appear together in the original. Complete thoughts with full context."
+> "Exact text from source copied verbatim."
 
-For NON-CONTINUOUS quotes (from different sections):
+OR for non-continuous:
 **[ID] Title** - URL
-> • "First passage copied exactly from one part of the source."
-> • "Second passage copied exactly from a different part of the source."
-> • "Third passage if needed, also copied verbatim from another section."
+> • "First passage."
+> • "Second passage."
 
 OR if truly no content:
 **[ID] Title** - URL
@@ -212,50 +303,9 @@ OR if truly no content:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-GOOD EXAMPLES (showing verbatim extraction):
-
-**[1] IPCC Report**
-> "Mainstreaming effective and equitable climate action will not only reduce losses and damages for nature and people, it will also provide wider benefits. This Synthesis Report underscores the urgency of taking more ambitious action and shows that, if we act now, we can still secure a liveable sustainable future for all."
-
-**[2] Greenpeace Solutions**
-> • "Core to all climate change solutions is reducing greenhouse gas emissions, which must get to zero as soon as possible."
-> • "Because both forests and oceans play vitally important roles in regulating our climate, increasing the natural ability of forests and oceans to absorb carbon dioxide can also help stop global warming."
-> • "Climate change is already an urgent threat to millions of lives – but there are solutions."
-
-**[3] Pew Research Study**
-> "When asked whether society should take steps to address climate change, one interviewee emphasized that this issue is out of humans' control, saying: 'Take steps? No, because I don't really know what step they could take. I don't see anything that people, society can do to change the weather and change how the climate is going to react.'"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-BAD EXAMPLES (showing what NOT to do):
-
-❌ WRONG - Paraphrased:
-> "The IPCC states that climate action reduces harm and benefits society."
-(This is paraphrasing - you must copy EXACT wording!)
-
-❌ WRONG - Combined from different parts without bullets:
-> "Core to all solutions is reducing emissions. Climate change is an urgent threat."
-(These are from different parts of the text - use bullet points!)
-
-❌ WRONG - Modified wording:
-> "Climate change solutions center on reducing greenhouse gases to zero."
-(Changed "Core to all climate change solutions is" to "center on" - NOT verbatim!)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CRITICAL REMINDERS:
-
-✓ Extract quotes from ALL ${safeSources.length} sources
-✓ Copy text VERBATIM - exact wording, punctuation, capitalization
-✓ Make quotes 50-200 words (2-5 sentences)
-✓ Use bullet points (>) for non-continuous passages
-✓ Use standard quotes (") for continuous passages
-✓ Extract ANY substantive climate-related content
-✓ Only say "No relevant quote" if content is truly empty/unrelated
-
-VERBATIM means VERBATIM - no paraphrasing, no rewording, no rearranging!
-    `;
-}
+CRITICAL: VERBATIM means VERBATIM - no paraphrasing, no rewording!
+`;
+        }
 
         // ======================================================================
         // MODE 2: BIBLIOGRAPHY ONLY
@@ -277,7 +327,7 @@ RULES:
 - Use ALL authors from ALL_AUTHORS field
 - Include DOI if available (format: https://doi.org/DOI)
 - Sort alphabetically by last name
-                `;
+`;
             } else if (s.includes("mla")) {
                 bibStyleRules = `
 STYLE: MLA 9th Edition
@@ -286,7 +336,7 @@ FORMAT:
 - 1 author: LastName, FirstName. "Article Title." *Container Title*, Date, URL.
 - 2 authors: LastName1, FirstName1, and FirstName2 LastName2. "Article Title." *Container*, Date, URL.
 - 3+ authors: LastName1, FirstName1, et al. "Article Title." *Container*, Date, URL.
-                `;
+`;
             } else {
                 bibStyleRules = `
 STYLE: APA 7th Edition
@@ -295,7 +345,7 @@ FORMAT:
 - 1 author: Author, A. A. (Year). Title of article. *Site Name*. URL
 - 2 authors: Author1, A. A., & Author2, B. B. (Year). Title. *Site Name*. URL
 - 3+ authors: List all authors with & before last
-                `;
+`;
             }
             
             return `
@@ -308,249 +358,174 @@ ${sourceContext}
 
 INSTRUCTIONS:
 - Create a properly formatted bibliography entry for EACH source (ID 1 through ${safeSources.length})
-- Use ALL authors from ALL_AUTHORS field (count by counting "|" separators)
+- Use ALL authors from ALL_AUTHORS field
 - Include DOI when available (not "none")
 - Sort entries alphabetically by last name
-- Output ONLY the bibliography entries, NO explanations or thinking
+- Output ONLY the bibliography entries, NO explanations
 - Each entry on a new line, separated by blank line
 
 OUTPUT: Return ONLY the formatted bibliography entries, nothing else.
-            `;
+`;
         }
 
         // ======================================================================
-        // MODE 3: IN-TEXT CITATIONS & FOOTNOTES
+        // MODE 3: IN-TEXT CITATIONS & FOOTNOTES (fallback - normally uses Step1/Step2)
         // ======================================================================
-        
+        return this._buildCombinedPrompt(style, context, safeSources, today, type);
+    },
+
+    // ======================================================================
+    // HELPER: Build Enhanced Source Context (for build method)
+    // ======================================================================
+    _buildEnhancedSourceContext(sources) {
+        return sources.map(s => {
+            const content = s.content || "";
+            const meta = s.meta || {};
+
+            // PRE-EXTRACT DATE
+            let enhancedDate = meta.published;
+            if (!enhancedDate || enhancedDate === "n.d.") {
+                const datePatterns = [
+                    /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
+                    /\b(20\d{2})\b/,
+                ];
+                
+                for (const pattern of datePatterns) {
+                    const match = content.match(pattern);
+                    if (match) {
+                        enhancedDate = match[0];
+                        break;
+                    }
+                }
+            }
+            
+            // EXTRACT YEAR
+            let year = "n.d.";
+            if (enhancedDate && enhancedDate !== "n.d.") {
+                const yearMatch = enhancedDate.match(/\b(20\d{2})\b/);
+                if (yearMatch) year = yearMatch[1];
+            }
+            
+            // PRE-EXTRACT AUTHORS
+            let enhancedAuthors = meta.allAuthors || [];
+            if (enhancedAuthors.length === 0 && meta.author && meta.author !== "Unknown") {
+                enhancedAuthors = [meta.author];
+            }
+            
+            // EXTRACT DOI
+            let doi = "";
+            const doiMatch = content.match(/doi\.org\/([^\s]+)|DOI:\s*([^\s]+)/i);
+            if (doiMatch) {
+                doi = doiMatch[1] || doiMatch[2];
+                doi = doi.replace(/[.,;]+$/, '');
+            }
+            
+            return `[ID:${s.id}]
+TITLE: ${s.title}
+URL: ${s.link}
+DOI: ${doi || "none"}
+SITE_NAME: ${meta.siteName || "Unknown"}
+DETECTED_AUTHOR: ${meta.author || "Unknown"} 
+ALL_AUTHORS: ${enhancedAuthors.join(' | ')}
+AUTHOR_COUNT: ${enhancedAuthors.length}
+DETECTED_DATE: ${enhancedDate || meta.published}
+YEAR: ${year}
+TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
+        }).join('\n\n---\n\n');
+    },
+
+    // ======================================================================
+    // HELPER: Build Source Context (for Step1/Step2)
+    // ======================================================================
+    _buildSourceContext(sources) {
+        return sources.map(s => {
+            const content = s.content || "";
+            const meta = s.meta || {};
+            
+            // Extract year
+            let year = meta.year || "n.d.";
+            if (year === "n.d." && meta.published && meta.published !== "n.d.") {
+                const yearMatch = meta.published.match(/\b(20\d{2})\b/);
+                if (yearMatch) year = yearMatch[1];
+            }
+            if (year === "n.d.") {
+                const contentYear = content.match(/\b(20\d{2})\b/);
+                if (contentYear) year = contentYear[1];
+            }
+            
+            // Extract authors
+            let authors = [];
+            if (meta.allAuthors && meta.allAuthors.length > 0) {
+                authors = meta.allAuthors;
+            } else if (meta.author && meta.author !== "Unknown") {
+                authors = [meta.author];
+            }
+            
+            // Extract DOI
+            let doi = "";
+            const doiMatch = content.match(/doi\.org\/([^\s]+)|DOI:\s*([^\s]+)/i);
+            if (doiMatch) {
+                doi = doiMatch[1] || doiMatch[2];
+                doi = doi.replace(/[.,;]+$/, '');
+            }
+            
+            return `[ID:${s.id}]
+TITLE: ${s.title}
+URL: ${s.link}
+DOI: ${doi || "none"}
+SITE_NAME: ${meta.siteName || "Unknown"}
+ALL_AUTHORS: ${authors.join(' | ') || "Unknown"}
+AUTHOR_COUNT: ${authors.length || 1}
+YEAR: ${year}
+CONTENT PREVIEW: ${content.substring(0, 800).replace(/\n/g, ' ')}...`;
+        }).join('\n\n---\n\n');
+    },
+
+    // ======================================================================
+    // HELPER: Combined prompt for direct in-text/footnotes (fallback)
+    // ======================================================================
+    _buildCombinedPrompt(style, context, sources, today, outputType) {
         const s = (style || "").toLowerCase();
-        const minSourcesToUse = Math.max(8, safeSources.length - 2);
-        const targetInsertions = Math.floor(safeSources.length * 1.5);
+        const minSourcesToUse = Math.max(8, sources.length - 2);
+        const targetInsertions = Math.floor(sources.length * 1.5);
+        const sourceContext = this._buildSourceContext(sources);
         
         let styleRules = "";
-        let citationStrategy = "";
-        let examples = "";
-        
-        // CITATION STRATEGY (different for footnotes vs in-text)
-        if (type === 'footnotes') {
-            citationStrategy = `
-FOOTNOTE CITATION STRATEGY:
-- You MUST use AT LEAST ${minSourcesToUse} out of ${safeSources.length} sources
-- Aim for ${targetInsertions} total citations by citing key sources 2-3 times
-- Each citation gets a NEW superscript number and footnote entry
-- Spread citations evenly throughout the text (intro, body paragraphs, conclusion)
-- Don't leave 90% of sources unused!
-
-DISTRIBUTION GUIDE:
-- Use 8-10 different sources
-- Cite the most important/authoritative ones 2-3 times each
-- Result: ~12-15 total footnote citations
-- "Further Reading (Unused)" should have 0-2 sources MAX
-
-EXAMPLE: If discussing climate impacts across 3 paragraphs:
-- Para 1: Cite sources 1, 2, 3
-- Para 2: Cite sources 1, 4, 5 (source 1 cited again)
-- Para 3: Cite sources 6, 7, 2 (source 2 cited again)
-            `;
-        } else {
-            citationStrategy = `
-IN-TEXT CITATION STRATEGY:
-- You MUST use AT LEAST ${minSourcesToUse} out of ${safeSources.length} sources
-- Aim for ${targetInsertions} total citations by citing key sources 2-3 times
-- The same citation text appears multiple times (e.g., "(Smith 2020)")
-- Spread citations throughout ALL sections (intro, body, conclusion)
-- Don't cluster all citations in one paragraph
-
-DISTRIBUTION GUIDE:
-- Introduction: 2-3 citations
-- Each body paragraph: 2-3 citations  
-- Conclusion: 1-2 citations
-- Cite authoritative sources 2-3 times in different locations
-- "Further Reading (Unused)" should have 0-2 sources MAX
-
-EXAMPLE: 5-paragraph essay structure:
-- Intro: Sources 1, 2
-- Body 1: Sources 3, 4, 1 (reuse source 1)
-- Body 2: Sources 5, 6, 2 (reuse source 2)
-- Body 3: Sources 7, 8, 3 (reuse source 3)
-- Conclusion: Source 9
-Result: 9 different sources, 12 total citations
-            `;
-        }
-        
-        // STYLE-SPECIFIC RULES
         if (s.includes("chicago")) {
             styleRules = `
-STYLE: Chicago Manual of Style (17th Edition) - Notes and Bibliography System
-
-BIBLIOGRAPHY FORMAT:
-- 1 author: LastName, FirstName. "Article Title." *Website Name*. Month Day, Year. URL.
-- 2 authors: LastName1, FirstName1, and FirstName2 LastName2. "Article Title." *Website Name*. Month Day, Year. URL.
-- 3+ authors: LastName1, FirstName1, et al. "Article Title." *Website Name*. Month Day, Year. URL.
-- If DOI exists (not "none"), use: https://doi.org/DOI instead of URL
-- End with period after URL/DOI
-
-IN-TEXT CITATION FORMAT:
-- 1 author: (LastName Year) - e.g., (Smith 2020)
-- 2 authors: (LastName1 and LastName2 Year) - e.g., (West and Allen 2018)
-- 3+ authors: (LastName1 et al. Year) - e.g., (Howden et al. 2007)
-- No date: (LastName n.d.)
-
-CRITICAL CHICAGO RULES:
-- NO COMMA between author and year: (Smith 2020) NOT (Smith, 2020)
-- ALWAYS include year from YEAR field
-- Use "and" for 2 authors (NOT "&")
-- Use "et al." for 3+ authors
-            `;
-            
-            examples = `
-CHICAGO CITATION EXAMPLES:
-
-Example 1 - Two Authors:
-- ALL_AUTHORS: "Darrell M. West | John R. Allen"
-- YEAR: "2018"
-✓ CORRECT: "(West and Allen 2018)"
-✗ WRONG: "(West and Allen, 2018)" - no comma!
-✗ WRONG: "(West 2018)" - missing Allen!
-✗ WRONG: "(West and Allen)" - missing year!
-
-Example 2 - Multiple Authors (3+):
-- ALL_AUTHORS: "S.M. Howden | J.-F. Soussana | F.N. Tubiello | N. Chhetri | M. Dunlop | H. Meinke"
-- AUTHOR_COUNT: 6
-- YEAR: "2007"
-✓ CORRECT: "(Howden et al. 2007)"
-✗ WRONG: "(Howden 2007)" - use et al. for 3+!
-
-Example 3 - Organization Author:
-- ALL_AUTHORS: "United Nations Sustainable Development"
-- YEAR: "2030"
-✓ CORRECT: "(United Nations Sustainable Development 2030)"
-✗ WRONG: "(United Nations 2030)" - use full org name!
-
-Example 4 - No Date:
-- ALL_AUTHORS: "Greenpeace UK"
-- YEAR: "n.d."
-✓ CORRECT: "(Greenpeace UK n.d.)"
-            `;
+STYLE: Chicago (NO comma between author and year)
+IN-TEXT: (LastName Year), (LastName1 and LastName2 Year), (LastName1 et al. Year)`;
         } else if (s.includes("mla")) {
             styleRules = `
 STYLE: MLA 9th Edition
-
-BIBLIOGRAPHY FORMAT:
-- LastName, FirstName. "Article Title." *Container Title*, Date, URL.
-- For 2 authors: LastName1, FirstName1, and FirstName2 LastName2.
-- For 3+ authors: LastName1, FirstName1, et al.
-
-IN-TEXT FORMAT:
-- 1 author: (LastName)
-- 2 authors: (LastName1 and LastName2)
-- 3+ authors: (LastName1 et al.)
-
-Note: MLA typically omits year in parenthetical citations
-            `;
+IN-TEXT: (LastName), (LastName1 and LastName2), (LastName1 et al.)`;
         } else {
             styleRules = `
-STYLE: APA 7th Edition
-
-BIBLIOGRAPHY FORMAT:
-- Author, A. A. (Year). Title of article. *Site Name*. URL
-- 2 authors: Author1, A. A., & Author2, B. B. (Year). Title. *Site*. URL
-- 3+ authors: List all with & before last
-
-IN-TEXT FORMAT:
-- 1 author: (Author, Year)
-- 2 authors: (Author1 & Author2, Year) - use & not "and"!
-- 3+ authors: (Author1 et al., Year)
-
-CRITICAL: APA requires comma between author and year
-            `;
+STYLE: APA 7th (WITH comma, use &)
+IN-TEXT: (Author, Year), (Author1 & Author2, Year), (Author1 et al., Year)`;
         }
 
         return `
-TASK: Insert citations into the text using ${style || "Chicago"} format.
+TASK: Insert ${style || "Chicago"} citations into text.
 
 ${styleRules}
 
-${citationStrategy}
-
-${examples}
-
-SOURCE DATA (${safeSources.length} sources available):
+SOURCES (${sources.length}):
 ${sourceContext}
 
-TEXT TO CITE: "${context}"
+TEXT: "${context}"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 PRIMARY GOAL: USE ${minSourcesToUse}-${safeSources.length} SOURCES (NOT just 1-2!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TARGETS: Use ${minSourcesToUse}+ sources, ${targetInsertions}+ insertions
 
-MANDATORY REQUIREMENTS:
-
-1. **SOURCE USAGE** (CRITICAL):
-   - You have ${safeSources.length} sources available
-   - You MUST use AT LEAST ${minSourcesToUse} different sources
-   - Target: ${targetInsertions} total citation insertions
-   - Leaving 7-8 sources unused is UNACCEPTABLE
-   - "Further Reading (Unused)" should be nearly EMPTY (0-2 sources max)
-
-2. **HOW TO ACHIEVE THIS**:
-   - Read through the ENTIRE user text carefully
-   - Match each claim/section to relevant sources
-   - Cite multiple sources per paragraph when appropriate
-   - Reuse important sources 2-3 times in different sections
-   - Example: Climate health impacts → cite Harvard 2-3 times
-
-3. **YEAR REQUIREMENT** (MANDATORY):
-   - Every source has a YEAR field (e.g., "2018", "2023", "n.d.")
-   - EVERY citation_text MUST include this year
-   - NO citations without dates unless YEAR is "n.d."
-   - Format: (Author Year) for Chicago, (Author, Year) for APA
-
-4. **MULTIPLE AUTHORS** (CHECK ALL_AUTHORS):
-   - ALL_AUTHORS shows authors separated by " | "
-   - Count "|" separators to get author count
-   - 2 authors: Include both (e.g., "West and Allen")
-   - 3+ authors: Use "et al." (e.g., "Howden et al.")
-   - NEVER use only first author when multiple exist!
-
-5. **BIBLIOGRAPHY FORMAT**:
-   - Follow EXACT format for ${style || "Chicago"}
-   - Use ALL author names from ALL_AUTHORS (unless 3+, then et al.)
-   - Include DOI if available (not "none"): https://doi.org/DOI
-   - Each source appears ONCE in formatted_citations
-   - End every entry with: URL (Accessed ${today})
-
-6. **URL/DOI HANDLING**:
-   - If DOI exists and not "none": use https://doi.org/DOI
-   - Otherwise: use regular URL from URL field
-   - NEVER use placeholders like "[URL]" or "[link]"
-
-OUTPUT FORMAT: Return strictly valid JSON.
+OUTPUT JSON:
 {
   "insertions": [
-    { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Author Year)" },
-    { "anchor": "another phrase", "source_id": 2, "citation_text": "(Author Year)" },
-    { "anchor": "different phrase", "source_id": 1, "citation_text": "(Author Year)" },
-    { "anchor": "yet another", "source_id": 3, "citation_text": "(Author Year)" },
-    ... continue until you have ~${targetInsertions} insertions using ${minSourcesToUse}+ sources
+    { "anchor": "phrase from text", "source_id": 1, "citation_text": "(Author Year)" }
   ],
   "formatted_citations": {
-    "1": "Complete bibliography entry with REAL URL (Accessed ${today})",
-    "2": "Complete bibliography entry with REAL URL (Accessed ${today})",
-    ... one entry per unique source cited
+    "1": "Full bibliography entry (Accessed ${today})"
   }
 }
-
-✅ FINAL VERIFICATION CHECKLIST (Check before submitting):
-□ Am I using at least ${minSourcesToUse} different sources?
-□ Do I have around ${targetInsertions} total insertions?
-□ Are citations spread throughout ALL sections (not clustered)?
-□ Does EVERY citation_text include a year or "n.d."?
-□ Did I check ALL_AUTHORS for multiple authors?
-□ Are my bibliography entries in proper ${style || "Chicago"} format?
-□ Did I use REAL URLs (not placeholders)?
-□ Will "Further Reading (Unused)" be nearly empty (0-2 sources)?
-
-If you answer NO to ANY of these, REVISE your citations before submitting!
-        `;
+`;
     }
 };
