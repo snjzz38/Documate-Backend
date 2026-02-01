@@ -183,38 +183,55 @@ export default async function handler(req, res) {
         const SEARCH_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const SEARCH_CX = process.env.SEARCH_ENGINE_ID;
 
-        // --- 1. QUOTES ---
+        // --- 1. QUOTES MODE ---
         if (preLoadedSources?.length > 0) {
-            // FIX: Correct 4-argument call (Quotes doesn't need style/sources, so pass null/array)
             const prompt = CitationPrompts.build('quotes', null, context, preLoadedSources);
             const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
             return res.status(200).json({ success: true, text: result });
         }
 
-        // --- 2. CITATIONS ---
+        // --- 2. SEARCH & SCRAPE ---
         const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX);
         const richSources = await ScraperAPI.scrape(rawSources);
         
-        // FIX: Correct 4-argument call
-        const prompt = CitationPrompts.build(outputType, style, context, richSources);
-        const isJson = outputType !== 'bibliography';
-        
-        const aiResponse = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, isJson);
-
-        let finalOutput = aiResponse;
-
+        // --- 3. BIBLIOGRAPHY MODE ---
         if (outputType === 'bibliography') {
-            finalOutput = aiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-        } 
-        else {
-            try {
-                const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-                const jsonStr = jsonMatch ? jsonMatch[0] : aiResponse;
-                const data = JSON.parse(jsonStr);
-                finalOutput = PipelineService.processInsertions(context, data.insertions, richSources, data.formatted_citations, outputType, style);
-            } catch (e) {
-                finalOutput = aiResponse.replace(/```json/g, '').replace(/```/g, '');
-            }
+            const prompt = CitationPrompts.build('bibliography', style, context, richSources);
+            const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
+            const cleaned = result.replace(/```json/g, '').replace(/```/g, '').trim();
+            return res.status(200).json({ success: true, sources: richSources, text: cleaned });
+        }
+
+        // --- 4. TWO-STEP CITATION PROCESS ---
+        
+        // STEP 1: Generate formatted citations for all sources
+        const step1Prompt = CitationPrompts.buildStep1(style, richSources);
+        const step1Response = await GroqAPI.chat([{ role: "user", content: step1Prompt }], GROQ_KEY, true);
+        
+        let formattedCitations = {};
+        try {
+            const jsonMatch = step1Response.match(/\{[\s\S]*\}/);
+            const jsonStr = jsonMatch ? jsonMatch[0] : step1Response;
+            formattedCitations = JSON.parse(jsonStr);
+        } catch (e) {
+            // Fallback: generate citations manually
+            richSources.forEach(s => {
+                formattedCitations[s.id] = PipelineService.generateFallback(s);
+            });
+        }
+
+        // STEP 2: Generate insertion points
+        const step2Prompt = CitationPrompts.buildStep2(outputType, style, context, richSources, formattedCitations);
+        const step2Response = await GroqAPI.chat([{ role: "user", content: step2Prompt }], GROQ_KEY, true);
+
+        let finalOutput = "";
+        try {
+            const jsonMatch = step2Response.match(/\{[\s\S]*\}/);
+            const jsonStr = jsonMatch ? jsonMatch[0] : step2Response;
+            const data = JSON.parse(jsonStr);
+            finalOutput = PipelineService.processInsertions(context, data.insertions, richSources, formattedCitations, outputType, style);
+        } catch (e) {
+            finalOutput = step2Response.replace(/```json/g, '').replace(/```/g, '');
         }
 
         return res.status(200).json({ success: true, sources: richSources, text: finalOutput });
