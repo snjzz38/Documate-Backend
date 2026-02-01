@@ -553,4 +553,81 @@ OUTPUT FORMAT: Return strictly valid JSON.
 If you answer NO to ANY of these, REVISE your citations before submitting!
         `;
     }
+
+     // STEP 1: Generate formatted citations only
+    buildStep1(style, sources) {
+        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        const safeSources = Array.isArray(sources) ? sources : [];
+        
+        const sourceData = safeSources.map(s => {
+            const content = s.content || "";
+            const meta = s.meta || {};
+            
+            return `[ID:${s.id}]
+TITLE: ${s.title}
+URL: ${s.link}
+AUTHOR: ${meta.author || "Unknown"}
+DATE: ${meta.published || "n.d."}
+SITE: ${meta.siteName || "Unknown"}`;
+        }).join('\n\n');
+
+        const s = (style || "").toLowerCase();
+        let format = "";
+        
+        if (s.includes("chicago")) {
+            format = "Chicago 17th: Author. \"Title.\" *Site*. Date. URL.";
+        } else if (s.includes("mla")) {
+            format = "MLA 9th: Author. \"Title.\" *Site*, Date, URL.";
+        } else {
+            format = "APA 7th: Author. (Year). Title. *Site*. URL";
+        }
+
+        return `Generate formatted ${style} citations for each source.
+
+${format}
+
+SOURCES:
+${sourceData}
+
+OUTPUT: JSON object with source ID as key, formatted citation as value.
+{
+  "1": "Formatted citation ending with URL (Accessed ${today})",
+  "2": "Formatted citation ending with URL (Accessed ${today})",
+  ...
+}
+
+Return ONLY the JSON object, no explanations.`;
+    },
+
+    // STEP 2: Generate insertion points
+    buildStep2(outputType, style, context, sources, formattedCitations) {
+        const safeSources = Array.isArray(sources) ? sources : [];
+        const minSources = Math.max(8, safeSources.length - 2);
+        const targetInsertions = Math.floor(safeSources.length * 1.5);
+
+        const s = (style || "").toLowerCase();
+        let citFormat = "(Author Year)";
+        if (s.includes("apa")) citFormat = "(Author, Year)";
+        if (s.includes("mla")) citFormat = "(Author)";
+
+        return `Insert citations into the text.
+
+TEXT: "${context}"
+
+AVAILABLE CITATIONS:
+${Object.entries(formattedCitations).map(([id, cit]) => `[${id}] ${cit}`).join('\n')}
+
+REQUIREMENTS:
+- Use AT LEAST ${minSources} different sources
+- Target ${targetInsertions} total insertions (reuse important sources 2-3 times)
+- Format: ${citFormat}
+- Include year in EVERY citation
+
+OUTPUT: JSON only, no explanations.
+{
+  "insertions": [
+    { "anchor": "exact phrase from text", "source_id": 1, "citation_text": "${citFormat}" }
+  ]
+}`;
+    }
 };
