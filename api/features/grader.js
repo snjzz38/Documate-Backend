@@ -2,37 +2,43 @@
 import { GeminiAPI } from '../utils/geminiAPI.js';
 
 export default async function handler(req, res) {
-    // CORS Setup
+    // 1. Force CORS Headers (Even on error)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { text, instructions, apiKey } = req.body;
-        const GEMINI_KEY = apiKey || process.env.GEMINI_API_KEY; // Grader uses Gemini
+        const { text, instructions, rubric, apiKey } = req.body;
+        const GEMINI_KEY = apiKey || process.env.GEMINI_API_KEY;
 
-        if (!text) throw new Error("No text provided to grade.");
+        if (!text) throw new Error("No student text provided.");
 
-        // SAFETY: Truncate text to avoid 413 Payload Too Large / Token limits
-        // Gemini Pro has a large window, but let's be safe (~30k chars)
-        const safeText = text.substring(0, 30000); 
+        // Input Truncation (Safety)
+        const safeText = text.substring(0, 25000); 
+        const safeInstr = (instructions || "").substring(0, 1000);
+        const safeRubric = (rubric || "").substring(0, 2000);
 
         const prompt = `
-            TASK: You are a strict, academic professor grading this student's work.
+            TASK: You are a strict academic professor grading student work.
             
-            INSTRUCTIONS: ${instructions || "Grade this text based on clarity, grammar, and flow."}
+            INSTRUCTIONS: ${safeInstr}
             
-            STUDENT TEXT:
+            RUBRIC / CRITERIA: 
+            ${safeRubric || "Grade based on clarity, argumentation, evidence, and flow."}
+            
+            STUDENT SUBMISSION:
             "${safeText}"
             
             OUTPUT FORMAT:
-            Provide a letter grade (A, B, C, etc.) followed by bullet points of specific feedback. 
-            Be constructive but rigorous.
+            1. **Letter Grade**: (e.g., A, B+, C-)
+            2. **Summary**: 1-2 sentence overview.
+            3. **Strengths**: Bullet points.
+            4. **Weaknesses**: Bullet points with specific examples from the text.
+            5. **Improvements**: Actionable steps to raise the grade.
         `;
 
-        // Using the stream=false approach for the Grader to return a single JSON
-        // (Or reuse the chat method which returns text)
         const feedback = await GeminiAPI.chat(prompt, GEMINI_KEY);
 
         return res.status(200).json({ success: true, result: feedback });
