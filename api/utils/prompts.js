@@ -439,7 +439,10 @@ OUTPUT: Return ONLY the formatted bibliography entries, nothing else.
             
 // Determine display author (never "Unknown")
 const siteName = meta.siteName || s.title.split(/[:\-–|]/).shift().trim() || "Unknown Source";
-const displayAuthors = authors.length > 0 ? authors.join(' | ') : siteName;
+const displayAuthors =
+    enhancedAuthors.length > 0
+        ? enhancedAuthors.join(' | ')
+        : siteName;
 
 return `[ID:${s.id}]
 TITLE: ${s.title}
