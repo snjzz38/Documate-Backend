@@ -136,7 +136,8 @@ APA IN-TEXT FORMAT (WITH comma between author and year):
 CRITICAL - NEVER USE "Unknown":
 - If author is unknown, use SITE_NAME → (IPCC, 2023) NOT (Unknown, 2023)
 - EVERY citation MUST include year or n.d.`;
-    
+} 
+        
         const footnoteInstructions = outputType === 'footnotes' ? `
 ══════════════════════════════════════════════════════════════
 FOOTNOTE MODE (CRITICAL):
