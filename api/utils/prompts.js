@@ -1,85 +1,120 @@
 // api/utils/prompts.js
 
 export const CitationPrompts = {
-// Add these two new methods to the CitationPrompts object in prompts.js:
-
-// STEP 1: Generate formatted citations only
-buildStep1(style, sources) {
-    const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-    const safeSources = Array.isArray(sources) ? sources : [];
-    
-    const sourceData = safeSources.map(s => {
-        const content = s.content || "";
-        const meta = s.meta || {};
+    build(type, style, context, sources) {
+        const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
-        return `[ID:${s.id}]
+        // SAFETY CHECK: Ensure sources is an array
+        const safeSources = Array.isArray(sources) ? sources : [];
+
+        // Enhanced context builder with comprehensive metadata extraction
+        const sourceContext = safeSources.map(s => {
+            const content = s.content || "";
+            const meta = s.meta || {};
+
+            // PRE-EXTRACT DATE
+            let enhancedDate = meta.published;
+            if (!enhancedDate || enhancedDate === "n.d.") {
+                const datePatterns = [
+                    /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
+                    /\b(20\d{2})\b/,
+                    /\d{1,2}\/\d{1,2}\/\d{4}/,
+                    /\d{4}-\d{2}-\d{2}/
+                ];
+                
+                for (const pattern of datePatterns) {
+                    const match = content.match(pattern);
+                    if (match) {
+                        enhancedDate = match[0];
+                        break;
+                    }
+                }
+            }
+            
+            // EXTRACT YEAR for citations
+            let year = "n.d.";
+            if (enhancedDate && enhancedDate !== "n.d.") {
+                const yearMatch = enhancedDate.match(/\b(20\d{2})\b/);
+                if (yearMatch) year = yearMatch[1];
+            }
+            
+            // PRE-EXTRACT ALL AUTHORS
+            let enhancedAuthors = [];
+            let enhancedAuthor = meta.author;
+            const siteName = meta.siteName || "Unknown";
+            
+            const isSiteName = enhancedAuthor && (
+                enhancedAuthor === siteName || 
+                enhancedAuthor.toLowerCase().includes(siteName.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
+            );
+            
+            if (!enhancedAuthor || enhancedAuthor === "Unknown" || isSiteName) {
+                // Pattern 1: "Name and Name"
+                const andPattern = /^.{0,300}([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/;
+                const andMatch = content.match(andPattern);
+                
+                if (andMatch) {
+                    enhancedAuthors.push(andMatch[1].trim());
+                    enhancedAuthors.push(andMatch[2].trim());
+                }
+                
+                // Pattern 2: "By Name"
+                if (enhancedAuthors.length === 0) {
+                    const byPattern = /By\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)(?:,?\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+))?/i;
+                    const byMatch = content.match(byPattern);
+                    if (byMatch) {
+                        enhancedAuthors.push(byMatch[1].trim());
+                        if (byMatch[2]) enhancedAuthors.push(byMatch[2].trim());
+                    }
+                }
+                
+                // Filter out false positives
+                enhancedAuthors = [...new Set(enhancedAuthors)].filter(name => 
+                    !name.match(/^(Senior|Fellow|Center|Technology|Innovation|Subscribe|Search|Share|Print|Editor)/)
+                );
+                
+                if (enhancedAuthors.length > 0) {
+                    enhancedAuthor = enhancedAuthors.join(' and ');
+                }
+            } else {
+                // Parse existing meta.author for multiple authors
+                if (enhancedAuthor.includes(' and ')) {
+                    enhancedAuthors = enhancedAuthor.split(' and ').map(a => a.trim());
+                } else if (enhancedAuthor.includes(', and ')) {
+                    enhancedAuthors = enhancedAuthor.split(/, and |, /).map(a => a.trim());
+                } else if (enhancedAuthor.includes(',')) {
+                    const parts = enhancedAuthor.split(',').map(a => a.trim());
+                    if (parts.length === 2 && parts[0].split(' ').length >= 2 && parts[1].split(' ').length >= 2) {
+                        enhancedAuthors = parts;
+                    } else {
+                        enhancedAuthors = [enhancedAuthor];
+                    }
+                } else {
+                    enhancedAuthors = [enhancedAuthor];
+                }
+            }
+            
+            // EXTRACT DOI
+            let doi = "";
+            const doiMatch = content.match(/doi\.org\/([^\s]+)|DOI:\s*([^\s]+)/i);
+            if (doiMatch) {
+                doi = doiMatch[1] || doiMatch[2];
+                doi = doi.replace(/[.,;]+$/, '');
+            }
+            
+            return `[ID:${s.id}]
 TITLE: ${s.title}
 URL: ${s.link}
-AUTHOR: ${meta.author || "Unknown"}
-DATE: ${meta.published || "n.d."}
-SITE: ${meta.siteName || "Unknown"}`;
-    }).join('\n\n');
-
-    const s = (style || "").toLowerCase();
-    let format = "";
-    
-    if (s.includes("chicago")) {
-        format = "Chicago 17th: Author. \"Title.\" *Site*. Date. URL.";
-    } else if (s.includes("mla")) {
-        format = "MLA 9th: Author. \"Title.\" *Site*, Date, URL.";
-    } else {
-        format = "APA 7th: Author. (Year). Title. *Site*. URL";
-    }
-
-    return `Generate formatted ${style} citations for each source.
-
-${format}
-
-SOURCES:
-${sourceData}
-
-OUTPUT: JSON object with source ID as key, formatted citation as value.
-{
-  "1": "Formatted citation ending with URL (Accessed ${today})",
-  "2": "Formatted citation ending with URL (Accessed ${today})",
-  ...
-}
-
-Return ONLY the JSON object, no explanations.`;
-},
-
-// STEP 2: Generate insertion points
-buildStep2(outputType, style, context, sources, formattedCitations) {
-    const safeSources = Array.isArray(sources) ? sources : [];
-    const minSources = Math.max(8, safeSources.length - 2);
-    const targetInsertions = Math.floor(safeSources.length * 1.5);
-
-    const s = (style || "").toLowerCase();
-    let citFormat = "(Author Year)";
-    if (s.includes("apa")) citFormat = "(Author, Year)";
-    if (s.includes("mla")) citFormat = "(Author)";
-
-    return `Insert citations into the text.
-
-TEXT: "${context}"
-
-AVAILABLE CITATIONS:
-${Object.entries(formattedCitations).map(([id, cit]) => `[${id}] ${cit}`).join('\n')}
-
-REQUIREMENTS:
-- Use AT LEAST ${minSources} different sources
-- Target ${targetInsertions} total insertions (reuse important sources 2-3 times)
-- Format: ${citFormat}
-- Include year in EVERY citation
-
-OUTPUT: JSON only, no explanations.
-{
-  "insertions": [
-    { "anchor": "exact phrase from text", "source_id": 1, "citation_text": "${citFormat}" }
-  ]
-}`;
-}
-
+DOI: ${doi || "none"}
+SITE_NAME: ${siteName}
+DETECTED_AUTHOR: ${enhancedAuthor || "Unknown"} 
+ALL_AUTHORS: ${enhancedAuthors.join(' | ')}
+AUTHOR_COUNT: ${enhancedAuthors.length}
+DETECTED_DATE: ${enhancedDate || meta.published}
+YEAR: ${year}
+TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
+        }).join('\n\n---\n\n');
+        
 // ======================================================================
 // MODE 1: QUOTES EXTRACTION
 // ======================================================================
