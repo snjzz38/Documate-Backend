@@ -87,6 +87,9 @@ OUTPUT: Return JSON only:
                 authors = meta.allAuthors;
             } else if (meta.author && meta.author !== "Unknown") {
                 authors = [meta.author];
+            } else {
+                // Fallback to site name instead of "Unknown"
+                authors = [meta.siteName || s.title.split(' ')[0] || "Unknown Source"];
             }
             
             return `[ID:${s.id}] ${s.title}
@@ -99,27 +102,41 @@ OUTPUT: Return JSON only:
         const st = (style || "").toLowerCase();
         let citationFormat = "";
         
-        if (st.includes("chicago")) {
-            citationFormat = `
+if (st.includes("chicago")) {
+    citationFormat = `
 CHICAGO IN-TEXT FORMAT (NO comma between author and year):
 - 1 author: (LastName Year) → (Smith 2020)
 - 2 authors: (LastName1 and LastName2 Year) → (West and Allen 2018)
 - 3+ authors: (LastName1 et al. Year) → (Howden et al. 2007)
-- No date: (LastName n.d.)`;
+- No date: (LastName n.d.)
+- Organization/Website: (Organization Year) → (IPCC 2023), (Greenpeace UK n.d.)
+
+CRITICAL - NEVER USE "Unknown":
+- If author is unknown, use SITE_NAME or organization name
+- Example: IPCC website → (IPCC 2023) NOT (Unknown 2023)
+- Example: Greenpeace UK → (Greenpeace UK n.d.) NOT (Unknown n.d.)
+
+EVERY citation MUST have a year or "n.d." - NEVER just (Author)`;
+    
         } else if (st.includes("mla")) {
             citationFormat = `
 MLA IN-TEXT FORMAT:
 - 1 author: (LastName)
 - 2 authors: (LastName1 and LastName2)
 - 3+ authors: (LastName1 et al.)`;
-        } else {
-            citationFormat = `
+    
+} else {
+    citationFormat = `
 APA IN-TEXT FORMAT (WITH comma between author and year):
 - 1 author: (Author, Year) → (Smith, 2020)
 - 2 authors: (Author1 & Author2, Year) → (West & Allen, 2018)
-- 3+ authors: (Author1 et al., Year) → (Howden et al., 2007)`;
-        }
-        
+- 3+ authors: (Author1 et al., Year) → (Howden et al., 2007)
+- Organization: (Organization, Year) → (IPCC, 2023)
+
+CRITICAL - NEVER USE "Unknown":
+- If author is unknown, use SITE_NAME → (IPCC, 2023) NOT (Unknown, 2023)
+- EVERY citation MUST include year or n.d.`;
+    
         const footnoteInstructions = outputType === 'footnotes' ? `
 ══════════════════════════════════════════════════════════════
 FOOTNOTE MODE (CRITICAL):
@@ -420,13 +437,17 @@ OUTPUT: Return ONLY the formatted bibliography entries, nothing else.
                 doi = doi.replace(/[.,;]+$/, '');
             }
             
-            return `[ID:${s.id}]
+// Determine display author (never "Unknown")
+const siteName = meta.siteName || s.title.split(/[:\-–|]/).shift().trim() || "Unknown Source";
+const displayAuthors = authors.length > 0 ? authors.join(' | ') : siteName;
+
+return `[ID:${s.id}]
 TITLE: ${s.title}
 URL: ${s.link}
 DOI: ${doi || "none"}
-SITE_NAME: ${meta.siteName || "Unknown"}
-DETECTED_AUTHOR: ${meta.author || "Unknown"} 
-ALL_AUTHORS: ${enhancedAuthors.join(' | ')}
+SITE_NAME: ${siteName}
+ALL_AUTHORS: ${displayAuthors}
+USE_FOR_CITATION: ${displayAuthors.split(' | ')[0]} ← Use this name in citations, NEVER "Unknown"
 AUTHOR_COUNT: ${enhancedAuthors.length}
 DETECTED_DATE: ${enhancedDate || meta.published}
 YEAR: ${year}
