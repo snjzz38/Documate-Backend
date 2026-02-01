@@ -26,24 +26,75 @@ const PipelineService = {
         return year;
     },
 
-    validateCitationText(citationText, source, style) {
-        if (!citationText) return null;
-        const year = this.extractYear(source);
-        const hasYear = /\d{4}|n\.d\./i.test(citationText);
-        
-        if (hasYear) return citationText;
-        
+validateCitationText(citationText, source, style) {
+    if (!citationText) return null;
+    
+    // Fix "Unknown" author issue
+    if (citationText.includes("Unknown")) {
+        const siteName = source.meta?.siteName || source.title.split(/[:\-–|]/).shift().trim();
+        citationText = citationText.replace(/Unknown/g, siteName);
+    }
+    
+    const year = this.extractYear(source);
+    const hasYear = /\d{4}|n\.d\./i.test(citationText);
+    
+    // Ensure year is always present
+    if (!hasYear) {
         const match = citationText.match(/^\((.*?)\)$/);
-        if (!match) return citationText;
-        
-        const authorPart = match[1];
-        const s = (style || "").toLowerCase();
+        if (match) {
+            const authorPart = match[1];
+            const s = (style || "").toLowerCase();
+            if (s.includes('chicago')) return `(${authorPart} ${year})`;
+            if (s.includes('apa')) return `(${authorPart}, ${year})`;
+            return `(${authorPart} ${year})`;
+        }
+    }
+    
+    return citationText;
+```
 
-        if (s.includes('chicago')) return `(${authorPart} ${year})`;
-        if (s.includes('apa')) return `(${authorPart}, ${year})`;
-        return `(${authorPart} ${year})`;
-    },
+---
 
+## How the Backend Works (Simple Explanation)
+```
+USER SUBMITS TEXT
+       ↓
+┌──────────────────────────────────────────────────────────────┐
+│  citation.js (Main Controller)                               │
+│                                                              │
+│  1. Receives request with: text, style (APA/MLA/Chicago)     │
+│  2. Searches Google for relevant sources                     │
+│  3. Scrapes each website for content                         │
+│  4. Calls prompts.js to generate AI instructions             │
+│  5. Sends prompts to AI (Groq API)                          │
+│  6. Processes AI response and inserts citations              │
+│  7. Returns cited text + bibliography                        │
+└──────────────────────────────────────────────────────────────┘
+       ↓
+┌──────────────────────────────────────────────────────────────┐
+│  prompts.js (Prompt Generator)                               │
+│                                                              │
+│  Methods:                                                    │
+│  • build('quotes', ...) → Extract verbatim quotes            │
+│  • build('bibliography', ...) → Generate bibliography only   │
+│  • buildStep1(style, sources) → Format all citations         │
+│  • buildStep2(outputType, ...) → Find insertion points       │
+│                                                              │
+│  The prompts tell the AI:                                    │
+│  - Which citation style to use                               │
+│  - How many sources to cite (8+ out of 10)                   │
+│  - Where to place citations                                  │
+│  - How to format author names                                │
+└──────────────────────────────────────────────────────────────┘
+       ↓
+┌──────────────────────────────────────────────────────────────┐
+│  PipelineService (in citation.js)                            │
+│                                                              │
+│  • validateCitationText() → Fixes formatting issues          │
+│  • processInsertions() → Inserts citations into text         │
+│  • generateFallback() → Creates citation if AI fails         │
+│  • ensureAccessDate() → Adds "Accessed" date                 │
+└──────────────────────────────────────────────────────────────┘
     generateFallback(source) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
