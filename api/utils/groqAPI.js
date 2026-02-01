@@ -1,6 +1,6 @@
 // api/utils/groqAPI.js
 
-// FIXED: Removed smart quote at the end of the last model
+// NOTE: Smart quote fixed on the last line
 const GROQ_MODELS = [
     "qwen/qwen3-32b",
     "llama-3.1-8b-instant",
@@ -9,7 +9,7 @@ const GROQ_MODELS = [
     "meta-llama/llama-guard-4-12b",
     "meta-llama/llama-prompt-guard-2-22m",
     "meta-llama/llama-prompt-guard-2-86m",
-    "moonshotai/kimi-k2-instruct-0905" // Fixed quote here
+    "moonshotai/kimi-k2-instruct-0905" 
 ];
 
 export const GroqAPI = {
@@ -18,7 +18,7 @@ export const GroqAPI = {
 
         let lastError = null;
 
-        // Rotation Logic: Try models in order. If one fails, move it to the back.
+        // Try every model once
         for (let i = 0; i < GROQ_MODELS.length; i++) {
             const currentModel = GROQ_MODELS[0];
 
@@ -33,7 +33,6 @@ export const GroqAPI = {
                         model: currentModel,
                         messages: messages,
                         temperature: 0.1,
-                        // Only send response_format if jsonMode is true
                         response_format: jsonMode ? { type: "json_object" } : undefined
                     })
                 });
@@ -43,27 +42,28 @@ export const GroqAPI = {
                 if (!res.ok) {
                     const errorMsg = data.error?.message || `Status ${res.status}`;
                     
-                    // Specific handling for 400 Bad Request (often caused by strict JSON mode issues)
+                    // If JSON mode fails (400), retry immediate with text mode
                     if (res.status === 400 && jsonMode) {
-                        // console.warn("Groq 400 received in JSON mode. Retrying as text...");
-                        // Recursively try again with jsonMode disabled for this specific model
                         return this.chat(messages, apiKey, false);
                     }
                     
                     throw new Error(errorMsg);
                 }
 
+                if (!data.choices || !data.choices[0]) {
+                    throw new Error("Invalid Groq response structure");
+                }
+
                 let content = data.choices[0].message.content;
                 
-                // Clean internal thought chains (DeepSeek/Reasoning models often output these tags)
+                // Clean internal thought chains
                 return content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
             } catch (e) {
                 lastError = e;
-                // Rotate: Move the failed model to the end of the array
+                // ROTATION LOGIC: Move failed model to end
                 const failed = GROQ_MODELS.shift();
                 GROQ_MODELS.push(failed);
-                // The loop continues with the new first element
             }
         }
 
