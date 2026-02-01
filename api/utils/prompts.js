@@ -120,7 +120,7 @@ TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
 // ======================================================================
 if (type === 'quotes') {
     return `
-TASK: Extract substantial, meaningful quotes from each source.
+TASK: Extract substantial, meaningful quotes from each source - VERBATIM ONLY.
 
 USER'S TEXT CONTEXT: "${context.substring(0, 500)}..."
 
@@ -133,21 +133,36 @@ ${sourceContext}
 
 QUOTE EXTRACTION RULES:
 
-1. **QUOTE LENGTH**: Extract SUBSTANTIAL passages (50-200 words)
-   - Target: 2-5 complete sentences per quote
-   - Include full context and complete thoughts
-   - Do NOT extract single sentences or fragments
-   - Longer quotes are better than shorter ones
+1. **VERBATIM REQUIREMENT** (CRITICAL):
+   - Extract text EXACTLY as it appears in TEXT_CONTENT
+   - Do NOT paraphrase, rearrange, or modify ANY words
+   - Do NOT combine sentences from different parts of the text
+   - Do NOT add connecting words or transitions
+   - Copy the exact punctuation, capitalization, and wording
 
-2. **RELEVANCE**: Extract quotes that are related to the topic
+2. **QUOTE LENGTH**: Extract SUBSTANTIAL passages (50-200 words)
+   - Target: 2-5 complete sentences per quote
+   - Extract consecutive sentences that appear together in the source
+   - If extracting multiple passages, use bullet points (see format below)
+
+3. **CONTINUOUS vs NON-CONTINUOUS QUOTES**:
+   
+   **If sentences are CONSECUTIVE** (appear together in source):
+   > "First sentence here. Second sentence follows immediately. Third sentence continues the thought."
+   
+   **If sentences are SEPARATED** (from different parts of source):
+   > • "First passage from beginning of article."
+   > • "Second passage from middle of article that's on a different point."
+   > • "Third passage from end of article with another key point."
+
+4. **RELEVANCE**: Extract quotes related to the topic
    - The user's text is about: climate change urgency
    - Extract ANY substantive content related to this topic
    - Include supporting evidence, data, expert opinions
-   - Include context, background, or explanatory content
+   - Include context, explanations, or calls to action
    - EVEN include contrasting viewpoints or skeptical perspectives
-   - The quote does NOT need to perfectly agree with the user's argument
 
-3. **WHAT TO EXTRACT**:
+5. **WHAT TO EXTRACT**:
    ✓ Statistical data and research findings
    ✓ Expert statements and authoritative claims
    ✓ Explanations of causes, effects, or solutions
@@ -157,62 +172,88 @@ QUOTE EXTRACTION RULES:
    ✓ Case studies or specific examples
    ✓ Urgency statements or calls to action
 
-4. **WHAT TO AVOID**:
+6. **WHAT TO AVOID**:
    ✗ Generic introductory text ("Welcome to our site...")
    ✗ Navigation or menu text
    ✗ Biographical information about authors (unless relevant)
    ✗ Copyright notices or disclaimers
    ✗ Partial sentences or fragments
+   ✗ PARAPHRASING or REWORDING the original text
 
-5. **EXTRACTION STRATEGY**:
+7. **EXTRACTION STRATEGY**:
    - Read the ENTIRE TEXT_CONTENT carefully
-   - Look for the most substantive, informative passages
-   - Extract the FULL passage, not just pieces
-   - If multiple good passages exist, extract 2-3 separate quotes
-   - Ensure each quote stands alone and makes sense
+   - Identify the most substantive, informative passages
+   - Copy the text EXACTLY as it appears
+   - If you want multiple passages, use bullet points
+   - Ensure each passage is meaningful and complete
 
-6. **WHEN NO GOOD QUOTE EXISTS**:
+8. **WHEN NO GOOD QUOTE EXISTS**:
    - ONLY say "No relevant quote found" if:
      * The TEXT_CONTENT is empty or gibberish
      * The content is entirely navigation/menu text
      * The content is completely unrelated to climate/environment
    - Otherwise, EXTRACT SOMETHING substantial from the text
 
-7. **OUTPUT FORMAT** (strictly in order ID 1 to ${safeSources.length}):
+9. **OUTPUT FORMAT** (strictly in order ID 1 to ${safeSources.length}):
 
+For CONTINUOUS quotes (consecutive sentences):
 **[ID] Title** - URL
-> "Complete quote spanning multiple sentences. This should be a substantial passage that provides meaningful information about the topic. Include full context and complete thoughts. Make sure the quote is 50-200 words and consists of 2-5 complete sentences that flow together naturally."
+> "Exact text from source copied verbatim. Multiple sentences that appear together in the original. Complete thoughts with full context."
+
+For NON-CONTINUOUS quotes (from different sections):
+**[ID] Title** - URL
+> • "First passage copied exactly from one part of the source."
+> • "Second passage copied exactly from a different part of the source."
+> • "Third passage if needed, also copied verbatim from another section."
 
 OR if truly no content:
 **[ID] Title** - URL
-> No relevant quote found that supports the argument.
+> No relevant quote found.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-EXAMPLE EXTRACTIONS (showing different types of valuable quotes):
+GOOD EXAMPLES (showing verbatim extraction):
 
-**[1] IPCC Climate Report**
-> "The Intergovernmental Panel on Climate Change reports that global temperatures have risen 1.1°C since pre-industrial times, with the majority of warming occurring in the past 40 years. This warming is unequivocally caused by human activities, primarily the burning of fossil fuels. Without immediate and drastic reductions in greenhouse gas emissions, the world is on track to exceed 1.5°C of warming by 2030, triggering irreversible climate impacts including sea level rise, extreme weather events, and widespread ecosystem collapse."
+**[1] IPCC Report**
+> "Mainstreaming effective and equitable climate action will not only reduce losses and damages for nature and people, it will also provide wider benefits. This Synthesis Report underscores the urgency of taking more ambitious action and shows that, if we act now, we can still secure a liveable sustainable future for all."
 
-**[2] Economic Analysis**
-> "The economic costs of climate inaction far exceed the costs of mitigation. Studies estimate that unmitigated climate change could reduce global GDP by 23% by 2100, with developing nations facing disproportionate impacts. In contrast, transitioning to renewable energy and implementing adaptation measures would cost approximately 1-2% of global GDP annually. These investments would not only prevent catastrophic damages but also create millions of jobs in clean energy sectors and improve public health outcomes."
+**[2] Greenpeace Solutions**
+> • "Core to all climate change solutions is reducing greenhouse gas emissions, which must get to zero as soon as possible."
+> • "Because both forests and oceans play vitally important roles in regulating our climate, increasing the natural ability of forests and oceans to absorb carbon dioxide can also help stop global warming."
+> • "Climate change is already an urgent threat to millions of lives – but there are solutions."
 
-**[3] Skeptical Perspective** (Note: even contrasting views are valuable!)
-> "Some researchers and policy analysts argue that climate models overstate the urgency of the crisis, pointing to historical periods of natural climate variability. They suggest that adaptation strategies may be more cost-effective than aggressive mitigation efforts, and that economic development should take priority in developing nations. However, this perspective represents a minority view within the scientific community, with the vast majority of climate scientists emphasizing the need for immediate action to prevent catastrophic warming."
+**[3] Pew Research Study**
+> "When asked whether society should take steps to address climate change, one interviewee emphasized that this issue is out of humans' control, saying: 'Take steps? No, because I don't really know what step they could take. I don't see anything that people, society can do to change the weather and change how the climate is going to react.'"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BAD EXAMPLES (showing what NOT to do):
+
+❌ WRONG - Paraphrased:
+> "The IPCC states that climate action reduces harm and benefits society."
+(This is paraphrasing - you must copy EXACT wording!)
+
+❌ WRONG - Combined from different parts without bullets:
+> "Core to all solutions is reducing emissions. Climate change is an urgent threat."
+(These are from different parts of the text - use bullet points!)
+
+❌ WRONG - Modified wording:
+> "Climate change solutions center on reducing greenhouse gases to zero."
+(Changed "Core to all climate change solutions is" to "center on" - NOT verbatim!)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CRITICAL REMINDERS:
 
-✓ Extract quotes from ALL ${safeSources.length} sources (don't skip most of them!)
+✓ Extract quotes from ALL ${safeSources.length} sources
+✓ Copy text VERBATIM - exact wording, punctuation, capitalization
 ✓ Make quotes 50-200 words (2-5 sentences)
-✓ Include complete thoughts with full context
+✓ Use bullet points (>) for non-continuous passages
+✓ Use standard quotes (") for continuous passages
 ✓ Extract ANY substantive climate-related content
-✓ Don't be overly restrictive about "supporting the argument"
-✓ Even contrasting viewpoints are valuable for a complete picture
 ✓ Only say "No relevant quote" if content is truly empty/unrelated
 
-Your goal is to provide the user with substantial, informative quotes they can use in their research - not to filter out most sources!
+VERBATIM means VERBATIM - no paraphrasing, no rewording, no rearranging!
     `;
 }
 
