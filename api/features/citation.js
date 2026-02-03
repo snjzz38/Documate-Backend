@@ -17,68 +17,72 @@ const PipelineService = {
 
     extractYear(source) {
         let year = "n.d.";
-        if (source.meta.published && source.meta.published !== "n.d.") {
+        if (source.meta?.published && source.meta.published !== "n.d.") {
             const yearMatch = source.meta.published.match(/\b(20\d{2})\b/);
             if (yearMatch) return yearMatch[1];
         }
-        const contentYearMatch = source.content.match(/\b(20\d{2})\b/);
-        if (contentYearMatch) return contentYearMatch[1];
+        if (source.content) {
+            const contentYearMatch = source.content.match(/\b(20\d{2})\b/);
+            if (contentYearMatch) return contentYearMatch[1];
+        }
         return year;
     },
 
-validateCitationText(citationText, source, style) {
-    if (!citationText) return null;
-    
-    // Fix "Unknown" author issue
-    if (citationText.includes("Unknown")) {
-        const siteName = source.meta?.siteName || source.title.split(/[:\-–|]/).shift().trim();
-        citationText = citationText.replace(/Unknown/g, siteName);
-    }
-    
-    const year = this.extractYear(source);
-    const hasYear = /\d{4}|n\.d\./i.test(citationText);
-    
-    // Ensure year is always present
-    if (!hasYear) {
-        const match = citationText.match(/^\((.*?)\)$/);
-        if (match) {
-            const authorPart = match[1];
-            const s = (style || "").toLowerCase();
-            if (s.includes('chicago')) return `(${authorPart} ${year})`;
-            if (s.includes('apa')) return `(${authorPart}, ${year})`;
-            return `(${authorPart} ${year})`;
+    getSiteName(source) {
+        return source.meta?.siteName || source.title.split(/[:\-–|]/).shift().trim() || "Unknown Source";
+    },
+
+    validateCitationText(citationText, source, style) {
+        if (!citationText) return null;
+        
+        // Fix "Unknown" author issue - replace with site name
+        if (citationText.includes("Unknown")) {
+            const siteName = this.getSiteName(source);
+            citationText = citationText.replace(/Unknown/g, siteName);
         }
-    }
-    
-    return citationText;
-},
+        
+        const year = this.extractYear(source);
+        const hasYear = /\d{4}|n\.d\./i.test(citationText);
+        
+        // Ensure year is always present
+        if (!hasYear) {
+            const match = citationText.match(/^\((.*?)\)$/);
+            if (match) {
+                const authorPart = match[1];
+                const s = (style || "").toLowerCase();
+                if (s.includes('chicago')) return `(${authorPart} ${year})`;
+                if (s.includes('apa')) return `(${authorPart}, ${year})`;
+                return `(${authorPart} ${year})`;
+            }
+        }
+        
+        return citationText;
+    },
+
     generateFallback(source) {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
-        let author = source.meta.author;
-        const site = source.meta.siteName || "Unknown Source";
+        let author = source.meta?.author;
+        const site = this.getSiteName(source);
         
+        // Check if author is just the site name
         const isSiteName = author && (
             author === site || 
             author.toLowerCase().includes(site.toLowerCase().replace(/\.(com|org|edu|net)/, ''))
         );
         
         if (!author || author === "Unknown" || isSiteName) {
-            const authorMatch = source.content.match(/([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
+            // Try to extract author from content
+            const authorMatch = source.content?.match(/([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)\s+and\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
             if (authorMatch) {
                 author = `${authorMatch[1]} and ${authorMatch[2]}`;
             } else {
-                const singleAuthor = source.content.match(/(?:By|Author:)\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
+                const singleAuthor = source.content?.match(/(?:By|Author:)\s+([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)/);
                 author = singleAuthor ? singleAuthor[1] : site;
             }
         }
         
-        let date = source.meta.published;
-        if (!date || date === "n.d.") {
-            const yearMatch = source.content.match(/\b(20\d{2})\b/);
-            date = yearMatch ? yearMatch[1] : "n.d.";
-        }
-
+        const date = this.extractYear(source);
         return `${author}. "${source.title}". ${site}. ${date}. ${source.link} (Accessed ${today})`;
     },
 
@@ -88,6 +92,7 @@ validateCitationText(citationText, source, style) {
         let usedSourceIds = new Set();
         let footnotesList = [];
 
+        // Tokenize text for anchor matching
         const tokens = [];
         const tokenRegex = /[a-z0-9]+/gi;
         let match;
@@ -95,11 +100,13 @@ validateCitationText(citationText, source, style) {
             tokens.push({ word: match[0].toLowerCase(), start: match.index, end: match.index + match[0].length });
         }
 
+        // Process and validate insertions
         const validInsertions = (insertions || [])
             .map(item => {
                 if (!item.anchor || !item.source_id) return null;
                 const anchorWords = item.anchor.toLowerCase().match(/[a-z0-9]+/g);
                 if (!anchorWords) return null;
+                
                 let bestIndex = -1;
                 for (let i = 0; i <= tokens.length - anchorWords.length; i++) {
                     let matchFound = true;
@@ -113,6 +120,7 @@ validateCitationText(citationText, source, style) {
             .filter(Boolean)
             .sort((a, b) => b.insertIndex - a.insertIndex);
 
+        // Apply insertions
         validInsertions.forEach(item => {
             const source = sources.find(s => s.id === item.source_id);
             if (!source) return;
@@ -129,9 +137,8 @@ validateCitationText(citationText, source, style) {
 
             let insertContent = "";
             if (outputType === 'footnotes') {
-                const s = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
-                const numStr = footnoteCounter.toString();
-                insertContent = numStr.split('').map(d => s[d]||'').join('');
+                const superscripts = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
+                insertContent = footnoteCounter.toString().split('').map(d => superscripts[d] || '').join('');
                 footnotesList.push(`${footnoteCounter}. ${citString}`);
                 footnoteCounter++;
             } else {
@@ -139,7 +146,7 @@ validateCitationText(citationText, source, style) {
                 inText = this.validateCitationText(inText, source, style);
                 
                 if (!inText || inText.length < 3) {
-                    let auth = source.meta.author !== "Unknown" ? source.meta.author.split(' ')[0] : source.meta.siteName;
+                    const auth = source.meta?.author !== "Unknown" ? source.meta?.author?.split(' ')[0] : this.getSiteName(source);
                     const yr = this.extractYear(source);
                     inText = `(${auth} ${yr})`;
                 }
@@ -148,6 +155,7 @@ validateCitationText(citationText, source, style) {
             resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
         });
 
+        // Build footer
         let footer = "";
         
         if (outputType === 'footnotes') {
@@ -162,6 +170,7 @@ validateCitationText(citationText, source, style) {
             });
         }
 
+        // Unused sources
         if (usedSourceIds.size < sources.length) {
             footer += "\n\n### Further Reading (Unused)\n";
             sources.forEach(s => {
@@ -198,8 +207,8 @@ export default async function handler(req, res) {
             return res.status(200).json({ success: true, text: result });
         }
 
-        // --- 2. SEARCH & SCRAPE ---
-        const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX);
+        // --- 2. SEARCH & SCRAPE (with AI keyword extraction) ---
+        const rawSources = await GoogleSearchAPI.search(context, SEARCH_KEY, SEARCH_CX, GROQ_KEY);
         const richSources = await ScraperAPI.scrape(rawSources);
         
         // --- 3. BIBLIOGRAPHY MODE ---
@@ -245,6 +254,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true, sources: richSources, text: finalOutput });
 
     } catch (error) {
+        console.error("Citation Error:", error);
         return res.status(500).json({ success: false, error: error.message });
     }
 }
