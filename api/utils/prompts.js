@@ -2,6 +2,25 @@
 
 export const CitationPrompts = {
 
+    // --- 1. SEARCH QUERY GENERATOR (NEW) ---
+    buildSearchQuery(context) {
+        return `
+            TASK: Generate a single, highly effective Google Search Query based on the user's academic text.
+            
+            TEXT: "${context.substring(0, 1000).replace(/\n/g, ' ')}..."
+            
+            RULES:
+            1. **IGNORE** literal object descriptions (e.g., "This object is my whiteboard", "I use this tool").
+            2. **EXTRACT** the core philosophical, scientific, or academic themes (e.g., "Epistemology", "Rationalism", "A Priori", "Plato", "Descartes").
+            3. **COMBINE** these themes into a keyword string.
+            4. **OUTPUT**: Return ONLY the query string. No quotes, no explanations. Max 8-10 words.
+            
+            Example Input: "My pencil represents how we record history..."
+            Example Output: historiography recording history collective memory philosophy
+        `;
+    },
+
+    
     // ======================================================================
     // STEP 1: Generate formatted citations for all sources
     // Called by citation.js for in-text and footnotes modes
