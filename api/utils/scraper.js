@@ -9,39 +9,58 @@ const USER_AGENTS = [
 
 /**
  * HELPER: Find the nearest valid sentence start.
+ * Logic: Search for [Letter/Number/Quote] + [./!/?] + [Space] + [Capital Letter].
+ * Returns the index of the Capital Letter.
  */
 function findSentenceStart(text, searchFromIndex) {
     if (searchFromIndex >= text.length) return -1;
 
+    // Scan a buffer of 500 chars to find a start
     const buffer = text.substring(searchFromIndex, searchFromIndex + 500);
-    const match = buffer.match(/([a-z0-9""'])[.!?]\s+([A-Z])/);
+    
+    // Regex explanation:
+    // ([a-z0-9"”'])   -> Capture group 1: Ends with letter, number, or quote
+    // [.!?]           -> Literal punctuation
+    // \s+             -> Whitespace
+    // ([A-Z])         -> Capture group 2: Starts with Capital Letter
+    const match = buffer.match(/([a-z0-9"”'])[.!?]\s+([A-Z])/);
 
     if (match) {
+        // match.index = start of the pattern (the ending letter of prev sentence)
+        // We want the index of Capture Group 2 (The Capital Letter)
+        // match[0] is the whole string "d. The"
+        // We calculate offset to the Capital Letter
         const splitIndex = match[0].lastIndexOf(match[2]);
         return searchFromIndex + match.index + splitIndex;
     }
 
-    return -1;
+    return -1; // No valid start found in buffer
 }
 
 /**
  * HELPER: Extract a semantic chunk.
+ * 1. Adjusts start to nearest sentence beginning.
+ * 2. Extends end to nearest sentence completion.
  */
 function getSmartChunk(fullText, approxStart, targetLength) {
+    // 1. Find a clean start
     let start = findSentenceStart(fullText, approxStart);
     
+    // If no sentence start found (or we are at 0), just fallback to approxStart
     if (start === -1) {
-        if (approxStart === 0) start = 0;
-        else return "";
+        if (approxStart === 0) start = 0; // Allow index 0 for Intro
+        else return ""; // Skip if we can't find a sentence in the middle
     }
 
+    // 2. Cut the rough slice
     let chunk = fullText.substr(start, targetLength);
     
+    // 3. Find a clean end (Letter/Quote + Punctuation + Space/EOF)
     const buffer = fullText.substr(start + targetLength, 300);
-    const endMatch = buffer.match(/([a-z0-9""'])[.!?](?:\s|$)/);
+    const endMatch = buffer.match(/([a-z0-9"”'])[.!?](?:\s|$)/);
 
     if (endMatch) {
-        const cutIndex = endMatch.index + endMatch[1].length + 1;
+        const cutIndex = endMatch.index + endMatch[1].length + 1; // Include punctuation
         chunk += buffer.substring(0, cutIndex);
     } else {
         chunk += "...";
@@ -51,290 +70,45 @@ function getSmartChunk(fullText, approxStart, targetLength) {
 }
 
 /**
- * HELPER: Extract metadata using multiple strategies.
- * Expanded to cover links, buttons, spans, and various HTML patterns.
+ * HELPER: Extract metadata using JSON-LD & Meta Tags.
  */
-function extractMetadata($, rawText, url) {
+function extractMetadata($, rawText) {
     let author = null;
-    let allAuthors = [];
     let date = null;
-    let siteName = null;
 
-    // ==========================================================================
-    // 1. JSON-LD (Highest Priority - Structured Data)
-    // ==========================================================================
+    // 1. JSON-LD
     try {
-        $('script[type="application/ld+json"]').each((i, el) => {
-            try {
-                const jsonLd = $(el).html();
-                if (jsonLd) {
-                    const data = JSON.parse(jsonLd);
-                    const objects = Array.isArray(data) ? data : [data];
-                    
-                    objects.forEach(obj => {
-                        // Handle nested @graph structure
-                        const items = obj['@graph'] || [obj];
-                        
-                        items.forEach(item => {
-                            // Author extraction
-                            if (item.author && !author) {
-                                if (Array.isArray(item.author)) {
-                                    allAuthors = item.author.map(a => 
-                                        typeof a === 'string' ? a : (a.name || '')
-                                    ).filter(Boolean);
-                                    author = allAuthors[0];
-                                } else if (typeof item.author === 'string') {
-                                    author = item.author;
-                                    allAuthors = [author];
-                                } else if (item.author.name) {
-                                    author = item.author.name;
-                                    allAuthors = [author];
-                                }
-                            }
-                            
-                            // Date extraction
-                            if (!date) {
-                                date = item.datePublished || item.dateCreated || item.dateModified;
-                            }
-                            
-                            // Site name
-                            if (!siteName && item.publisher) {
-                                siteName = typeof item.publisher === 'string' 
-                                    ? item.publisher 
-                                    : item.publisher.name;
-                            }
-                        });
-                    });
-                }
-            } catch (e) {}
-        });
+        const jsonLd = $('script[type="application/ld+json"]').html();
+        if (jsonLd) {
+            const data = JSON.parse(jsonLd);
+            const obj = Array.isArray(data) ? data[0] : data;
+            if (obj.author) {
+                author = typeof obj.author === 'string' ? obj.author : (obj.author.name || obj.author[0]?.name);
+            }
+            date = obj.datePublished || obj.dateCreated;
+        }
     } catch (e) {}
 
-    // ==========================================================================
-    // 2. META TAGS (Standard & OpenGraph)
-    // ==========================================================================
+    // 2. Meta Tags
     if (!author) {
-        author = $('meta[name="author"]').attr('content') ||
-                 $('meta[name="article:author"]').attr('content') ||
-                 $('meta[property="article:author"]').attr('content') ||
-                 $('meta[name="dc.creator"]').attr('content') ||
-                 $('meta[name="DC.creator"]').attr('content') ||
-                 $('meta[name="citation_author"]').attr('content');
+        author = $('meta[name="author"]').attr('content') || 
+                 $('meta[property="og:site_name"]').attr('content') ||
+                 $('a[rel="author"]').first().text();
     }
-    
-    // Multiple authors from citation_author tags
-    if (allAuthors.length === 0) {
-        $('meta[name="citation_author"]').each((i, el) => {
-            const name = $(el).attr('content');
-            if (name) allAuthors.push(name.trim());
-        });
-        if (allAuthors.length > 0 && !author) {
-            author = allAuthors[0];
-        }
-    }
-
     if (!date) {
-        date = $('meta[property="article:published_time"]').attr('content') ||
-               $('meta[name="publication_date"]').attr('content') ||
-               $('meta[name="date"]').attr('content') ||
-               $('meta[name="dc.date"]').attr('content') ||
-               $('meta[name="DC.date"]').attr('content') ||
-               $('meta[name="citation_publication_date"]').attr('content') ||
-               $('meta[property="og:updated_time"]').attr('content');
+        date = $('meta[property="article:published_time"]').attr('content') || 
+               $('time').first().attr('datetime');
     }
 
-    if (!siteName) {
-        siteName = $('meta[property="og:site_name"]').attr('content') ||
-                   $('meta[name="application-name"]').attr('content') ||
-                   $('meta[name="publisher"]').attr('content');
-    }
-
-    // ==========================================================================
-    // 3. HTML ELEMENTS (Links, Buttons, Spans, Divs)
-    // ==========================================================================
-    
-    // Author from links
-    if (!author) {
-        // rel="author" links
-        author = $('a[rel="author"]').first().text().trim() ||
-                 $('a[href*="/author/"]').first().text().trim() ||
-                 $('a[href*="/authors/"]').first().text().trim() ||
-                 $('a[href*="/contributor/"]').first().text().trim() ||
-                 $('a[href*="/profile/"]').first().text().trim() ||
-                 $('a[href*="/staff/"]').first().text().trim() ||
-                 $('a[href*="/people/"]').first().text().trim() ||
-                 $('a[href*="/byline/"]').first().text().trim();
-    }
-
-    // Author from common class names
-    if (!author) {
-        const authorSelectors = [
-            '.author', '.byline', '.author-name', '.writer', '.contributor',
-            '.post-author', '.article-author', '.entry-author', '.meta-author',
-            '[class*="author"]', '[class*="byline"]', '[class*="writer"]',
-            '[data-author]', '[itemprop="author"]', '[rel="author"]',
-            '.by-author', '.story-author', '.content-author'
-        ];
-        
-        for (const selector of authorSelectors) {
-            const el = $(selector).first();
-            if (el.length) {
-                // Try to get text from nested link first
-                let text = el.find('a').first().text().trim() || el.text().trim();
-                // Clean up "By " prefix
-                text = text.replace(/^(By|Written by|Author:|Posted by)\s*/i, '').trim();
-                // Validate it looks like a name (has space, not too long)
-                if (text && text.length > 3 && text.length < 60 && /\s/.test(text)) {
-                    author = text;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Author from buttons or spans with author-related attributes
-    if (!author) {
-        author = $('button[data-author]').attr('data-author') ||
-                 $('span[data-author]').attr('data-author') ||
-                 $('[data-analytics-author]').attr('data-analytics-author') ||
-                 $('[data-track-author]').attr('data-track-author');
-    }
-
-    // Date from time elements
-    if (!date) {
-        const timeEl = $('time[datetime]').first();
-        if (timeEl.length) {
-            date = timeEl.attr('datetime');
-        } else {
-            // Try time element text
-            date = $('time').first().text().trim();
-        }
-    }
-
-    // Date from common class names
-    if (!date) {
-        const dateSelectors = [
-            '.date', '.published', '.post-date', '.article-date', '.entry-date',
-            '.meta-date', '.publish-date', '.publication-date', '.timestamp',
-            '[class*="date"]', '[class*="publish"]', '[itemprop="datePublished"]',
-            '.story-date', '.content-date', '.posted-on'
-        ];
-        
-        for (const selector of dateSelectors) {
-            const el = $(selector).first();
-            if (el.length) {
-                const text = el.attr('datetime') || el.text().trim();
-                // Validate it looks like a date
-                if (text && /\d{4}/.test(text)) {
-                    date = text;
-                    break;
-                }
-            }
-        }
-    }
-
-    // ==========================================================================
-    // 4. TEXT FORENSICS (Last Resort)
-    // ==========================================================================
-    
-    // Author from "By [Name]" pattern in first 2000 chars
-    if (!author) {
-        const bylinePatterns = [
-            /By\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)(?:\s+and\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+))?/,
-            /Written by\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/i,
-            /Author:\s*([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)/i,
-            /([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?[A-Z][a-z]+)\s+\|\s+[A-Z]/  // "John Smith | CNN"
-        ];
-        
-        const headerText = rawText.substring(0, 2000);
-        for (const pattern of bylinePatterns) {
-            const match = headerText.match(pattern);
-            if (match) {
-                author = match[1].trim();
-                if (match[2]) {
-                    allAuthors = [match[1].trim(), match[2].trim()];
-                }
-                break;
-            }
-        }
-    }
-
-    // Date from text patterns
+    // 3. Text Forensics
     if (!date || date === "n.d.") {
-        const datePatterns = [
-            /(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/i,
-            /(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}/i,
-            /\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}/i,
-            /\d{4}-\d{2}-\d{2}/,
-            /\d{1,2}\/\d{1,2}\/\d{4}/
-        ];
-        
-        const headerText = rawText.substring(0, 2000);
-        for (const pattern of datePatterns) {
-            const match = headerText.match(pattern);
-            if (match) {
-                date = match[0];
-                break;
-            }
-        }
-    }
-
-    // ==========================================================================
-    // 5. SITE NAME FALLBACK
-    // ==========================================================================
-    if (!siteName) {
-        try {
-            const hostname = new URL(url).hostname.replace('www.', '');
-            // Try to make it readable: "nytimes.com" -> "NYTimes"
-            const parts = hostname.split('.');
-            if (parts.length >= 2) {
-                const domain = parts[parts.length - 2];
-                // Capitalize first letter
-                siteName = domain.charAt(0).toUpperCase() + domain.slice(1);
-            } else {
-                siteName = hostname;
-            }
-        } catch (e) {
-            siteName = "Unknown Source";
-        }
-    }
-
-    // ==========================================================================
-    // 6. FINAL CLEANUP
-    // ==========================================================================
-    
-    // Clean author name
-    if (author) {
-        author = author
-            .replace(/^(By|Written by|Author:|Posted by)\s*/i, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-        
-        // Filter out obvious non-names
-        const invalidNames = ['admin', 'editor', 'staff', 'contributor', 'anonymous', 'unknown'];
-        if (invalidNames.includes(author.toLowerCase()) || author.length < 3) {
-            author = null;
-        }
-    }
-
-    // Ensure allAuthors includes primary author
-    if (author && allAuthors.length === 0) {
-        allAuthors = [author];
-    }
-
-    // Clean date - extract year if full date
-    let year = "n.d.";
-    if (date && date !== "n.d.") {
-        const yearMatch = date.match(/\b(19|20)\d{2}\b/);
-        if (yearMatch) year = yearMatch[0];
+        const dateMatch = rawText.substring(0, 1500).match(/([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})/);
+        if (dateMatch) date = dateMatch[1];
     }
 
     return { 
-        author: author || null,
-        allAuthors: allAuthors,
-        published: date || "n.d.",
-        year: year,
-        siteName: siteName
+        author: author ? author.trim() : "Unknown", 
+        date: date || "n.d." 
     };
 }
 
@@ -363,29 +137,17 @@ export const ScraperAPI = {
                 if (contentType.includes('application/pdf') || source.link.endsWith('.pdf')) {
                     const buffer = await res.arrayBuffer();
                     const pdfData = await PdfParse(Buffer.from(buffer));
-                    return this._formatResult(pdfData.text, source, null);
+                    return this._formatResult(pdfData.text, source);
                 }
 
                 const html = await res.text();
                 return this._parseHtml(html, source);
 
             } catch (e) {
-                // Fallback with snippet
-                let siteName = "Unknown";
-                try {
-                    siteName = new URL(source.link).hostname.replace('www.', '');
-                } catch (err) {}
-                
                 return {
                     ...source,
                     content: `[Summary]: ${source.snippet || "No content available."}`,
-                    meta: { 
-                        author: null, 
-                        allAuthors: [],
-                        published: "n.d.", 
-                        year: "n.d.",
-                        siteName: siteName 
-                    }
+                    meta: { author: "Unknown", published: "n.d.", siteName: new URL(source.link).hostname }
                 };
             }
         });
@@ -397,212 +159,33 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // =======================================================
-        // STEP 1: Extract metadata BEFORE removing elements
-        // =======================================================
-        const metaRawText = $('body').text().replace(/\s+/g, ' ').trim();
-        const meta = extractMetadata($, metaRawText, originalSource.link);
+        // Remove Junk
+        $('script, style, nav, footer, iframe, svg, header, aside, form, button, noscript').remove();
+        $('.ad, .popup, .menu, .share, .social, .subscribe, .cookie, .banner, .related, .sidebar').remove();
+        
+        const rawText = $('body').text().replace(/\s+/g, ' ').trim();
+        const meta = extractMetadata($, rawText);
 
-        // =======================================================
-        // STEP 2: Aggressively remove junk elements
-        // =======================================================
-        
-        // Scripts and styles (keep JSON-LD for metadata but remove after)
-        $('script, style, noscript').remove();
-        
-        // Navigation and structural junk
-        $('nav, header, footer, aside, menu, menuitem').remove();
-        $('[role="navigation"], [role="banner"], [role="contentinfo"]').remove();
-        $('[role="menu"], [role="menubar"], [role="toolbar"]').remove();
-        
-        // Common junk class names
-        const junkClasses = [
-            '.nav', '.navbar', '.navigation', '.menu', '.sidebar', '.footer', '.header',
-            '.ad', '.ads', '.advertisement', '.popup', '.modal', '.cookie', '.banner',
-            '.breadcrumb', '.breadcrumbs', '.toc', '.table-of-contents', '.tableofcontents',
-            '.share', '.social', '.sharing', '.subscribe', '.newsletter', '.signup',
-            '.related', '.recommended', '.also-read', '.more-stories',
-            '.comment', '.comments', '.discuss', '.feedback',
-            '.search', '.searchbox', '.search-form', '.search-box',
-            '.toolbar', '.toolbox', '.tools', '.utility',
-            '.login', '.signin', '.register', '.account',
-            '.skip', '.skip-link', '.skip-to-content',
-            '.pagination', '.pager', '.page-numbers',
-            '.widget', '.widgets', '.widget-area',
-            '.alert', '.notice', '.warning', '.error', '.info-box',
-            '.download', '.downloads', '.resources',
-            '.reference', '.references', '.bibliography', '.citations', '.footnotes',
-            '.author-bio', '.about-author', '.author-box'
-        ];
-        $(junkClasses.join(', ')).remove();
-        
-        // Common junk ID patterns
-        const junkIds = [
-            '#nav', '#navigation', '#menu', '#sidebar', '#footer', '#header',
-            '#comments', '#respond', '#search', '#toc', '#table-of-contents',
-            '#breadcrumbs', '#share', '#social', '#related', '#widget-area'
-        ];
-        $(junkIds.join(', ')).remove();
-        
-        // Elements with junk-indicating attributes
-        $('[class*="menu"]').remove();
-        $('[class*="nav-"]').remove();
-        $('[class*="-nav"]').remove();
-        $('[class*="toolbar"]').remove();
-        $('[class*="sidebar"]').remove();
-        $('[class*="footer"]').remove();
-        $('[class*="header-"]').remove();
-        $('[class*="breadcrumb"]').remove();
-        $('[class*="search"]').not('article [class*="search"]').remove();
-        $('[class*="widget"]').remove();
-        $('[class*="cookie"]').remove();
-        $('[class*="popup"]').remove();
-        $('[class*="modal"]').remove();
-        $('[class*="banner"]').remove();
-        $('[class*="advertisement"]').remove();
-        $('[class*="social"]').remove();
-        $('[class*="share"]').remove();
-        
-        // Remove iframes, forms, buttons (usually not content)
-        $('iframe, form, button, input, select, textarea').remove();
-        $('svg, canvas').remove();
-        
-        // Remove empty elements
-        $('div:empty, span:empty, p:empty').remove();
-        
-        // =======================================================
-        // STEP 3: Try to find main content area
-        // =======================================================
-        let contentText = '';
-        
-        // Priority 1: Look for article or main content
-        const contentSelectors = [
-            'article',
-            'main',
-            '[role="main"]',
-            '.content',
-            '.post-content',
-            '.article-content',
-            '.entry-content',
-            '.page-content',
-            '.main-content',
-            '#content',
-            '#main',
-            '#article',
-            '.post',
-            '.article',
-            '.entry'
-        ];
-        
-        for (const selector of contentSelectors) {
-            const el = $(selector).first();
-            if (el.length) {
-                const text = el.text().replace(/\s+/g, ' ').trim();
-                // Must have substantial content (at least 500 chars)
-                if (text.length > 500) {
-                    contentText = text;
-                    break;
-                }
-            }
-        }
-        
-        // Priority 2: Fall back to body text
-        if (!contentText || contentText.length < 500) {
-            contentText = $('body').text().replace(/\s+/g, ' ').trim();
-        }
-        
-        // =======================================================
-        // STEP 4: Clean up the extracted text
-        // =======================================================
-        contentText = this._cleanText(contentText);
-
-        return this._formatResult(contentText, originalSource, meta);
-    },
-
-    /**
-     * Clean extracted text of common junk patterns
-     */
-    _cleanText(text) {
-        // Remove common UI text patterns
-        const junkPatterns = [
-            /Skip to (?:main )?content/gi,
-            /Table of Contents/gi,
-            /Search\s*Search/gi,
-            /Login\s*Register/gi,
-            /Sign [Ii]n\s*Sign [Uu]p/gi,
-            /Subscribe\s*Newsletter/gi,
-            /Share\s*(?:on\s*)?(?:Facebook|Twitter|LinkedIn|Email)/gi,
-            /Follow [Uu]s/gi,
-            /Cookie (?:Policy|Settings|Consent)/gi,
-            /Privacy Policy/gi,
-            /Terms (?:of (?:Service|Use)|and Conditions)/gi,
-            /All [Rr]ights [Rr]eserved/gi,
-            /©\s*\d{4}/gi,
-            /\bAdvertisement\b/gi,
-            /\bSponsored\b/gi,
-            /Read [Mm]ore\s*›/gi,
-            /Continue [Rr]eading/gi,
-            /Load [Mm]ore/gi,
-            /Show [Mm]ore/gi,
-            /Click here/gi,
-            /Download (?:PDF|Full Book)/gi,
-            /Resources expand_more/gi,
-            /menu_book|perm_media|login|hub|school/gi,  // Material icons text
-            /expand_more|expand_less|chevron_right/gi,
-            /chrome_reader_mode|build_circle|fact_check/gi,
-            /Enter Reader Mode/gi,
-            /Exit Reader Mode/gi,
-            /Reset \+\-/gi,
-            /Text (?:Color|Size)/gi,
-            /Font Type/gi,
-            /Enable Dyslexic Font/gi,
-            /Margin Size/gi,
-            /This action is not available/gi,
-            /Error\s*This action/gi,
-            /selected template will load here/gi,
-            /property get \[Map MindTouch[^\]]+\]/gi,  // MindTouch junk
-            /"[^"]*"\s*:\s*"property get[^"]*"/gi,
-            /\{\s*\}\s*\{/gi,  // Empty object patterns
-            /Searchbuild_circle/gi,
-            /Toolbarfact_check/gi,
-            /Homeworkcancel/gi,
-        ];
-        
-        let cleaned = text;
-        for (const pattern of junkPatterns) {
-            cleaned = cleaned.replace(pattern, ' ');
-        }
-        
-        // Remove multiple spaces
-        cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
-        
-        // Remove very short "sentences" (likely UI fragments)
-        // Split by periods, filter out fragments under 30 chars, rejoin
-        const sentences = cleaned.split(/(?<=[.!?])\s+/);
-        const goodSentences = sentences.filter(s => {
-            const trimmed = s.trim();
-            // Keep if it's substantial or ends with punctuation
-            return trimmed.length > 30 || /[.!?]$/.test(trimmed);
-        });
-        
-        return goodSentences.join(' ').trim();
+        return this._formatResult(rawText, originalSource, meta);
     },
 
     _formatResult(rawText, source, metaOverride = null) {
         const len = rawText.length;
         
-        // 1. Intro: Always 0-1000
+        // 1. Intro: Always 0-1000 (Best for metadata/thesis)
         let finalContent = getSmartChunk(rawText, 0, 1000);
 
-        // 2. Central Chunks
+        // 2. Central Chunks (Avoid Footer Junk)
         if (len > 3000) {
+            // Define the "Safe Zone" (End at 85% to avoid footers/references)
             const safeEnd = Math.floor(len * 0.85);
-            const bodyStart = 1200;
+            const bodyStart = 1200; // Skip intro overlap
 
             if (safeEnd > bodyStart + 500) {
                 const zoneSize = safeEnd - bodyStart;
                 const midPoint = bodyStart + Math.floor(zoneSize / 2);
 
+                // Excerpt A: Random point in First Half of Safe Zone
                 const rangeA = midPoint - bodyStart;
                 if (rangeA > 200) {
                     const startA = bodyStart + Math.floor(Math.random() * (rangeA - 100));
@@ -610,6 +193,7 @@ export const ScraperAPI = {
                     if (chunkA) finalContent += `\n\n... [Excerpt A] ...\n${chunkA}`;
                 }
 
+                // Excerpt B: Random point in Second Half of Safe Zone
                 const rangeB = safeEnd - midPoint;
                 if (rangeB > 200) {
                     const startB = midPoint + Math.floor(Math.random() * (rangeB - 100));
@@ -619,30 +203,16 @@ export const ScraperAPI = {
             }
         }
 
-        // Build metadata
-        let meta;
-        if (metaOverride) {
-            meta = metaOverride;
-        } else {
-            // PDF fallback
-            let siteName = "Unknown";
-            try {
-                siteName = new URL(source.link).hostname.replace('www.', '');
-            } catch (e) {}
-            
-            meta = { 
-                author: null, 
-                allAuthors: [],
-                published: "n.d.", 
-                year: "n.d.",
-                siteName: siteName 
-            };
-        }
+        const meta = metaOverride || { author: "PDF Document", date: "n.d." };
 
         return {
             ...source,
             content: finalContent,
-            meta: meta
+            meta: { 
+                author: meta.author, 
+                published: meta.date, 
+                siteName: new URL(source.link).hostname.replace('www.', '') 
+            }
         };
     }
 };
