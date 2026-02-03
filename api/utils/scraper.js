@@ -397,14 +397,195 @@ export const ScraperAPI = {
     _parseHtml(html, originalSource) {
         const $ = cheerio.load(html);
         
-        // Remove Junk (but keep elements that might have author info)
-        $('script:not([type="application/ld+json"]), style, iframe, svg, noscript').remove();
-        $('.ad, .popup, .cookie, .banner, .sidebar, .advertisement').remove();
-        
-        const rawText = $('body').text().replace(/\s+/g, ' ').trim();
-        const meta = extractMetadata($, rawText, originalSource.link);
+        // =======================================================
+        // STEP 1: Extract metadata BEFORE removing elements
+        // =======================================================
+        const metaRawText = $('body').text().replace(/\s+/g, ' ').trim();
+        const meta = extractMetadata($, metaRawText, originalSource.link);
 
-        return this._formatResult(rawText, originalSource, meta);
+        // =======================================================
+        // STEP 2: Aggressively remove junk elements
+        // =======================================================
+        
+        // Scripts and styles (keep JSON-LD for metadata but remove after)
+        $('script, style, noscript').remove();
+        
+        // Navigation and structural junk
+        $('nav, header, footer, aside, menu, menuitem').remove();
+        $('[role="navigation"], [role="banner"], [role="contentinfo"]').remove();
+        $('[role="menu"], [role="menubar"], [role="toolbar"]').remove();
+        
+        // Common junk class names
+        const junkClasses = [
+            '.nav', '.navbar', '.navigation', '.menu', '.sidebar', '.footer', '.header',
+            '.ad', '.ads', '.advertisement', '.popup', '.modal', '.cookie', '.banner',
+            '.breadcrumb', '.breadcrumbs', '.toc', '.table-of-contents', '.tableofcontents',
+            '.share', '.social', '.sharing', '.subscribe', '.newsletter', '.signup',
+            '.related', '.recommended', '.also-read', '.more-stories',
+            '.comment', '.comments', '.discuss', '.feedback',
+            '.search', '.searchbox', '.search-form', '.search-box',
+            '.toolbar', '.toolbox', '.tools', '.utility',
+            '.login', '.signin', '.register', '.account',
+            '.skip', '.skip-link', '.skip-to-content',
+            '.pagination', '.pager', '.page-numbers',
+            '.widget', '.widgets', '.widget-area',
+            '.alert', '.notice', '.warning', '.error', '.info-box',
+            '.download', '.downloads', '.resources',
+            '.reference', '.references', '.bibliography', '.citations', '.footnotes',
+            '.author-bio', '.about-author', '.author-box'
+        ];
+        $(junkClasses.join(', ')).remove();
+        
+        // Common junk ID patterns
+        const junkIds = [
+            '#nav', '#navigation', '#menu', '#sidebar', '#footer', '#header',
+            '#comments', '#respond', '#search', '#toc', '#table-of-contents',
+            '#breadcrumbs', '#share', '#social', '#related', '#widget-area'
+        ];
+        $(junkIds.join(', ')).remove();
+        
+        // Elements with junk-indicating attributes
+        $('[class*="menu"]').remove();
+        $('[class*="nav-"]').remove();
+        $('[class*="-nav"]').remove();
+        $('[class*="toolbar"]').remove();
+        $('[class*="sidebar"]').remove();
+        $('[class*="footer"]').remove();
+        $('[class*="header-"]').remove();
+        $('[class*="breadcrumb"]').remove();
+        $('[class*="search"]').not('article [class*="search"]').remove();
+        $('[class*="widget"]').remove();
+        $('[class*="cookie"]').remove();
+        $('[class*="popup"]').remove();
+        $('[class*="modal"]').remove();
+        $('[class*="banner"]').remove();
+        $('[class*="advertisement"]').remove();
+        $('[class*="social"]').remove();
+        $('[class*="share"]').remove();
+        
+        // Remove iframes, forms, buttons (usually not content)
+        $('iframe, form, button, input, select, textarea').remove();
+        $('svg, canvas').remove();
+        
+        // Remove empty elements
+        $('div:empty, span:empty, p:empty').remove();
+        
+        // =======================================================
+        // STEP 3: Try to find main content area
+        // =======================================================
+        let contentText = '';
+        
+        // Priority 1: Look for article or main content
+        const contentSelectors = [
+            'article',
+            'main',
+            '[role="main"]',
+            '.content',
+            '.post-content',
+            '.article-content',
+            '.entry-content',
+            '.page-content',
+            '.main-content',
+            '#content',
+            '#main',
+            '#article',
+            '.post',
+            '.article',
+            '.entry'
+        ];
+        
+        for (const selector of contentSelectors) {
+            const el = $(selector).first();
+            if (el.length) {
+                const text = el.text().replace(/\s+/g, ' ').trim();
+                // Must have substantial content (at least 500 chars)
+                if (text.length > 500) {
+                    contentText = text;
+                    break;
+                }
+            }
+        }
+        
+        // Priority 2: Fall back to body text
+        if (!contentText || contentText.length < 500) {
+            contentText = $('body').text().replace(/\s+/g, ' ').trim();
+        }
+        
+        // =======================================================
+        // STEP 4: Clean up the extracted text
+        // =======================================================
+        contentText = this._cleanText(contentText);
+
+        return this._formatResult(contentText, originalSource, meta);
+    },
+
+    /**
+     * Clean extracted text of common junk patterns
+     */
+    _cleanText(text) {
+        // Remove common UI text patterns
+        const junkPatterns = [
+            /Skip to (?:main )?content/gi,
+            /Table of Contents/gi,
+            /Search\s*Search/gi,
+            /Login\s*Register/gi,
+            /Sign [Ii]n\s*Sign [Uu]p/gi,
+            /Subscribe\s*Newsletter/gi,
+            /Share\s*(?:on\s*)?(?:Facebook|Twitter|LinkedIn|Email)/gi,
+            /Follow [Uu]s/gi,
+            /Cookie (?:Policy|Settings|Consent)/gi,
+            /Privacy Policy/gi,
+            /Terms (?:of (?:Service|Use)|and Conditions)/gi,
+            /All [Rr]ights [Rr]eserved/gi,
+            /©\s*\d{4}/gi,
+            /\bAdvertisement\b/gi,
+            /\bSponsored\b/gi,
+            /Read [Mm]ore\s*›/gi,
+            /Continue [Rr]eading/gi,
+            /Load [Mm]ore/gi,
+            /Show [Mm]ore/gi,
+            /Click here/gi,
+            /Download (?:PDF|Full Book)/gi,
+            /Resources expand_more/gi,
+            /menu_book|perm_media|login|hub|school/gi,  // Material icons text
+            /expand_more|expand_less|chevron_right/gi,
+            /chrome_reader_mode|build_circle|fact_check/gi,
+            /Enter Reader Mode/gi,
+            /Exit Reader Mode/gi,
+            /Reset \+\-/gi,
+            /Text (?:Color|Size)/gi,
+            /Font Type/gi,
+            /Enable Dyslexic Font/gi,
+            /Margin Size/gi,
+            /This action is not available/gi,
+            /Error\s*This action/gi,
+            /selected template will load here/gi,
+            /property get \[Map MindTouch[^\]]+\]/gi,  // MindTouch junk
+            /"[^"]*"\s*:\s*"property get[^"]*"/gi,
+            /\{\s*\}\s*\{/gi,  // Empty object patterns
+            /Searchbuild_circle/gi,
+            /Toolbarfact_check/gi,
+            /Homeworkcancel/gi,
+        ];
+        
+        let cleaned = text;
+        for (const pattern of junkPatterns) {
+            cleaned = cleaned.replace(pattern, ' ');
+        }
+        
+        // Remove multiple spaces
+        cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
+        
+        // Remove very short "sentences" (likely UI fragments)
+        // Split by periods, filter out fragments under 30 chars, rejoin
+        const sentences = cleaned.split(/(?<=[.!?])\s+/);
+        const goodSentences = sentences.filter(s => {
+            const trimmed = s.trim();
+            // Keep if it's substantial or ends with punctuation
+            return trimmed.length > 30 || /[.!?]$/.test(trimmed);
+        });
+        
+        return goodSentences.join(' ').trim();
     },
 
     _formatResult(rawText, source, metaOverride = null) {
