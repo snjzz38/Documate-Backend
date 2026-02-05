@@ -32,6 +32,105 @@ const PipelineService = {
         return source.meta?.siteName || source.title.split(/[:\-–|]/).shift().trim() || "Unknown Source";
     },
 
+    /**
+     * Fix truncated URLs in quotes output
+     * Replaces short URLs (just domain) with full URLs from source data
+     */
+    fixQuoteUrls(text, sources) {
+        let fixed = text;
+        
+        for (const source of sources) {
+            if (!source.link) continue;
+            
+            try {
+                const url = new URL(source.link);
+                const domain = url.hostname.replace('www.', '');
+                
+                // Pattern 1: Just the domain (e.g., "https://plato.stanford.edu" or "plato.stanford.edu")
+                const domainOnlyPattern = new RegExp(
+                    `(https?://)?(www\\.)?${domain.replace(/\./g, '\\.')}(?![\\w/\\-])`,
+                    'gi'
+                );
+                
+                // Pattern 2: Domain with just a slash (e.g., "https://plato.stanford.edu/")
+                const domainSlashPattern = new RegExp(
+                    `(https?://)?(www\\.)?${domain.replace(/\./g, '\\.')}/?(?![\\w\\-])`,
+                    'gi'
+                );
+                
+                // Only replace if the full URL is different from just the domain
+                if (source.link !== `https://${domain}` && source.link !== `https://${domain}/`) {
+                    // Replace domain-only URLs with full URL
+                    fixed = fixed.replace(domainOnlyPattern, source.link);
+                    fixed = fixed.replace(domainSlashPattern, source.link);
+                }
+                
+                // Pattern 3: Title pattern - match "[ID:X] Title - short_url" format
+                // Look for the source title and fix URL after it
+                const titleEscaped = source.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').substring(0, 50);
+                const titlePattern = new RegExp(
+                    `(\\*\\*\\[${source.id}\\][^*]+\\*\\*\\s*-\\s*)(https?://[^\\s\\n]+|${domain.replace(/\./g, '\\.')}[^\\s\\n]*)`,
+                    'gi'
+                );
+                
+                fixed = fixed.replace(titlePattern, `$1${source.link}`);
+                
+            } catch (e) {
+                // Invalid URL, skip
+            }
+        }
+        
+        return fixed;
+    },
+
+    /**
+     * Fix quote URLs - replace short domain URLs with full URLs from sources
+     * This handles when AI outputs "https://plato.stanford.edu" instead of full path
+     */
+    fixQuoteUrls(text, sources) {
+        let result = text;
+        
+        for (const source of sources) {
+            if (!source.link) continue;
+            
+            try {
+                const url = new URL(source.link);
+                const domain = url.hostname.replace('www.', '');
+                
+                // Pattern 1: Just domain (https://domain.com or domain.com)
+                const domainOnlyPatterns = [
+                    new RegExp(`https?://(www\\.)?${domain.replace('.', '\\.')}(?![\\w/])`, 'gi'),
+                    new RegExp(`- ${domain.replace('.', '\\.')}(?:\\s|$)`, 'gi')
+                ];
+                
+                for (const pattern of domainOnlyPatterns) {
+                    result = result.replace(pattern, (match) => {
+                        // If it's "- domain.com", replace with "- fullurl"
+                        if (match.startsWith('-')) {
+                            return `- ${source.link}`;
+                        }
+                        return source.link;
+                    });
+                }
+                
+                // Pattern 2: Match by [ID:X] and ensure URL follows
+                const idPattern = new RegExp(`\\[ID:${source.id}\\][^\\n]*?(?:https?://[^\\s]+|${domain.replace('.', '\\.')})`, 'gi');
+                result = result.replace(idPattern, (match) => {
+                    // If the full URL is already there, keep it
+                    if (match.includes(source.link)) return match;
+                    // Otherwise replace domain-only with full URL
+                    return match.replace(new RegExp(`https?://(www\\.)?${domain.replace('.', '\\.')}[^\\s]*`, 'i'), source.link)
+                                .replace(new RegExp(`${domain.replace('.', '\\.')}`, 'i'), source.link);
+                });
+                
+            } catch (e) {
+                // Invalid URL, skip
+            }
+        }
+        
+        return result;
+    },
+
     validateCitationText(citationText, source, style) {
         if (!citationText) return null;
         
@@ -88,9 +187,7 @@ const PipelineService = {
 
     processInsertions(context, insertions, sources, formattedMap, outputType, style) {
         let resultText = context;
-        let footnoteCounter = 1;
         let usedSourceIds = new Set();
-        let footnotesList = [];
 
         // Tokenize text for anchor matching
         const tokens = [];
@@ -122,7 +219,7 @@ const PipelineService = {
         // =======================================================
         // DEDUPLICATION: Remove duplicate citations at same position
         // =======================================================
-        const seenPositions = new Map(); // position -> Set of source_ids
+        const seenPositions = new Map();
         const deduplicatedInsertions = [];
 
         for (const item of validInsertions) {
@@ -133,15 +230,8 @@ const PipelineService = {
                 seenPositions.set(pos, new Set());
             }
 
-            // Skip if this source was already cited at this position
-            if (seenPositions.get(pos).has(srcId)) {
-                continue;
-            }
-
-            // Skip if there are already 2+ citations at this position
-            if (seenPositions.get(pos).size >= 2) {
-                continue;
-            }
+            if (seenPositions.get(pos).has(srcId)) continue;
+            if (seenPositions.get(pos).size >= 2) continue;
 
             seenPositions.get(pos).add(srcId);
             deduplicatedInsertions.push(item);
@@ -150,138 +240,152 @@ const PipelineService = {
         // =======================================================
         // SPREAD: Ensure citations are distributed, not clustered
         // =======================================================
-        const MIN_DISTANCE = 50; // Minimum characters between citation positions
+        const MIN_DISTANCE = 50;
         const spreadInsertions = [];
         let lastPosition = -MIN_DISTANCE;
 
-        // Sort by position first
         deduplicatedInsertions.sort((a, b) => a.insertIndex - b.insertIndex);
 
         for (const item of deduplicatedInsertions) {
-            // If too close to last citation, check if it's a different source
             if (item.insertIndex - lastPosition < MIN_DISTANCE) {
-                // Allow if it's at the exact same position (will be combined)
-                // But skip if it's just slightly offset (clustering)
-                if (item.insertIndex !== lastPosition) {
-                    continue;
-                }
+                if (item.insertIndex !== lastPosition) continue;
             }
             spreadInsertions.push(item);
             lastPosition = item.insertIndex;
         }
 
-        // Sort descending for insertion (preserve indices)
-        spreadInsertions.sort((a, b) => b.insertIndex - a.insertIndex);
-
         // =======================================================
-        // GROUP: Combine citations at same position
+        // FOOTNOTES: Sequential numbering based on text order
         // =======================================================
-        const groupedByPosition = new Map();
-        for (const item of spreadInsertions) {
-            const pos = item.insertIndex;
-            if (!groupedByPosition.has(pos)) {
-                groupedByPosition.set(pos, []);
-            }
-            groupedByPosition.get(pos).push(item);
-        }
-
-        // Process grouped insertions (sorted by position descending)
-        const sortedPositions = [...groupedByPosition.keys()].sort((a, b) => b - a);
-
-        for (const pos of sortedPositions) {
-            const items = groupedByPosition.get(pos);
+        if (outputType === 'footnotes') {
+            // CRITICAL: Sort by position ASCENDING so first citation = footnote 1
+            spreadInsertions.sort((a, b) => a.insertIndex - b.insertIndex);
             
-            let insertContent = "";
-
-            if (outputType === 'footnotes') {
-                // For footnotes: each source gets ONE footnote number at this position
-                const footnoteNumbers = [];
+            // Assign sequential footnote numbers (1, 2, 3...) in TEXT ORDER
+            let footnoteNumber = 1;
+            const footnoteAssignments = [];
+            
+            for (const item of spreadInsertions) {
+                const source = sources.find(s => s.id === item.source_id);
+                if (!source) continue;
                 
-                for (const item of items) {
-                    const source = sources.find(s => s.id === item.source_id);
-                    if (!source) continue;
-
-                    usedSourceIds.add(source.id);
-
-                    let citString = formattedMap[source.id];
-                    const isInvalid = !citString || citString.length < 10 || citString.includes('[URL]');
-                    if (isInvalid) {
-                        citString = this.generateFallback(source);
-                    }
-                    citString = this.ensureAccessDate(citString);
-
-                    footnoteNumbers.push(footnoteCounter);
-                    footnotesList.push(`${footnoteCounter}. ${citString}`);
-                    footnoteCounter++;
-                }
-
-                // Convert to superscript
-                const superscripts = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
-                insertContent = footnoteNumbers.map(n => 
-                    n.toString().split('').map(d => superscripts[d] || '').join('')
-                ).join(''); // No comma, just concatenate like ¹²
-
-            } else {
-                // For in-text: combine citations
-                const citations = [];
+                usedSourceIds.add(source.id);
                 
-                for (const item of items) {
-                    const source = sources.find(s => s.id === item.source_id);
-                    if (!source) continue;
-
-                    usedSourceIds.add(source.id);
-
-                    let inText = item.citation_text;
-                    inText = this.validateCitationText(inText, source, style);
-                    
-                    if (!inText || inText.length < 3) {
-                        const auth = source.meta?.author !== "Unknown" ? source.meta?.author?.split(' ')[0] : this.getSiteName(source);
-                        const yr = this.extractYear(source);
-                        inText = `(${auth} ${yr})`;
-                    }
-                    
-                    // Remove parentheses for combining
-                    const inner = inText.replace(/^\(|\)$/g, '');
-                    citations.push(inner);
+                let citString = formattedMap[source.id];
+                const isInvalid = !citString || citString.length < 10 || citString.includes('[URL]');
+                if (isInvalid) {
+                    citString = this.generateFallback(source);
                 }
-
-                // Combine: (Author1 2020; Author2 2021)
-                if (citations.length > 0) {
-                    insertContent = ` (${citations.join('; ')})`;
-                }
+                citString = this.ensureAccessDate(citString);
+                
+                footnoteAssignments.push({
+                    position: item.insertIndex,
+                    sourceId: source.id,
+                    footnoteNum: footnoteNumber,
+                    citString: citString
+                });
+                
+                footnoteNumber++;
             }
-
-            if (insertContent) {
+            
+            // Convert numbers to superscripts
+            const superscripts = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
+            
+            // Insert superscripts in REVERSE position order (to preserve string indices)
+            // But the footnote NUMBERS stay as assigned (1, 2, 3...)
+            const sortedByPositionDesc = [...footnoteAssignments].sort((a, b) => b.position - a.position);
+            
+            for (const fa of sortedByPositionDesc) {
+                const superscript = fa.footnoteNum.toString().split('').map(d => superscripts[d] || '').join('');
+                resultText = resultText.substring(0, fa.position) + superscript + resultText.substring(fa.position);
+            }
+            
+            // Build footnotes list in SEQUENTIAL order (1, 2, 3...)
+            // This matches the order they appear in the text
+            footnoteAssignments.sort((a, b) => a.footnoteNum - b.footnoteNum);
+            
+            let footer = "\n\n### Footnotes (Used)\n\n";
+            for (const fa of footnoteAssignments) {
+                footer += `${fa.footnoteNum}. ${fa.citString}\n\n`;
+            }
+            
+            // Unused sources
+            if (usedSourceIds.size < sources.length) {
+                footer += "\n### Further Reading (Unused)\n\n";
+                sources.forEach(s => {
+                    if (!usedSourceIds.has(s.id)) {
+                        let cit = formattedMap[s.id] || this.generateFallback(s);
+                        footer += this.ensureAccessDate(cit) + "\n\n";
+                    }
+                });
+            }
+            
+            return resultText + footer;
+        }
+        
+        // =======================================================
+        // IN-TEXT CITATIONS (non-footnotes)
+        // =======================================================
+        spreadInsertions.sort((a, b) => b.insertIndex - a.insertIndex);
+        
+        const byPosition = new Map();
+        for (const item of spreadInsertions) {
+            if (!byPosition.has(item.insertIndex)) {
+                byPosition.set(item.insertIndex, []);
+            }
+            byPosition.get(item.insertIndex).push(item);
+        }
+        
+        const positions = [...byPosition.keys()].sort((a, b) => b - a);
+        
+        for (const pos of positions) {
+            const items = byPosition.get(pos);
+            const citations = [];
+            
+            for (const item of items) {
+                const source = sources.find(s => s.id === item.source_id);
+                if (!source) continue;
+                
+                usedSourceIds.add(source.id);
+                
+                let inText = item.citation_text;
+                inText = this.validateCitationText(inText, source, style);
+                
+                if (!inText || inText.length < 3) {
+                    const auth = source.meta?.author !== "Unknown" ? source.meta?.author?.split(' ')[0] : this.getSiteName(source);
+                    const yr = this.extractYear(source);
+                    inText = `(${auth} ${yr})`;
+                }
+                
+                const inner = inText.replace(/^\(|\)$/g, '');
+                citations.push(inner);
+            }
+            
+            if (citations.length > 0) {
+                const insertContent = ` (${citations.join('; ')})`;
                 resultText = resultText.substring(0, pos) + insertContent + resultText.substring(pos);
             }
         }
-
-        // Build footer
-        let footer = "";
         
-        if (outputType === 'footnotes') {
-            footer += "\n\n### Footnotes (Used)\n" + footnotesList.join('\n\n');
-        } else {
-            footer += "\n\n### References Cited (Used)\n";
+        // Build footer for in-text
+        let footer = "\n\n### References Cited (Used)\n\n";
+        sources.forEach(s => {
+            if (usedSourceIds.has(s.id)) {
+                let cit = formattedMap[s.id] || this.generateFallback(s);
+                footer += this.ensureAccessDate(cit) + "\n\n";
+            }
+        });
+        
+        if (usedSourceIds.size < sources.length) {
+            footer += "\n### Further Reading (Unused)\n\n";
             sources.forEach(s => {
-                if (usedSourceIds.has(s.id)) {
+                if (!usedSourceIds.has(s.id)) {
                     let cit = formattedMap[s.id] || this.generateFallback(s);
                     footer += this.ensureAccessDate(cit) + "\n\n";
                 }
             });
         }
-
-        // Unused sources
-        if (usedSourceIds.size < sources.length) {
-            footer += "\n\n### Further Reading (Unused)\n";
-            sources.forEach(s => {
-                if (!usedSourceIds.has(s.id)) {
-                    let cit = formattedMap[s.id] || this.generateFallback(s);
-                    footer += this.ensureAccessDate(cit) + "\n\n"; 
-                }
-            });
-        }
-
+        
         return resultText + footer;
     }
 };
@@ -304,7 +408,11 @@ export default async function handler(req, res) {
         // --- 1. QUOTES MODE ---
         if (preLoadedSources?.length > 0) {
             const prompt = CitationPrompts.build('quotes', null, context, preLoadedSources);
-            const result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
+            let result = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
+            
+            // POST-PROCESS: Replace short URLs with full URLs from sources
+            result = PipelineService.fixQuoteUrls(result, preLoadedSources);
+            
             return res.status(200).json({ success: true, text: result });
         }
 
