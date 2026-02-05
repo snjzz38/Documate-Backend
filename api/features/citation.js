@@ -117,43 +117,144 @@ const PipelineService = {
                 }
                 return bestIndex !== -1 ? { ...item, insertIndex: bestIndex } : null;
             })
-            .filter(Boolean)
-            .sort((a, b) => b.insertIndex - a.insertIndex);
+            .filter(Boolean);
 
-        // Apply insertions
-        validInsertions.forEach(item => {
-            const source = sources.find(s => s.id === item.source_id);
-            if (!source) return;
-            
-            usedSourceIds.add(source.id);
-            
-            let citString = formattedMap[source.id];
-            const isInvalid = !citString || citString.length < 10 || citString.includes('[URL]');
-            
-            if (isInvalid) {
-                citString = this.generateFallback(source);
+        // =======================================================
+        // DEDUPLICATION: Remove duplicate citations at same position
+        // =======================================================
+        const seenPositions = new Map(); // position -> Set of source_ids
+        const deduplicatedInsertions = [];
+
+        for (const item of validInsertions) {
+            const pos = item.insertIndex;
+            const srcId = item.source_id;
+
+            if (!seenPositions.has(pos)) {
+                seenPositions.set(pos, new Set());
             }
-            citString = this.ensureAccessDate(citString);
 
-            let insertContent = "";
-            if (outputType === 'footnotes') {
-                const superscripts = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
-                insertContent = footnoteCounter.toString().split('').map(d => superscripts[d] || '').join('');
-                footnotesList.push(`${footnoteCounter}. ${citString}`);
-                footnoteCounter++;
-            } else {
-                let inText = item.citation_text;
-                inText = this.validateCitationText(inText, source, style);
-                
-                if (!inText || inText.length < 3) {
-                    const auth = source.meta?.author !== "Unknown" ? source.meta?.author?.split(' ')[0] : this.getSiteName(source);
-                    const yr = this.extractYear(source);
-                    inText = `(${auth} ${yr})`;
+            // Skip if this source was already cited at this position
+            if (seenPositions.get(pos).has(srcId)) {
+                continue;
+            }
+
+            // Skip if there are already 2+ citations at this position
+            if (seenPositions.get(pos).size >= 2) {
+                continue;
+            }
+
+            seenPositions.get(pos).add(srcId);
+            deduplicatedInsertions.push(item);
+        }
+
+        // =======================================================
+        // SPREAD: Ensure citations are distributed, not clustered
+        // =======================================================
+        const MIN_DISTANCE = 50; // Minimum characters between citation positions
+        const spreadInsertions = [];
+        let lastPosition = -MIN_DISTANCE;
+
+        // Sort by position first
+        deduplicatedInsertions.sort((a, b) => a.insertIndex - b.insertIndex);
+
+        for (const item of deduplicatedInsertions) {
+            // If too close to last citation, check if it's a different source
+            if (item.insertIndex - lastPosition < MIN_DISTANCE) {
+                // Allow if it's at the exact same position (will be combined)
+                // But skip if it's just slightly offset (clustering)
+                if (item.insertIndex !== lastPosition) {
+                    continue;
                 }
-                insertContent = " " + inText;
             }
-            resultText = resultText.substring(0, item.insertIndex) + insertContent + resultText.substring(item.insertIndex);
-        });
+            spreadInsertions.push(item);
+            lastPosition = item.insertIndex;
+        }
+
+        // Sort descending for insertion (preserve indices)
+        spreadInsertions.sort((a, b) => b.insertIndex - a.insertIndex);
+
+        // =======================================================
+        // GROUP: Combine citations at same position
+        // =======================================================
+        const groupedByPosition = new Map();
+        for (const item of spreadInsertions) {
+            const pos = item.insertIndex;
+            if (!groupedByPosition.has(pos)) {
+                groupedByPosition.set(pos, []);
+            }
+            groupedByPosition.get(pos).push(item);
+        }
+
+        // Process grouped insertions (sorted by position descending)
+        const sortedPositions = [...groupedByPosition.keys()].sort((a, b) => b - a);
+
+        for (const pos of sortedPositions) {
+            const items = groupedByPosition.get(pos);
+            
+            let insertContent = "";
+
+            if (outputType === 'footnotes') {
+                // For footnotes: each source gets ONE footnote number at this position
+                const footnoteNumbers = [];
+                
+                for (const item of items) {
+                    const source = sources.find(s => s.id === item.source_id);
+                    if (!source) continue;
+
+                    usedSourceIds.add(source.id);
+
+                    let citString = formattedMap[source.id];
+                    const isInvalid = !citString || citString.length < 10 || citString.includes('[URL]');
+                    if (isInvalid) {
+                        citString = this.generateFallback(source);
+                    }
+                    citString = this.ensureAccessDate(citString);
+
+                    footnoteNumbers.push(footnoteCounter);
+                    footnotesList.push(`${footnoteCounter}. ${citString}`);
+                    footnoteCounter++;
+                }
+
+                // Convert to superscript
+                const superscripts = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'};
+                insertContent = footnoteNumbers.map(n => 
+                    n.toString().split('').map(d => superscripts[d] || '').join('')
+                ).join(''); // No comma, just concatenate like ¹²
+
+            } else {
+                // For in-text: combine citations
+                const citations = [];
+                
+                for (const item of items) {
+                    const source = sources.find(s => s.id === item.source_id);
+                    if (!source) continue;
+
+                    usedSourceIds.add(source.id);
+
+                    let inText = item.citation_text;
+                    inText = this.validateCitationText(inText, source, style);
+                    
+                    if (!inText || inText.length < 3) {
+                        const auth = source.meta?.author !== "Unknown" ? source.meta?.author?.split(' ')[0] : this.getSiteName(source);
+                        const yr = this.extractYear(source);
+                        inText = `(${auth} ${yr})`;
+                    }
+                    
+                    // Remove parentheses for combining
+                    const inner = inText.replace(/^\(|\)$/g, '');
+                    citations.push(inner);
+                }
+
+                // Combine: (Author1 2020; Author2 2021)
+                if (citations.length > 0) {
+                    insertContent = ` (${citations.join('; ')})`;
+                }
+            }
+
+            if (insertContent) {
+                resultText = resultText.substring(0, pos) + insertContent + resultText.substring(pos);
+            }
+        }
 
         // Build footer
         let footer = "";
