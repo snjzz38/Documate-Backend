@@ -118,12 +118,23 @@ WHERE TO INSERT CITATIONS:
     // ------------------------------------------------------------------
     anchorRules: `
 ═══════════════════════════════════════════════════════════════
-ANCHOR RULES:
+ANCHOR RULES (CRITICAL):
 ═══════════════════════════════════════════════════════════════
 
 1. Choose 3-8 word phrases that appear EXACTLY in the text
 2. Place anchor at END of the claim being cited
-3. Each anchor must be unique and findable`,
+3. Each anchor must be UNIQUE - never use the same anchor twice
+4. SPREAD citations throughout the text - don't cluster them
+5. Maximum 1 citation per sentence (unless comparing sources)
+6. Never cite the same source twice at the same location
+
+BAD EXAMPLE:
+- anchor: "knowledge that is" → source 1
+- anchor: "knowledge that is" → source 2  ❌ DUPLICATE ANCHOR
+
+GOOD EXAMPLE:
+- anchor: "a posteriori knowledge" → source 1
+- anchor: "depends entirely on experience" → source 2  ✓ DIFFERENT ANCHORS`,
 
     // ------------------------------------------------------------------
     // VERBATIM QUOTE RULES
@@ -233,7 +244,7 @@ const Helpers = {
             if (detailed) {
                 return `[ID:${s.id}]
 TITLE: ${s.title}
-URL: ${s.link}
+FULL_URL: ${s.link}
 DOI: ${doi}
 SITE_NAME: ${siteName}
 ALL_AUTHORS: ${displayAuthors}
@@ -244,6 +255,7 @@ TEXT_CONTENT: ${content.substring(0, 1000).replace(/\n/g, ' ')}...`;
             }
             
             return `[ID:${s.id}] ${s.title}
+  FULL_URL: ${s.link}
   AUTHORS: ${displayAuthors} (${authors.length || 1} author(s))
   YEAR: ${year}
   SITE: ${siteName}
@@ -394,7 +406,14 @@ IF ANY IS NO → Add more citations before outputting!
 
         // ==================== QUOTES MODE ====================
         if (type === 'quotes') {
-            const sourceContext = Helpers.buildSourceContext(safeSources, true);
+            // Build source context with clear URL emphasis
+            const sourceContext = safeSources.map((s, idx) => {
+                return `[ID:${s.id}]
+TITLE: ${s.title}
+FULL_URL: ${s.link}
+SITE: ${s.meta?.siteName || new URL(s.link).hostname}
+CONTENT: ${(s.content || '').substring(0, 800).replace(/\n/g, ' ')}...`;
+            }).join('\n\n---\n\n');
             
             return `
 TASK: Extract substantial, meaningful quotes from each source - VERBATIM ONLY.
@@ -412,21 +431,19 @@ ${Templates.verbatimRules}
 
 OUTPUT FORMAT (strictly in order ID 1 to ${safeSources.length}):
 
-**[ID] Title** - URL
+**[ID] Title** - FULL_URL
 > "Exact text from source copied verbatim."
 
-OR for non-continuous:
-**[ID] Title** - URL
-> • "First passage."
-> • "Second passage."
+EXAMPLE (showing FULL URL):
+**[1] David Hume - Stanford Encyclopedia of Philosophy** - https://plato.stanford.edu/entries/hume/
+> "Hume recognized two kinds of perception: impressions, which are vivid and forceful, and ideas, which are the less lively copies of impressions."
 
-OR if truly no content:
-**[ID] Title** - URL
-> No relevant quote found.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CRITICAL: VERBATIM means VERBATIM - no paraphrasing, no rewording!
+CRITICAL RULES:
+1. Use the COMPLETE URL from FULL_URL field (e.g., https://plato.stanford.edu/entries/hume/)
+2. NOT just the domain (e.g., NOT https://plato.stanford.edu)
+3. Copy quotes VERBATIM - no paraphrasing
+4. Include 2-5 sentences per quote (50-200 words)
+5. If no relevant quote, say "No relevant quote found."
 `;
         }
 
