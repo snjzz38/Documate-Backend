@@ -26,8 +26,25 @@ const Format = {
 
     inText(source, style) {
         const s = (style || '').toLowerCase();
-        const author = (source.meta?.author || source.meta?.siteName || 'Unknown').split(/[,\s]/)[0];
         const year = source.meta?.year || 'n.d.';
+        
+        // Get author - use first author's last name, or site name
+        let author;
+        if (source.meta?.author && source.meta.author !== 'Unknown') {
+            // Extract last name (first word before comma, or last word)
+            const authorStr = source.meta.author;
+            if (authorStr.includes(',')) {
+                author = authorStr.split(',')[0].trim();
+            } else {
+                const parts = authorStr.trim().split(/\s+/);
+                author = parts[parts.length - 1]; // Last name
+            }
+        } else {
+            // Use site name, cleaned up
+            author = (source.meta?.siteName || 'Unknown')
+                .replace(/\.(com|org|edu|net|gov|io)$/i, '')
+                .replace(/^www\./, '');
+        }
 
         if (s.includes('apa')) return `(${author}, ${year})`;
         if (s.includes('mla')) return `(${author})`;
@@ -48,27 +65,27 @@ function processInsertions(text, insertions, sources, style, outputType) {
     let m;
     while ((m = re.exec(text))) tokens.push({ word: m[0].toLowerCase(), end: m.index + m[0].length });
 
-    // Find positions
+    // Find positions - ONLY use anchor and source_id from Groq, ignore citation_text
     const valid = insertions.map(ins => {
         if (!ins.anchor || !ins.source_id) return null;
         const words = ins.anchor.toLowerCase().match(/[a-z0-9]+/g);
         if (!words) return null;
         for (let i = 0; i <= tokens.length - words.length; i++) {
             if (words.every((w, j) => tokens[i + j].word === w)) {
-                return { ...ins, pos: tokens[i + words.length - 1].end };
+                return { sourceId: ins.source_id, pos: tokens[i + words.length - 1].end };
             }
         }
         return null;
     }).filter(Boolean);
 
-    // Dedupe positions
+    // Dedupe positions (max 1 citation per position)
     const byPos = new Map();
     valid.forEach(v => {
         if (!byPos.has(v.pos)) byPos.set(v.pos, new Set());
-        if (byPos.get(v.pos).size < 1) byPos.get(v.pos).add(v.source_id);
+        if (byPos.get(v.pos).size < 1) byPos.get(v.pos).add(v.sourceId);
     });
 
-    // Process in text order
+    // Process in text order for sequential footnote numbering
     const positions = [...byPos.keys()].sort((a, b) => a - b);
     const posToFn = new Map();
 
@@ -79,7 +96,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
             used.add(srcId);
 
             if (outputType === 'footnotes') {
-                // Get citation - DOI formats itself, else use Format
+                // Format citation - DOI uses DoiAPI, else use Format
                 const cit = src.doi 
                     ? DoiAPI.formatBib({ ...src.meta, doi: src.doi, title: src.title }, style)
                     : Format.bib(src, style);
@@ -92,7 +109,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
         });
     });
 
-    // Insert (reverse order)
+    // Insert citations (reverse order to preserve positions)
     const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
     
     [...positions].reverse().forEach(pos => {
@@ -100,16 +117,21 @@ function processInsertions(text, insertions, sources, style, outputType) {
         if (outputType === 'footnotes') {
             insert = (posToFn.get(pos) || []).map(toSuper).join('');
         } else {
+            // IN-TEXT: Format ourselves, don't use Groq's citation_text
             const cits = [...byPos.get(pos)].map(id => {
                 const src = sources.find(s => s.id === id);
                 if (!src) return null;
-                // DOI formats itself, else use Format
+                
+                // DOI sources: use DoiAPI formatting
+                // Non-DOI sources: use Format helper
                 const inText = src.doi 
                     ? DoiAPI.formatInText({ authors: src.meta.authors, year: src.meta.year }, style)
                     : Format.inText(src, style);
-                return inText?.replace(/^\(|\)$/g, '');
+                
+                return inText;
             }).filter(Boolean);
-            if (cits.length) insert = ` (${cits.join('; ')})`;
+            
+            if (cits.length) insert = ` ${cits[0]}`; // Already has parentheses
         }
         result = result.slice(0, pos) + insert + result.slice(pos);
     });
