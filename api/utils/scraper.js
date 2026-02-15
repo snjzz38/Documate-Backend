@@ -11,26 +11,29 @@ export const ScraperAPI = {
     },
 
     async _process(source) {
-        // Try DOI first (most reliable metadata)
-        const doi = DoiAPI.extract(source.link) || DoiAPI.extract(source.snippet || '');
-        if (doi) {
-            const data = await DoiAPI.fetch(doi);
-            if (data) {
-                return {
-                    ...source,
-                    title: data.title || source.title,
-                    content: data.abstract 
-                        ? `[Abstract]: ${data.abstract}` 
-                        : `[Academic Article]: ${data.title}. ${source.snippet || ''}`,
-                    doi,
-                    meta: {
-                        authors: data.authors,
-                        year: data.year || 'n.d.',
-                        siteName: data.journal || 'Academic Source',
-                        isDOI: true
-                    }
-                };
-            }
+        // Try DOI or ISBN first (most reliable metadata)
+        const resolved = await DoiAPI.resolve(
+            source.snippet || '', 
+            source.link
+        );
+        
+        if (resolved) {
+            return {
+                ...source,
+                title: resolved.title || source.title,
+                content: resolved.abstract 
+                    ? `[Abstract]: ${resolved.abstract}` 
+                    : `[${resolved.isBook ? 'Book' : 'Academic Article'}]: ${resolved.title}. ${source.snippet || ''}`,
+                doi: resolved.doi,
+                isbn: resolved.isbn,
+                meta: {
+                    authors: resolved.authors,
+                    year: resolved.year || 'n.d.',
+                    siteName: resolved.journal || resolved.publisher || 'Academic Source',
+                    isDOI: resolved.isDOI || false,
+                    isISBN: resolved.isISBN || false
+                }
+            };
         }
 
         // HTML scraping
