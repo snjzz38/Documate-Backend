@@ -2,6 +2,8 @@
 import * as cheerio from 'cheerio';
 import { DoiAPI } from './doiAPI.js';
 
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 export const ScraperAPI = {
     async scrape(sources) {
         const results = await Promise.all(sources.slice(0, 10).map(s => this._process(s)));
@@ -9,20 +11,22 @@ export const ScraperAPI = {
     },
 
     async _process(source) {
-        // Try DOI first
-        const doi = DoiAPI.extract(source.link) || DoiAPI.extract(source.snippet);
+        // Try DOI first (most reliable metadata)
+        const doi = DoiAPI.extract(source.link) || DoiAPI.extract(source.snippet || '');
         if (doi) {
             const data = await DoiAPI.fetch(doi);
             if (data) {
                 return {
                     ...source,
                     title: data.title || source.title,
-                    content: `[Academic Source] ${data.title}`,
+                    content: data.abstract 
+                        ? `[Abstract]: ${data.abstract}` 
+                        : `[Academic Article]: ${data.title}. ${source.snippet || ''}`,
                     doi,
                     meta: {
                         authors: data.authors,
                         year: data.year || 'n.d.',
-                        journal: data.journal,
+                        siteName: data.journal || 'Academic Source',
                         isDOI: true
                     }
                 };
@@ -31,56 +35,195 @@ export const ScraperAPI = {
 
         // HTML scraping
         try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 8000);
+            
             const res = await fetch(source.link, {
-                headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0.0.0' },
-                signal: AbortSignal.timeout(6000)
+                headers: { 
+                    'User-Agent': UA,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5'
+                },
+                signal: controller.signal
             });
-            if (!res.ok) throw new Error();
+            clearTimeout(timeout);
             
-            const $ = cheerio.load(await res.text());
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             
-            // Get metadata
-            let author = $('meta[name="author"]').attr('content') || 
-                        $('meta[property="article:author"]').attr('content') ||
-                        $('a[rel="author"]').first().text().trim();
+            const html = await res.text();
+            if (!html || html.length < 500) throw new Error('Empty response');
             
-            let year = 'n.d.';
-            const dateStr = $('meta[property="article:published_time"]').attr('content') || 
-                           $('time').first().attr('datetime');
+            return this._parseHtml(html, source);
+            
+        } catch (e) {
+            console.error(`[Scraper] Failed for ${source.link}: ${e.message}`);
+            return this._fallback(source);
+        }
+    },
+
+    _parseHtml(html, source) {
+        const $ = cheerio.load(html);
+        
+        // === EXTRACT METADATA FIRST ===
+        let author = null;
+        let year = 'n.d.';
+        let siteName = null;
+
+        // JSON-LD
+        try {
+            const ld = $('script[type="application/ld+json"]').first().html();
+            if (ld) {
+                const data = JSON.parse(ld);
+                const item = data['@graph']?.[0] || data;
+                if (item.author) {
+                    author = typeof item.author === 'string' 
+                        ? item.author 
+                        : (item.author.name || item.author[0]?.name);
+                }
+                const dateStr = item.datePublished || item.dateCreated || item.dateModified;
+                if (dateStr) {
+                    const m = dateStr.match(/\b(20\d{2})\b/);
+                    if (m) year = m[1];
+                }
+                if (item.publisher) {
+                    siteName = typeof item.publisher === 'string' 
+                        ? item.publisher 
+                        : item.publisher.name;
+                }
+            }
+        } catch {}
+
+        // Meta tags
+        if (!author) {
+            author = $('meta[name="author"]').attr('content') ||
+                    $('meta[property="article:author"]').attr('content') ||
+                    $('a[rel="author"]').first().text().trim() ||
+                    null;
+        }
+        
+        if (year === 'n.d.') {
+            const dateStr = $('meta[property="article:published_time"]').attr('content') ||
+                           $('meta[name="publication_date"]').attr('content') ||
+                           $('time[datetime]').first().attr('datetime');
             if (dateStr) {
                 const m = dateStr.match(/\b(20\d{2})\b/);
                 if (m) year = m[1];
             }
-            
-            const siteName = $('meta[property="og:site_name"]').attr('content') ||
-                            new URL(source.link).hostname.replace('www.', '');
-            
-            // Get content
-            $('script,style,nav,header,footer,aside,form,.ad,.popup,.sidebar,[class*="menu"],[class*="nav"]').remove();
-            let content = $('article, main, .content').first().text() || $('body').text();
-            content = content.replace(/\s+/g, ' ').trim().substring(0, 1000);
-
-            return {
-                ...source,
-                content: content || `[Summary]: ${source.snippet}`,
-                meta: {
-                    author: author && author !== 'Unknown' ? author : null,
-                    year,
-                    siteName,
-                    isDOI: false
-                }
-            };
-        } catch {
-            return {
-                ...source,
-                content: source.snippet ? `[Summary]: ${source.snippet}` : '[No content]',
-                meta: {
-                    author: null,
-                    year: 'n.d.',
-                    siteName: new URL(source.link).hostname.replace('www.', ''),
-                    isDOI: false
-                }
-            };
         }
+
+        if (!siteName) {
+            siteName = $('meta[property="og:site_name"]').attr('content');
+        }
+        
+        // Fallback siteName from URL
+        if (!siteName) {
+            try {
+                siteName = new URL(source.link).hostname.replace('www.', '');
+            } catch {
+                siteName = 'Unknown';
+            }
+        }
+
+        // === REMOVE JUNK ELEMENTS ===
+        $('script, style, noscript, iframe, svg, canvas').remove();
+        $('nav, header, footer, aside, form, button, input, select').remove();
+        $('[role="navigation"], [role="banner"], [role="contentinfo"]').remove();
+        $('.nav, .navbar, .menu, .sidebar, .footer, .header, .ad, .popup, .cookie, .banner').remove();
+        $('[class*="menu"], [class*="nav-"], [class*="sidebar"], [class*="footer"], [class*="header"]').remove();
+        $('[class*="social"], [class*="share"], [class*="comment"], [class*="related"]').remove();
+
+        // === EXTRACT CONTENT ===
+        let content = '';
+        
+        // Try specific content containers first
+        const contentSelectors = [
+            'article', 
+            'main', 
+            '[role="main"]',
+            '.post-content',
+            '.article-content', 
+            '.entry-content',
+            '.content',
+            '#content',
+            '.post',
+            '.article'
+        ];
+        
+        for (const sel of contentSelectors) {
+            const el = $(sel).first();
+            if (el.length) {
+                const text = el.text().replace(/\s+/g, ' ').trim();
+                if (text.length > 500) {
+                    content = text;
+                    break;
+                }
+            }
+        }
+        
+        // Fallback to body
+        if (!content || content.length < 500) {
+            content = $('body').text().replace(/\s+/g, ' ').trim();
+        }
+
+        // Clean content
+        content = this._cleanContent(content);
+        
+        // Truncate to reasonable length
+        if (content.length > 2000) {
+            const cut = content.substring(0, 2200);
+            const lastPeriod = cut.lastIndexOf('. ');
+            content = lastPeriod > 1500 ? cut.substring(0, lastPeriod + 1) : cut.substring(0, 2000) + '...';
+        }
+
+        // If still no content, use snippet
+        if (!content || content.length < 100) {
+            content = source.snippet ? `[Summary]: ${source.snippet}` : '[No content available]';
+        }
+
+        return {
+            ...source,
+            content,
+            meta: {
+                author: author && author !== 'Unknown' ? author : null,
+                year,
+                siteName,
+                isDOI: false
+            }
+        };
+    },
+
+    _cleanContent(text) {
+        const patterns = [
+            /Skip to (?:main )?content/gi,
+            /Table of Contents/gi,
+            /Cookie (?:Policy|Settings|Consent)/gi,
+            /Privacy Policy/gi,
+            /Terms (?:of (?:Service|Use)|and Conditions)/gi,
+            /All [Rr]ights [Rr]eserved/gi,
+            /©\s*\d{4}/gi,
+            /Subscribe.*?Newsletter/gi,
+            /Follow [Uu]s/gi,
+            /Share (?:on|this)/gi,
+            /Advertisement/gi
+        ];
+        
+        let cleaned = text;
+        for (const p of patterns) {
+            cleaned = cleaned.replace(p, ' ');
+        }
+        return cleaned.replace(/\s{2,}/g, ' ').trim();
+    },
+
+    _fallback(source) {
+        let siteName = 'Unknown';
+        try { siteName = new URL(source.link).hostname.replace('www.', ''); } catch {}
+        
+        return {
+            ...source,
+            content: source.snippet && source.snippet.length > 50
+                ? `[Summary]: ${source.snippet}`
+                : '[Unable to fetch content]',
+            meta: { author: null, year: 'n.d.', siteName, isDOI: false }
+        };
     }
 };
