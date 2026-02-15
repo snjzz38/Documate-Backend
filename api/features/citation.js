@@ -7,44 +7,47 @@ import { DoiAPI } from '../utils/doiAPI.js';
 const TODAY = () => new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
 // ==========================================================================
-// CITATION FORMATTER
+// CITATION FORMATTER - Handles both DOI and non-DOI sources
 // ==========================================================================
 const Format = {
-    // Get author name for citation (last name or site name)
+    // Get author for in-text citation
     getAuthor(source) {
-        // Check for DOI author data first
-        if (source.meta?.authors?.length > 0) {
+        // DOI source with structured authors
+        if (source.meta?.isDOI && source.meta?.authors?.length > 0) {
             const authors = source.meta.authors;
-            if (authors.length === 1) return authors[0].family || authors[0].given;
+            if (authors.length === 1) return authors[0].family;
             if (authors.length === 2) return `${authors[0].family} and ${authors[1].family}`;
             return `${authors[0].family} et al.`;
         }
         
-        // Check for scraped author
-        if (source.meta?.author && source.meta.author !== 'Unknown') {
-            const author = source.meta.author;
-            // If it contains comma, it's "Last, First" format
-            if (author.includes(',')) return author.split(',')[0].trim();
-            // Otherwise get last word (last name)
-            const parts = author.trim().split(/\s+/);
-            return parts[parts.length - 1];
+        // Non-DOI: check scraped author
+        if (source.meta?.author) {
+            const auth = source.meta.author;
+            if (auth.includes(',')) return auth.split(',')[0].trim(); // "Last, First"
+            const parts = auth.trim().split(/\s+/);
+            if (parts.length >= 2) return parts[parts.length - 1]; // Last name
+            return auth;
         }
         
-        // Fallback to site name
-        const site = source.meta?.siteName || '';
-        // Clean up site name: remove .com/.org, capitalize
+        // Fallback: use site name
+        return this.cleanSiteName(source.meta?.siteName || 'Unknown');
+    },
+
+    // Clean site name for citation
+    cleanSiteName(site) {
         return site
-            .replace(/\.(com|org|edu|net|gov|io)$/i, '')
             .replace(/^www\./, '')
-            .split('.')[0] || 'Unknown';
+            .replace(/\.(com|org|edu|net|gov|io)$/i, '')
+            .split('.')[0]
+            .replace(/^(\w)/, c => c.toUpperCase()); // Capitalize first letter
     },
 
     // Get year
     getYear(source) {
-        return source.meta?.year || 'n.d.';
+        return source.meta?.year && source.meta.year !== 'n.d.' ? source.meta.year : 'n.d.';
     },
 
-    // Format in-text citation: (Author Year) or (Author, Year) for APA
+    // Format in-text citation
     inText(source, style) {
         const author = this.getAuthor(source);
         const year = this.getYear(source);
@@ -52,19 +55,19 @@ const Format = {
         
         if (s.includes('apa')) return `(${author}, ${year})`;
         if (s.includes('mla')) return `(${author})`;
-        return `(${author} ${year})`; // Chicago
+        return `(${author} ${year})`; // Chicago default
     },
 
-    // Format bibliography entry
+    // Format full bibliography entry
     bib(source, style) {
         const s = (style || '').toLowerCase();
         const year = this.getYear(source);
         const site = source.meta?.siteName || 'Unknown';
         const today = TODAY();
         
-        // Get full author string for bibliography
+        // Get full author for bibliography
         let author;
-        if (source.meta?.authors?.length > 0) {
+        if (source.meta?.isDOI && source.meta?.authors?.length > 0) {
             const authors = source.meta.authors;
             if (authors.length === 1) {
                 author = `${authors[0].family}, ${authors[0].given}`;
@@ -73,25 +76,27 @@ const Format = {
             } else {
                 author = `${authors[0].family}, ${authors[0].given}, et al.`;
             }
-        } else if (source.meta?.author && source.meta.author !== 'Unknown') {
+        } else if (source.meta?.author) {
             author = source.meta.author;
         } else {
-            author = site;
+            author = this.cleanSiteName(site);
         }
 
+        // DOI sources include DOI link
+        const url = source.doi ? `https://doi.org/${source.doi}` : source.link;
+
         if (s.includes('apa')) {
-            return `${author}. (${year}). ${source.title}. *${site}*. ${source.link}`;
+            return `${author}. (${year}). ${source.title}. *${site}*. ${url}`;
         }
         if (s.includes('mla')) {
-            return `${author}. "${source.title}." *${site}*, ${year}, ${source.link}.`;
+            return `${author}. "${source.title}." *${site}*, ${year}, ${url}.`;
         }
-        // Chicago
-        return `${author}. "${source.title}." *${site}*. ${year}. ${source.link} (Accessed ${today})`;
+        return `${author}. "${source.title}." *${site}*. ${year}. ${url} (Accessed ${today})`;
     }
 };
 
 // ==========================================================================
-// INSERTION PROCESSOR
+// PROCESS INSERTIONS INTO TEXT
 // ==========================================================================
 function processInsertions(text, insertions, sources, style, outputType) {
     let result = text;
@@ -99,7 +104,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
     const footnotes = [];
     let fnNum = 1;
 
-    // Tokenize text for anchor matching
+    // Tokenize text
     const tokens = [];
     const re = /[a-z0-9]+/gi;
     let m;
@@ -107,7 +112,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
         tokens.push({ word: m[0].toLowerCase(), end: m.index + m[0].length });
     }
 
-    // Find valid insertion positions
+    // Find valid positions
     const valid = insertions.map(ins => {
         if (!ins.anchor || !ins.source_id) return null;
         const words = ins.anchor.toLowerCase().match(/[a-z0-9]+/g);
@@ -121,126 +126,85 @@ function processInsertions(text, insertions, sources, style, outputType) {
         return null;
     }).filter(Boolean);
 
-    // Deduplicate: max 1 source per position
+    // Dedupe: 1 per position
     const byPos = new Map();
     valid.forEach(v => {
         if (!byPos.has(v.pos)) byPos.set(v.pos, v.sourceId);
     });
 
-    // Sort positions for sequential processing
+    // Process in order
     const positions = [...byPos.keys()].sort((a, b) => a - b);
-    const posToData = new Map();
+    const posData = new Map();
 
-    // Build citation data for each position
     positions.forEach(pos => {
-        const srcId = byPos.get(pos);
-        const src = sources.find(s => s.id === srcId);
+        const src = sources.find(s => s.id === byPos.get(pos));
         if (!src) return;
-        
-        used.add(srcId);
+        used.add(src.id);
 
-        // Generate citation using DOI API or Format helper
-        let bibCit, inTextCit;
-        
-        if (src.doi && src.meta?.isDOI) {
-            // DOI source - use DoiAPI
-            bibCit = DoiAPI.formatBib({ 
-                ...src.meta, 
-                doi: src.doi, 
-                title: src.title 
-            }, style);
-            inTextCit = DoiAPI.formatInText({ 
-                authors: src.meta.authors, 
-                year: src.meta.year 
-            }, style);
-        } else {
-            // Regular source - use Format
-            bibCit = Format.bib(src, style);
-            inTextCit = Format.inText(src, style);
-        }
+        const bibCit = Format.bib(src, style);
+        const inTextCit = Format.inText(src, style);
 
         if (outputType === 'footnotes') {
             footnotes.push({ num: fnNum, cit: bibCit });
-            posToData.set(pos, { type: 'footnote', num: fnNum });
-            fnNum++;
+            posData.set(pos, { type: 'fn', num: fnNum++ });
         } else {
-            posToData.set(pos, { type: 'intext', cit: inTextCit });
+            posData.set(pos, { type: 'it', cit: inTextCit });
         }
     });
 
-    // Insert citations in reverse order (to preserve positions)
+    // Insert (reverse order)
     const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
     
     [...positions].reverse().forEach(pos => {
-        const data = posToData.get(pos);
-        if (!data) return;
-        
-        let insert;
-        if (data.type === 'footnote') {
-            insert = toSuper(data.num);
-        } else {
-            insert = ` ${data.cit}`;
-        }
-        
+        const d = posData.get(pos);
+        const insert = d.type === 'fn' ? toSuper(d.num) : ` ${d.cit}`;
         result = result.slice(0, pos) + insert + result.slice(pos);
     });
 
-    // Build footer
+    // Footer
     let footer = '\n\n';
-    
     if (outputType === 'footnotes') {
         footer += '### Footnotes (Used)\n\n';
         footnotes.forEach(f => footer += `${f.num}. ${f.cit}\n\n`);
     } else {
         footer += '### References (Used)\n\n';
-        sources.filter(s => used.has(s.id)).forEach(s => {
-            const cit = (s.doi && s.meta?.isDOI) 
-                ? DoiAPI.formatBib({ ...s.meta, doi: s.doi, title: s.title }, style)
-                : Format.bib(s, style);
-            footer += cit + '\n\n';
-        });
+        sources.filter(s => used.has(s.id)).forEach(s => footer += Format.bib(s, style) + '\n\n');
     }
 
-    // Unused sources
     const unused = sources.filter(s => !used.has(s.id));
     if (unused.length) {
         footer += '\n### Further Reading (Unused)\n\n';
-        unused.forEach(s => {
-            const cit = (s.doi && s.meta?.isDOI)
-                ? DoiAPI.formatBib({ ...s.meta, doi: s.doi, title: s.title }, style)
-                : Format.bib(s, style);
-            footer += cit + '\n\n';
-        });
+        unused.forEach(s => footer += Format.bib(s, style) + '\n\n');
     }
 
     return result + footer;
 }
 
 // ==========================================================================
-// PROMPT FOR GROQ (only asks for insertion points, not formatting)
+// PROMPT FOR GROQ - Only asks for insertion points
 // ==========================================================================
-function buildInsertionPrompt(text, sources) {
+function buildPrompt(text, sources) {
     const srcList = sources.map(s => {
         const author = Format.getAuthor(s);
         const year = Format.getYear(s);
         return `[${s.id}] ${author} (${year}) - ${s.title.substring(0, 50)}`;
     }).join('\n');
 
-    return `Find where to insert citations in this text.
+    return `Find citation insertion points in this text.
 
-SOURCES (use 8+ of these):
+SOURCES (use 8+ of these, spread across all paragraphs):
 ${srcList}
 
 TEXT:
 "${text}"
 
-Return JSON only:
-{"insertions":[{"anchor":"3-6 exact words from text","source_id":1}]}
+Return ONLY valid JSON:
+{"insertions":[{"anchor":"3-6 exact consecutive words from text","source_id":1}]}
 
-Rules:
-- anchor must be EXACT words from the text
-- Use 10+ insertions spread across all paragraphs
-- source_id must match a source number above`;
+RULES:
+- anchor MUST be exact words from the text
+- Create 10+ insertions
+- source_id must match a number above`;
 }
 
 // ==========================================================================
@@ -261,13 +225,13 @@ export default async function handler(req, res) {
         // QUOTES MODE
         if (preLoadedSources?.length) {
             const srcList = preLoadedSources.map(s => 
-                `[${s.id}] ${s.title}\nURL: ${s.link}\nContent: ${(s.content || '').substring(0, 500)}`
+                `[${s.id}] ${s.title}\nURL: ${s.link}\nContent: ${(s.content || '').substring(0, 600)}`
             ).join('\n\n');
-            const prompt = `Extract verbatim quotes from each source.\n\nSOURCES:\n${srcList}\n\nFormat:\n**[ID] Title** - FULL_URL\n> "Exact quote..."`;
+            const prompt = `Extract verbatim quotes.\n\nSOURCES:\n${srcList}\n\nFormat:\n**[ID] Title** - FULL_URL\n> "Exact quote..."`;
             
             let result = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
             
-            // Fix truncated URLs
+            // Fix URLs
             preLoadedSources.forEach(s => {
                 try {
                     const domain = new URL(s.link).hostname.replace('www.', '');
@@ -284,16 +248,12 @@ export default async function handler(req, res) {
 
         // BIBLIOGRAPHY MODE
         if (outputType === 'bibliography') {
-            const bibs = sources.map(s => {
-                return (s.doi && s.meta?.isDOI)
-                    ? DoiAPI.formatBib({ ...s.meta, doi: s.doi, title: s.title }, style)
-                    : Format.bib(s, style);
-            }).join('\n\n');
+            const bibs = sources.map(s => Format.bib(s, style)).join('\n\n');
             return res.status(200).json({ success: true, sources, text: bibs });
         }
 
-        // CITATION MODE - Get insertion points from Groq
-        const prompt = buildInsertionPrompt(context, sources);
+        // CITATION MODE
+        const prompt = buildPrompt(context, sources);
         const response = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, true);
         
         let insertions = [];
@@ -302,9 +262,7 @@ export default async function handler(req, res) {
             insertions = json ? JSON.parse(json).insertions || [] : [];
         } catch {}
 
-        // Process insertions with proper formatting
         const result = processInsertions(context, insertions, sources, style, outputType);
-        
         return res.status(200).json({ success: true, sources, text: result });
 
     } catch (error) {
