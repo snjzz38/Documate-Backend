@@ -3,6 +3,7 @@ import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 import { GroqAPI } from '../utils/groqAPI.js';
 import { CitationPrompts } from '../utils/prompts.js';
+import { DoiAPI } from '../utils/doiAPI.js';
 
 // ==========================================================================
 // PIPELINE SERVICE
@@ -158,9 +159,33 @@ const PipelineService = {
         return citationText;
     },
 
-    generateFallback(source) {
+    generateFallback(source, style = 'chicago') {
         const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         
+        // If source has DOI data, use DoiAPI formatting (most reliable)
+        if (source.doi && source.meta?.isVerified) {
+            const doiMeta = {
+                doi: source.doi,
+                title: source.title,
+                authors: source.meta.allAuthors?.map(name => {
+                    const parts = name.split(' ');
+                    const family = parts.pop();
+                    const given = parts.join(' ');
+                    return { given, family, full: name };
+                }) || [],
+                authorString: source.meta.author,
+                year: source.meta.year,
+                journal: source.meta.journal || source.meta.siteName,
+                volume: source.meta.volume,
+                issue: source.meta.issue,
+                pages: source.meta.pages
+            };
+            
+            const formatted = DoiAPI.formatCitations(doiMeta, style);
+            if (formatted) return formatted;
+        }
+        
+        // Standard fallback
         let author = source.meta?.author;
         const site = this.getSiteName(source);
         
@@ -182,7 +207,17 @@ const PipelineService = {
         }
         
         const date = this.extractYear(source);
-        return `${author}. "${source.title}". ${site}. ${date}. ${source.link} (Accessed ${today})`;
+        
+        // Format based on style
+        const s = (style || '').toLowerCase();
+        if (s.includes('apa')) {
+            return `${author}. (${date}). ${source.title}. *${site}*. ${source.link} (Accessed ${today})`;
+        }
+        if (s.includes('mla')) {
+            return `${author}. "${source.title}." *${site}*, ${date}, ${source.link}. Accessed ${today}.`;
+        }
+        // Chicago (default)
+        return `${author}. "${source.title}." *${site}*. ${date}. ${source.link} (Accessed ${today})`;
     },
 
     processInsertions(context, insertions, sources, formattedMap, outputType, style) {
