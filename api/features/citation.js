@@ -250,17 +250,54 @@ export default async function handler(req, res) {
 
         // QUOTES MODE
         if (preLoadedSources?.length) {
-            const srcList = preLoadedSources.map(s => 
-                `[${s.id}] ${s.title}\nURL: ${s.link}\nContent: ${(s.content || '').substring(0, 600)}`
-            ).join('\n\n');
-            const prompt = `Extract verbatim quotes.\n\nSOURCES:\n${srcList}\n\nFormat:\n**[ID] Title** - FULL_URL\n> "Exact quote..."`;
-            
+            // Re-scrape sources to get full content if needed
+            const sourcesWithContent = await Promise.all(preLoadedSources.map(async (s) => {
+                // If content is too short, try to scrape
+                if (!s.content || s.content.length < 200 || s.content.startsWith('[Summary]')) {
+                    try {
+                        const scraped = await ScraperAPI.scrape([s]);
+                        return scraped[0] || s;
+                    } catch {
+                        return s;
+                    }
+                }
+                return s;
+            }));
+
+            // Build source list with more content
+            const srcList = sourcesWithContent.map((s, i) => {
+                const content = (s.content || s.snippet || '').substring(0, 1500);
+                return `[${i + 1}] ${s.title}
+URL: ${s.link}
+CONTENT:
+${content}`;
+            }).join('\n\n---\n\n');
+
+            const prompt = `Extract 1-3 verbatim quotes from EACH source that has quotable content.
+
+SOURCES:
+${srcList}
+
+RULES:
+1. Quotes must be EXACT text from the CONTENT section - copy word for word
+2. Each quote should be 1-4 sentences (30-150 words)
+3. Skip sources with no usable content (just say "No quotable content")
+4. Use the FULL URL provided, not shortened
+
+OUTPUT FORMAT:
+**[1] Title** - FULL_URL
+> "Exact verbatim quote from source..."
+
+**[2] Title** - FULL_URL  
+> "Another exact quote..."`;
+
             let result = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
             
-            preLoadedSources.forEach(s => {
+            // Fix truncated URLs
+            sourcesWithContent.forEach((s, i) => {
                 try {
                     const domain = new URL(s.link).hostname.replace('www.', '');
-                    result = result.replace(new RegExp(`https?://${domain}/?(?![\\w/])`, 'gi'), s.link);
+                    result = result.replace(new RegExp(`https?://${domain}/?(?![\\w/\\-])`, 'gi'), s.link);
                 } catch {}
             });
             
