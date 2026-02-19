@@ -2,29 +2,65 @@
 import { GroqAPI } from './groqAPI.js';
 
 export const GoogleSearchAPI = {
-    BLOCKLIST: " -site:stackoverflow.com -site:stackexchange.com -site:mathoverflow.net -site:reddit.com -site:quora.com -site:amazon.com -site:ebay.com -site:facebook.com -site:twitter.com -site:instagram.com -site:tiktok.com -site:pinterest.com -site:youtube.com -site:wikipedia.org",
+    // Only block forums and shopping - keep Wikipedia for some topics
+    BLOCKLIST: " -site:reddit.com -site:quora.com -site:amazon.com -site:ebay.com -site:facebook.com -site:twitter.com -site:instagram.com -site:tiktok.com -site:pinterest.com -site:youtube.com",
     
     BANNED_DOMAINS: [
-        'stackoverflow', 'stackexchange', 'mathoverflow', 'superuser', 'serverfault', 'askubuntu',
-        'reddit', 'quora', 'answers.com',
-        'amazon', 'ebay', 'alibaba', 'etsy', 'walmart', 'target',
+        'stackoverflow', 'stackexchange', 'mathoverflow', 'superuser', 'askubuntu',
+        'reddit', 'quora', 'answers.com', 'answers.yahoo',
+        'amazon', 'ebay', 'alibaba', 'etsy', 'walmart', 'target', 'shopping',
         'facebook', 'twitter', 'x.com', 'instagram', 'tiktok', 'pinterest', 'linkedin',
-        'youtube', 'vimeo', 'dailymotion',
-        'wikipedia', 'fandom.com', 'wikia.com'
+        'youtube', 'vimeo', 'dailymotion', 'tiktok'
     ],
 
     async search(query, apiKey, cx, groqKey = null) {
         if (!apiKey || !cx) throw new Error("Missing Google Search Configuration");
         
-        const searchQuery = groqKey ? await this._extractKeywords(query, groqKey) : this._fallbackExtract(query);
-        const finalQuery = `${searchQuery} ${this.BLOCKLIST}`;
+        // Extract multiple keyword sets for broader coverage
+        const keywords = groqKey 
+            ? await this._extractKeywords(query, groqKey) 
+            : this._fallbackExtract(query);
         
-        const [page1, page2] = await Promise.all([
-            this._fetch(finalQuery, 1, apiKey, cx),
-            this._fetch(finalQuery, 11, apiKey, cx)
-        ]);
+        // Split keywords into groups for multiple searches
+        const keywordList = keywords.split(/[,\s]+/).filter(k => k.length > 2);
         
-        return this._dedupe([...page1, ...page2]);
+        // Create 2-3 different search queries
+        const queries = [];
+        
+        // Query 1: All keywords (most specific)
+        queries.push(keywordList.slice(0, 4).join(' '));
+        
+        // Query 2: First half of keywords
+        if (keywordList.length > 2) {
+            queries.push(keywordList.slice(0, Math.ceil(keywordList.length / 2)).join(' '));
+        }
+        
+        // Query 3: Second half of keywords (different angle)
+        if (keywordList.length > 3) {
+            queries.push(keywordList.slice(Math.ceil(keywordList.length / 2)).join(' '));
+        }
+        
+        // Query 4: Add "academic" or "philosophy" for scholarly results
+        queries.push(keywordList.slice(0, 2).join(' ') + ' philosophy academic');
+        
+        // Run all searches in parallel
+        const allResults = [];
+        for (const q of queries.slice(0, 3)) {
+            const finalQuery = `${q} ${this.BLOCKLIST}`;
+            try {
+                const results = await this._fetch(finalQuery, 1, apiKey, cx);
+                allResults.push(...results);
+            } catch {}
+        }
+        
+        // Also try second page of first query
+        try {
+            const finalQuery = `${queries[0]} ${this.BLOCKLIST}`;
+            const page2 = await this._fetch(finalQuery, 11, apiKey, cx);
+            allResults.push(...page2);
+        } catch {}
+        
+        return this._dedupe(allResults);
     },
 
     async _extractKeywords(text, groqKey) {
