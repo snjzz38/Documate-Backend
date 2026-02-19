@@ -29,22 +29,66 @@ export const GoogleSearchAPI = {
 
     async _extractKeywords(text, groqKey) {
         try {
-            const prompt = `Extract 4-6 academic search keywords from this text. Return ONLY keywords separated by spaces.
-Text: "${text.substring(0, 1000)}"
-Keywords:`;
+            const prompt = `Identify the CORE ACADEMIC TOPICS from this text for a scholarly search.
+
+TEXT: "${text.substring(0, 1500)}"
+
+RULES:
+1. Extract specific theories, concepts, proper nouns, researcher names
+2. Ignore generic words like "history", "knowledge", "truth", "discovery"
+3. Focus on: named theories, methodologies, specific studies, researcher names, technical terms
+4. Return 4-8 keywords/phrases separated by commas
+
+EXAMPLES:
+- Text about Pompeii DNA → "Pompeii DNA analysis, ancient genetics"
+- Text about Peter Turchin → "cliodynamics, Peter Turchin, secular cycles, Seshat"
+- Text about mathematical platonism → "mathematical platonism, philosophy of mathematics, abstract objects"
+
+KEYWORDS:`;
             const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-            const keywords = response.replace(/["'\n]/g, '').trim().split(/\s+/).filter(w => w.length > 2).slice(0, 6).join(' ');
+            
+            // Clean response - split by comma or space, filter junk
+            let keywords = response
+                .replace(/["'\n]/g, '')
+                .replace(/KEYWORDS:?/gi, '')
+                .trim()
+                .split(/[,\n]+/)
+                .map(k => k.trim())
+                .filter(k => k.length > 2 && k.length < 50)
+                .slice(0, 6)
+                .join(' ');
+            
             return keywords.length > 10 ? keywords : this._fallbackExtract(text);
         } catch { return this._fallbackExtract(text); }
     },
 
     _fallbackExtract(text) {
-        const stops = new Set(['this','that','the','and','for','are','but','not','you','all','can','had','her','was','one','our','out','with','have','from','that','been','they','will','would','there','their','what','about','which','when','make','like','just','over','such','into','than','them','then','these','some','could','other']);
-        return [...new Set(text.toLowerCase().match(/\b[a-z]{4,}\b/g) || [])]
-            .filter(w => !stops.has(w))
-            .sort((a, b) => b.length - a.length)
+        // Prioritize proper nouns, technical terms, and longer words
+        const stops = new Set([
+            'this','that','the','and','for','are','but','not','you','all','can','had','her','was',
+            'one','our','out','with','have','from','been','they','will','would','there','their',
+            'what','about','which','when','make','like','just','over','such','into','than','them',
+            'then','these','some','could','other','more','also','being','through','where','after',
+            'most','only','come','made','find','know','take','people','into','year','your','good',
+            'some','them','see','time','very','when','come','could','now','than','first','been',
+            'call','who','its','way','may','down','side','work','back','even','new','want','because',
+            'any','give','day','most','historical','knowledge','history','truth','objective','process',
+            'discovered','discovery','understanding','interpretation','suggests','implies','proves'
+        ]);
+        
+        // Extract potential proper nouns (capitalized words not at sentence start)
+        const properNouns = text.match(/(?<=[.!?]\s+\w+\s+)[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g) || [];
+        
+        // Extract long words (likely technical terms)
+        const longWords = [...new Set(text.toLowerCase().match(/\b[a-z]{8,}\b/g) || [])]
+            .filter(w => !stops.has(w));
+        
+        // Combine and prioritize
+        const combined = [...new Set([...properNouns, ...longWords])]
             .slice(0, 6)
             .join(' ');
+        
+        return combined.length > 10 ? combined : text.substring(0, 100);
     },
 
     async _fetch(q, start, key, cx) {
