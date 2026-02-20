@@ -66,9 +66,11 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        // Destructure inputs (tone and isPersonal will safely be undefined if not sent)
+        // Destructure inputs
         const { text, tone, isPersonal, apiKey } = req.body;
         
+        console.log(` Request | Tone: ${tone || 'Standard'} | Personal: ${!!isPersonal}`);
+
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
 
         if (!text) throw new Error("No text provided to humanize.");
@@ -89,7 +91,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true, result: result.trim() });
 
     } catch (error) {
-        console.error("Humanizer Error:", error.message);
+        console.error(" Error:", error.message);
         return res.status(500).json({ success: false, error: error.message });
     }
 }
