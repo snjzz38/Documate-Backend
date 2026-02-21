@@ -2,126 +2,54 @@
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 import { GroqAPI } from '../utils/groqAPI.js';
-import { DoiAPI } from '../utils/doiAPI.js';
 
 const TODAY = () => new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-// ==========================================================================
-// CITATION FORMATTER
-// ==========================================================================
-function getAuthorName(source) {
-    // DOI source with structured authors
-    if (source.meta?.isDOI && source.meta?.authors?.length > 0) {
-        const authors = source.meta.authors;
-        if (authors.length === 1) return authors[0].family || authors[0].given || 'Unknown';
-        if (authors.length === 2) return `${authors[0].family} and ${authors[1].family}`;
-        return `${authors[0].family} et al.`;
+// ============ HELPERS ============
+function getAuthor(source) {
+    if (source.meta?.isDOI && source.meta?.authors?.length) {
+        const a = source.meta.authors;
+        if (a.length === 1) return a[0].family || 'Unknown';
+        if (a.length === 2) return `${a[0].family} and ${a[1].family}`;
+        return `${a[0].family} et al.`;
     }
-    
-    // Non-DOI: check scraped author
     if (source.meta?.author) {
-        let auth = String(source.meta.author).trim();
-        
-        // Skip junk authors
-        if (auth.includes('→') || auth.includes('View all') || auth.length < 2) {
-            return cleanSiteName(source.meta?.siteName || source.title);
-        }
-        
-        // "Last, First" format
-        if (auth.includes(',')) {
-            return auth.split(',')[0].trim();
-        }
-        
-        // Get last name if multiple words
-        const parts = auth.split(/\s+/).filter(p => p.length > 1);
-        if (parts.length >= 2) {
-            return parts[parts.length - 1];
-        }
-        
-        return auth;
+        const auth = String(source.meta.author);
+        if (auth.includes(',')) return auth.split(',')[0].trim();
+        const parts = auth.split(/\s+/);
+        return parts.length > 1 ? parts[parts.length - 1] : auth;
     }
-    
-    // Fallback: use site name
-    return cleanSiteName(source.meta?.siteName || source.title || 'Unknown');
-}
-
-function cleanSiteName(site) {
-    if (!site) return 'Unknown';
-    return String(site)
-        .replace(/^www\./, '')
-        .replace(/\.(com|org|edu|net|gov|io)$/i, '')
-        .replace(/[→\-–|]/g, ' ')
-        .split(/[.\s]/)[0]
-        .trim()
-        .replace(/^(\w)/, c => c.toUpperCase()) || 'Unknown';
+    const site = source.meta?.siteName || '';
+    return site.replace(/\.(com|org|edu|net)$/i, '').replace(/^www\./, '').split('.')[0] || 'Unknown';
 }
 
 function getYear(source) {
     const y = source.meta?.year;
-    if (y && y !== 'n.d.' && /^\d{4}$/.test(String(y))) {
-        return String(y);
-    }
-    return 'n.d.';
+    return (y && /^\d{4}$/.test(y)) ? y : 'n.d.';
 }
 
-// Format in-text citation: (Author Year)
 function formatInText(source, style) {
-    const author = getAuthorName(source);
+    const author = getAuthor(source);
     const year = getYear(source);
-    const s = String(style || 'chicago').toLowerCase();
-    
-    // MLA doesn't use year
-    if (s.includes('mla')) {
-        return `(${author})`;
-    }
-    
-    // APA uses comma
-    if (s.includes('apa')) {
-        return `(${author}, ${year})`;
-    }
-    
-    // Chicago - ALWAYS include year
+    const s = (style || '').toLowerCase();
+    if (s.includes('mla')) return `(${author})`;
+    if (s.includes('apa')) return `(${author}, ${year})`;
     return `(${author} ${year})`;
 }
 
-// Format bibliography entry
 function formatBib(source, style) {
-    const s = String(style || 'chicago').toLowerCase();
+    const author = source.meta?.author || getAuthor(source);
     const year = getYear(source);
     const site = source.meta?.siteName || 'Unknown';
     const today = TODAY();
+    const s = (style || '').toLowerCase();
     
-    // Get full author for bibliography
-    let author;
-    if (source.meta?.isDOI && source.meta?.authors?.length > 0) {
-        const authors = source.meta.authors;
-        if (authors.length === 1) {
-            author = `${authors[0].family}, ${authors[0].given}`;
-        } else if (authors.length === 2) {
-            author = `${authors[0].family}, ${authors[0].given}, and ${authors[1].given} ${authors[1].family}`;
-        } else {
-            author = `${authors[0].family}, ${authors[0].given}, et al.`;
-        }
-    } else if (source.meta?.author && !source.meta.author.includes('→')) {
-        author = source.meta.author;
-    } else {
-        author = cleanSiteName(site);
-    }
-
-    const url = source.doi ? `https://doi.org/${source.doi}` : source.link;
-
-    if (s.includes('apa')) {
-        return `${author}. (${year}). ${source.title}. *${site}*. ${url}`;
-    }
-    if (s.includes('mla')) {
-        return `${author}. "${source.title}." *${site}*, ${year}, ${url}.`;
-    }
-    return `${author}. "${source.title}." *${site}*. ${year}. ${url} (Accessed ${today})`;
+    if (s.includes('apa')) return `${author}. (${year}). ${source.title}. *${site}*. ${source.link}`;
+    if (s.includes('mla')) return `${author}. "${source.title}." *${site}*, ${year}, ${source.link}.`;
+    return `${author}. "${source.title}." *${site}*. ${year}. ${source.link} (Accessed ${today})`;
 }
 
-// ==========================================================================
-// PROCESS INSERTIONS
-// ==========================================================================
+// ============ PROCESS INSERTIONS ============
 function processInsertions(text, insertions, sources, style, outputType) {
     let result = text;
     const used = new Set();
@@ -132,31 +60,28 @@ function processInsertions(text, insertions, sources, style, outputType) {
     const tokens = [];
     const re = /[a-z0-9]+/gi;
     let m;
-    while ((m = re.exec(text))) {
-        tokens.push({ word: m[0].toLowerCase(), end: m.index + m[0].length });
-    }
+    while ((m = re.exec(text))) tokens.push({ word: m[0].toLowerCase(), end: m.index + m[0].length });
 
     // Find positions
-    const valid = insertions.map(ins => {
-        if (!ins.anchor || !ins.source_id) return null;
+    const valid = [];
+    for (const ins of insertions) {
+        if (!ins.anchor || !ins.source_id) continue;
         const words = ins.anchor.toLowerCase().match(/[a-z0-9]+/g);
-        if (!words || words.length < 2) return null;
+        if (!words || words.length < 2) continue;
         
         for (let i = 0; i <= tokens.length - words.length; i++) {
             if (words.every((w, j) => tokens[i + j].word === w)) {
-                return { sourceId: ins.source_id, pos: tokens[i + words.length - 1].end };
+                valid.push({ srcId: ins.source_id, pos: tokens[i + words.length - 1].end });
+                break;
             }
         }
-        return null;
-    }).filter(Boolean);
+    }
 
-    // Dedupe
+    // Dedupe by position
     const byPos = new Map();
-    valid.forEach(v => {
-        if (!byPos.has(v.pos)) byPos.set(v.pos, v.sourceId);
-    });
+    valid.forEach(v => { if (!byPos.has(v.pos)) byPos.set(v.pos, v.srcId); });
 
-    // Build citations
+    // Process
     const positions = [...byPos.keys()].sort((a, b) => a - b);
     const posData = new Map();
 
@@ -167,21 +92,17 @@ function processInsertions(text, insertions, sources, style, outputType) {
 
         if (outputType === 'footnotes') {
             footnotes.push({ num: fnNum, cit: formatBib(src, style) });
-            posData.set(pos, { type: 'fn', num: fnNum++ });
+            posData.set(pos, { fn: fnNum++ });
         } else {
-            // IN-TEXT: Use formatInText which includes year
-            const citation = formatInText(src, style);
-            posData.set(pos, { type: 'it', cit: citation });
+            posData.set(pos, { cit: formatInText(src, style) });
         }
     });
 
-    // Insert (reverse)
-    const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-    
+    // Insert reverse
+    const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
     [...positions].reverse().forEach(pos => {
         const d = posData.get(pos);
-        if (!d) return;
-        const insert = d.type === 'fn' ? toSuper(d.num) : ` ${d.cit}`;
+        const insert = d.fn ? toSuper(d.fn) : ` ${d.cit}`;
         result = result.slice(0, pos) + insert + result.slice(pos);
     });
 
@@ -192,9 +113,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
         footnotes.forEach(f => footer += `${f.num}. ${f.cit}\n\n`);
     } else {
         footer += '### References (Used)\n\n';
-        sources.filter(s => used.has(s.id)).forEach(s => {
-            footer += formatBib(s, style) + '\n\n';
-        });
+        sources.filter(s => used.has(s.id)).forEach(s => footer += formatBib(s, style) + '\n\n');
     }
 
     const unused = sources.filter(s => !used.has(s.id));
@@ -206,36 +125,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
     return result + footer;
 }
 
-// ==========================================================================
-// PROMPT FOR GROQ
-// ==========================================================================
-function buildPrompt(text, sources, style) {
-    const srcList = sources.map(s => {
-        const author = getAuthorName(s);
-        const year = getYear(s);
-        return `[${s.id}] ${author} (${year}) - ${s.title.substring(0, 50)}`;
-    }).join('\n');
-
-    return `Find citation insertion points in this text.
-
-SOURCES (use 8+ of these):
-${srcList}
-
-TEXT:
-"${text}"
-
-Return ONLY JSON:
-{"insertions":[{"anchor":"3-6 exact words from text","source_id":1}]}
-
-Rules:
-- anchor = exact consecutive words from text
-- 10+ insertions across all paragraphs
-- source_id = number from list above`;
-}
-
-// ==========================================================================
-// HANDLER
-// ==========================================================================
+// ============ HANDLER ============
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -243,70 +133,44 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { context, style = 'Chicago', outputType = 'in-text', apiKey, googleKey, preLoadedSources } = req.body;
+        const { context, style = 'Chicago', outputType = 'in-text', apiKey, googleKey, preLoadedSources } = req.body || {};
+        
+        if (!context) {
+            return res.status(400).json({ success: false, error: 'No context provided' });
+        }
+
         const GROQ = apiKey || process.env.GROQ_API_KEY;
         const GKEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const GCX = process.env.SEARCH_ENGINE_ID;
 
         // QUOTES MODE
         if (preLoadedSources?.length) {
-            // Re-scrape sources to get full content if needed
-            const sourcesWithContent = await Promise.all(preLoadedSources.map(async (s) => {
-                // If content is too short, try to scrape
-                if (!s.content || s.content.length < 200 || s.content.startsWith('[Summary]')) {
-                    try {
-                        const scraped = await ScraperAPI.scrape([s]);
-                        return scraped[0] || s;
-                    } catch {
-                        return s;
-                    }
-                }
-                return s;
-            }));
-
-            // Build source list with more content
-            const srcList = sourcesWithContent.map((s, i) => {
-                const content = (s.content || s.snippet || '').substring(0, 1500);
-                return `[${i + 1}] ${s.title}
-URL: ${s.link}
-CONTENT:
-${content}`;
-            }).join('\n\n---\n\n');
-
-            const prompt = `Extract 1-3 verbatim quotes from EACH source that has quotable content.
-
-SOURCES:
-${srcList}
-
-RULES:
-1. Quotes must be EXACT text from the CONTENT section - copy word for word
-2. Each quote should be 1-4 sentences (30-150 words)
-3. Skip sources with no usable content (just say "No quotable content")
-4. Use the FULL URL provided, not shortened
-
-OUTPUT FORMAT:
-**[1] Title** - FULL_URL
-> "Exact verbatim quote from source..."
-
-**[2] Title** - FULL_URL  
-> "Another exact quote..."`;
-
-            let result = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
+            const srcList = preLoadedSources.map((s, i) => 
+                `[${i + 1}] ${s.title}\nURL: ${s.link}\nContent: ${(s.content || s.snippet || '').substring(0, 1000)}`
+            ).join('\n\n');
             
-            // Fix truncated URLs
-            sourcesWithContent.forEach((s, i) => {
-                try {
-                    const domain = new URL(s.link).hostname.replace('www.', '');
-                    result = result.replace(new RegExp(`https?://${domain}/?(?![\\w/\\-])`, 'gi'), s.link);
-                } catch {}
-            });
-            
+            const prompt = `Extract verbatim quotes from each source.\n\nSOURCES:\n${srcList}\n\nFormat:\n**[ID] Title** - URL\n> "Quote..."`;
+            const result = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
             return res.status(200).json({ success: true, text: result });
         }
 
-        // SEARCH & SCRAPE
+        // SEARCH
+        console.log('[Citation] Starting search...');
         const raw = await GoogleSearchAPI.search(context, GKEY, GCX, GROQ);
+        console.log('[Citation] Search results:', raw?.length || 0);
+        
+        if (!raw || !raw.length) {
+            return res.status(200).json({ 
+                success: false, 
+                error: 'No search results. Check Google API key and Search Engine ID.',
+                debug: { hasGoogleKey: !!GKEY, hasCX: !!GCX, hasGroq: !!GROQ }
+            });
+        }
+
+        // SCRAPE
+        console.log('[Citation] Starting scrape...');
         const sources = await ScraperAPI.scrape(raw);
+        console.log('[Citation] Scraped sources:', sources?.length || 0);
 
         // BIBLIOGRAPHY MODE
         if (outputType === 'bibliography') {
@@ -315,13 +179,15 @@ OUTPUT FORMAT:
         }
 
         // CITATION MODE
-        const prompt = buildPrompt(context, sources, style);
+        const srcList = sources.map(s => `[${s.id}] ${getAuthor(s)} (${getYear(s)}) - ${s.title.substring(0, 40)}`).join('\n');
+        const prompt = `Find citation points.\n\nSOURCES:\n${srcList}\n\nTEXT:\n"${context}"\n\nReturn JSON: {"insertions":[{"anchor":"3-5 exact words","source_id":1}]}`;
+        
         const response = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, true);
         
         let insertions = [];
         try {
             const json = response.match(/\{[\s\S]*\}/)?.[0];
-            insertions = json ? JSON.parse(json).insertions || [] : [];
+            if (json) insertions = JSON.parse(json).insertions || [];
         } catch {}
 
         const result = processInsertions(context, insertions, sources, style, outputType);
@@ -329,6 +195,6 @@ OUTPUT FORMAT:
 
     } catch (error) {
         console.error('Citation Error:', error);
-        return res.status(500).json({ success: false, error: error.message });
+        return res.status(500).json({ success: false, error: error.message || 'Unknown error' });
     }
 }
