@@ -1,130 +1,51 @@
+
 // api/utils/googleSearch.js
 import { GroqAPI } from './groqAPI.js';
 
 export const GoogleSearchAPI = {
-    // Only block forums and shopping - keep Wikipedia for some topics
-    BLOCKLIST: " -site:reddit.com -site:quora.com -site:amazon.com -site:ebay.com -site:facebook.com -site:twitter.com -site:instagram.com -site:tiktok.com -site:pinterest.com -site:youtube.com",
+    BLOCKLIST: " -site:stackoverflow.com -site:stackexchange.com -site:mathoverflow.net -site:reddit.com -site:quora.com -site:amazon.com -site:ebay.com -site:facebook.com -site:twitter.com -site:instagram.com -site:tiktok.com -site:pinterest.com -site:youtube.com -site:wikipedia.org",
     
     BANNED_DOMAINS: [
-        'stackoverflow', 'stackexchange', 'mathoverflow', 'superuser', 'askubuntu',
-        'reddit', 'quora', 'answers.com', 'answers.yahoo',
-        'amazon', 'ebay', 'alibaba', 'etsy', 'walmart', 'target', 'shopping',
+        'stackoverflow', 'stackexchange', 'mathoverflow', 'superuser', 'serverfault', 'askubuntu',
+        'reddit', 'quora', 'answers.com',
+        'amazon', 'ebay', 'alibaba', 'etsy', 'walmart', 'target',
         'facebook', 'twitter', 'x.com', 'instagram', 'tiktok', 'pinterest', 'linkedin',
-        'youtube', 'vimeo', 'dailymotion', 'tiktok'
+        'youtube', 'vimeo', 'dailymotion',
+        'wikipedia', 'fandom.com', 'wikia.com'
     ],
 
     async search(query, apiKey, cx, groqKey = null) {
         if (!apiKey || !cx) throw new Error("Missing Google Search Configuration");
         
-        // Extract multiple keyword sets for broader coverage
-        const keywords = groqKey 
-            ? await this._extractKeywords(query, groqKey) 
-            : this._fallbackExtract(query);
+        const searchQuery = groqKey ? await this._extractKeywords(query, groqKey) : this._fallbackExtract(query);
+        const finalQuery = `${searchQuery} ${this.BLOCKLIST}`;
         
-        // Split keywords into groups for multiple searches
-        const keywordList = keywords.split(/[,\s]+/).filter(k => k.length > 2);
+        const [page1, page2] = await Promise.all([
+            this._fetch(finalQuery, 1, apiKey, cx),
+            this._fetch(finalQuery, 11, apiKey, cx)
+        ]);
         
-        // Create 2-3 different search queries
-        const queries = [];
-        
-        // Query 1: All keywords (most specific)
-        queries.push(keywordList.slice(0, 4).join(' '));
-        
-        // Query 2: First half of keywords
-        if (keywordList.length > 2) {
-            queries.push(keywordList.slice(0, Math.ceil(keywordList.length / 2)).join(' '));
-        }
-        
-        // Query 3: Second half of keywords (different angle)
-        if (keywordList.length > 3) {
-            queries.push(keywordList.slice(Math.ceil(keywordList.length / 2)).join(' '));
-        }
-        
-        // Query 4: Add "academic" or "philosophy" for scholarly results
-        queries.push(keywordList.slice(0, 2).join(' ') + ' philosophy academic');
-        
-        // Run all searches in parallel
-        const allResults = [];
-        for (const q of queries.slice(0, 3)) {
-            const finalQuery = `${q} ${this.BLOCKLIST}`;
-            try {
-                const results = await this._fetch(finalQuery, 1, apiKey, cx);
-                allResults.push(...results);
-            } catch {}
-        }
-        
-        // Also try second page of first query
-        try {
-            const finalQuery = `${queries[0]} ${this.BLOCKLIST}`;
-            const page2 = await this._fetch(finalQuery, 11, apiKey, cx);
-            allResults.push(...page2);
-        } catch {}
-        
-        return this._dedupe(allResults);
+        return this._dedupe([...page1, ...page2]);
     },
 
     async _extractKeywords(text, groqKey) {
         try {
-            const prompt = `Identify the CORE ACADEMIC TOPICS from this text for a scholarly search.
-
-TEXT: "${text.substring(0, 1500)}"
-
-RULES:
-1. Extract specific theories, concepts, proper nouns, researcher names
-2. Ignore generic words like "history", "knowledge", "truth", "discovery"
-3. Focus on: named theories, methodologies, specific studies, researcher names, technical terms
-4. Return 4-8 keywords/phrases separated by commas
-
-EXAMPLES:
-- Text about Pompeii DNA → "Pompeii DNA analysis, ancient genetics"
-- Text about Peter Turchin → "cliodynamics, Peter Turchin, secular cycles, Seshat"
-- Text about mathematical platonism → "mathematical platonism, philosophy of mathematics, abstract objects"
-
-KEYWORDS:`;
+            const prompt = `Extract 4-6 academic search keywords from this text. Return ONLY keywords separated by spaces.
+Text: "${text.substring(0, 1000)}"
+Keywords:`;
             const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-            
-            // Clean response - split by comma or space, filter junk
-            let keywords = response
-                .replace(/["'\n]/g, '')
-                .replace(/KEYWORDS:?/gi, '')
-                .trim()
-                .split(/[,\n]+/)
-                .map(k => k.trim())
-                .filter(k => k.length > 2 && k.length < 50)
-                .slice(0, 6)
-                .join(' ');
-            
+            const keywords = response.replace(/["'\n]/g, '').trim().split(/\s+/).filter(w => w.length > 2).slice(0, 6).join(' ');
             return keywords.length > 10 ? keywords : this._fallbackExtract(text);
         } catch { return this._fallbackExtract(text); }
     },
 
     _fallbackExtract(text) {
-        // Prioritize proper nouns, technical terms, and longer words
-        const stops = new Set([
-            'this','that','the','and','for','are','but','not','you','all','can','had','her','was',
-            'one','our','out','with','have','from','been','they','will','would','there','their',
-            'what','about','which','when','make','like','just','over','such','into','than','them',
-            'then','these','some','could','other','more','also','being','through','where','after',
-            'most','only','come','made','find','know','take','people','into','year','your','good',
-            'some','them','see','time','very','when','come','could','now','than','first','been',
-            'call','who','its','way','may','down','side','work','back','even','new','want','because',
-            'any','give','day','most','historical','knowledge','history','truth','objective','process',
-            'discovered','discovery','understanding','interpretation','suggests','implies','proves'
-        ]);
-        
-        // Extract potential proper nouns (capitalized words not at sentence start)
-        const properNouns = text.match(/(?<=[.!?]\s+\w+\s+)[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g) || [];
-        
-        // Extract long words (likely technical terms)
-        const longWords = [...new Set(text.toLowerCase().match(/\b[a-z]{8,}\b/g) || [])]
-            .filter(w => !stops.has(w));
-        
-        // Combine and prioritize
-        const combined = [...new Set([...properNouns, ...longWords])]
+        const stops = new Set(['this','that','the','and','for','are','but','not','you','all','can','had','her','was','one','our','out','with','have','from','that','been','they','will','would','there','their','what','about','which','when','make','like','just','over','such','into','than','them','then','these','some','could','other']);
+        return [...new Set(text.toLowerCase().match(/\b[a-z]{4,}\b/g) || [])]
+            .filter(w => !stops.has(w))
+            .sort((a, b) => b.length - a.length)
             .slice(0, 6)
             .join(' ');
-        
-        return combined.length > 10 ? combined : text.substring(0, 100);
     },
 
     async _fetch(q, start, key, cx) {
