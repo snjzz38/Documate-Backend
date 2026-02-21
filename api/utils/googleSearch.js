@@ -1,120 +1,189 @@
 // api/utils/googleSearch.js
+// Uses FREE public SearXNG instances - NO API KEY OR SERVER REQUIRED
+
 import { GroqAPI } from './groqAPI.js';
 
+// Reliable public SearXNG instances (from searx.space)
+const INSTANCES = [
+    'https://search.sapti.me',
+    'https://searx.tiekoetter.com', 
+    'https://search.bus-hit.me',
+    'https://searx.be',
+    'https://search.ononoki.org',
+    'https://priv.au'
+];
+
 export const GoogleSearchAPI = {
-    BLOCKLIST: " -site:reddit.com -site:quora.com -site:amazon.com -site:youtube.com",
-    
     BANNED_DOMAINS: [
-        'stackoverflow', 'stackexchange', 'reddit', 'quora', 'answers.com',
-        'amazon', 'ebay', 'facebook', 'twitter', 'instagram', 'tiktok', 
-        'pinterest', 'linkedin', 'youtube', 'vimeo'
+        'reddit', 'quora', 'amazon', 'ebay', 'facebook', 'twitter', 
+        'instagram', 'tiktok', 'pinterest', 'linkedin', 'youtube'
     ],
 
     async search(query, apiKey, cx, groqKey = null) {
-        if (!apiKey || !cx) {
-            throw new Error("Missing Google API key or Search Engine ID");
-        }
+        // apiKey and cx ignored - using free SearXNG instead
         
-        // Extract keywords (use Groq if available, otherwise fallback)
         const keywords = groqKey 
             ? await this._extractKeywords(query, groqKey) 
             : this._fallbackExtract(query);
         
         console.log('[Search] Keywords:', keywords);
         
-        // SINGLE QUERY ONLY - to save quota
-        const finalQuery = `${keywords} ${this.BLOCKLIST}`;
+        // Try instances until one works
+        const shuffled = [...INSTANCES].sort(() => Math.random() - 0.5);
         
-        const results = await this._fetch(finalQuery, 1, apiKey, cx);
-        
-        if (!results || results.length === 0) {
-            console.error('[Search] No results returned from Google API');
-            return [];
+        for (const instance of shuffled.slice(0, 3)) {
+            try {
+                console.log('[Search] Trying:', instance);
+                const results = await this._fetch(instance, keywords);
+                
+                if (results.length > 0) {
+                    console.log('[Search] Success:', results.length, 'results');
+                    return this._dedupe(results);
+                }
+            } catch (e) {
+                console.error('[Search] Failed:', instance, e.message);
+            }
         }
         
-        return this._dedupe(results);
+        console.error('[Search] All instances failed');
+        return [];
+    },
+
+    async _fetch(instance, query) {
+        const url = `${instance}/search?q=${encodeURIComponent(query)}&categories=general&language=en`;
+        
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        
+        try {
+            const res = await fetch(url, {
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html'
+                }
+            });
+            clearTimeout(timeout);
+            
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            
+            const html = await res.text();
+            return this._parseResults(html);
+        } catch (e) {
+            clearTimeout(timeout);
+            throw e;
+        }
+    },
+
+    _parseResults(html) {
+        const results = [];
+        
+        // Method 1: Parse <article class="result"> blocks
+        const articleRegex = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
+        let match;
+        
+        while ((match = articleRegex.exec(html)) !== null) {
+            const block = match[1];
+            
+            // Get URL
+            const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/);
+            // Get title from <h3> or <a>
+            const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/) || 
+                              block.match(/<a[^>]*>([\s\S]*?)<\/a>/);
+            // Get snippet from <p class="content">
+            const snippetMatch = block.match(/<p[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/p>/);
+            
+            if (urlMatch && titleMatch) {
+                const url = urlMatch[1];
+                const title = this._clean(titleMatch[1]);
+                const snippet = snippetMatch ? this._clean(snippetMatch[1]) : '';
+                
+                if (title && url && !url.includes('searx')) {
+                    results.push({ title, link: url, snippet });
+                }
+            }
+        }
+        
+        // Method 2: Fallback - parse any result-like structure
+        if (results.length < 3) {
+            const divRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+            while ((match = divRegex.exec(html)) !== null) {
+                const block = match[1];
+                const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/);
+                const titleMatch = block.match(/<h[34][^>]*>([\s\S]*?)<\/h[34]>/);
+                
+                if (urlMatch && titleMatch) {
+                    const url = urlMatch[1];
+                    const title = this._clean(titleMatch[1]);
+                    if (title && !url.includes('searx') && !results.some(r => r.link === url)) {
+                        results.push({ title, link: url, snippet: '' });
+                    }
+                }
+            }
+        }
+        
+        return results.slice(0, 15);
+    },
+
+    _clean(html) {
+        return (html || '')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 300);
     },
 
     async _extractKeywords(text, groqKey) {
         try {
-            const prompt = `Extract 4-6 academic search keywords from this text. Return ONLY the keywords separated by spaces, nothing else.
+            const prompt = `Extract 4-6 search keywords from this text. Return ONLY keywords separated by spaces.
 
-Text: "${text.substring(0, 800)}"
+Text: "${text.substring(0, 600)}"
 
 Keywords:`;
             
             const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
             
-            const keywords = response
+            const kw = response
                 .replace(/["'\n]/g, '')
                 .replace(/keywords:?/gi, '')
                 .trim()
                 .split(/[,\s]+/)
-                .filter(k => k.length > 2 && k.length < 30)
+                .filter(k => k.length > 2)
                 .slice(0, 6)
                 .join(' ');
             
-            return keywords.length > 5 ? keywords : this._fallbackExtract(text);
-        } catch (e) {
-            console.error('[Search] Keyword extraction failed:', e.message);
+            return kw.length > 5 ? kw : this._fallbackExtract(text);
+        } catch {
             return this._fallbackExtract(text);
         }
     },
 
     _fallbackExtract(text) {
-        const stops = new Set([
-            'this','that','the','and','for','are','but','not','you','all','can','had',
-            'was','one','our','with','have','from','been','they','will','would','there',
-            'their','what','about','which','when','make','like','just','over','such',
-            'into','than','them','then','these','some','could','other','more','also'
-        ]);
+        const stops = new Set(['this','that','the','and','for','are','but','not','you','all',
+            'can','had','was','one','our','with','have','from','been','they','will','would',
+            'there','their','what','about','which','when','make','like','just','over']);
         
-        const words = text.toLowerCase().match(/\b[a-z]{5,}\b/g) || [];
-        const meaningful = [...new Set(words)]
-            .filter(w => !stops.has(w))
-            .slice(0, 6);
-        
-        return meaningful.join(' ') || text.split(/\s+/).slice(0, 6).join(' ');
-    },
-
-    async _fetch(q, start, key, cx) {
-        const url = `https://www.googleapis.com/customsearch/v1?key=${key}&cx=${cx}&q=${encodeURIComponent(q)}&num=10&start=${start}`;
-        
-        console.log('[Search] Fetching:', q.substring(0, 50));
-        
-        try {
-            const res = await fetch(url);
-            const data = await res.json();
-            
-            // Log full error for debugging
-            if (data.error) {
-                console.error('[Search] Google API Error:', JSON.stringify(data.error));
-                throw new Error(`Google API: ${data.error.message || 'Unknown error'}`);
-            }
-            
-            console.log('[Search] Results:', data.items?.length || 0);
-            return data.items || [];
-            
-        } catch (e) {
-            console.error('[Search] Fetch failed:', e.message);
-            throw e; // Re-throw to surface the error
-        }
+        const words = text.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+        return [...new Set(words)].filter(w => !stops.has(w)).slice(0, 6).join(' ') 
+            || text.substring(0, 50);
     },
 
     _dedupe(items) {
         const seen = new Set();
         return items.filter(item => {
             try {
-                const domain = new URL(item.link).hostname.replace('www.', '').toLowerCase();
+                const domain = new URL(item.link).hostname.replace('www.', '');
                 if (this.BANNED_DOMAINS.some(b => domain.includes(b))) return false;
                 if (seen.has(domain)) return false;
                 seen.add(domain);
                 return true;
             } catch { return false; }
-        }).slice(0, 10).map(item => ({ 
-            title: item.title, 
-            link: item.link, 
-            snippet: item.snippet 
-        }));
+        }).slice(0, 10);
     }
 };
