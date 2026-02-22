@@ -16,7 +16,11 @@ const INSTANCES = [
 export const GoogleSearchAPI = {
     BANNED_DOMAINS: [
         'reddit', 'quora', 'amazon', 'ebay', 'facebook', 'twitter', 
-        'instagram', 'tiktok', 'pinterest', 'linkedin', 'youtube'
+        'instagram', 'tiktok', 'pinterest', 'linkedin', 'youtube',
+        // Filter non-English and low-quality domains
+        'drk.de', 'sucht', 'beratung', // German
+        'recovered.org', 'therecover', 'laopcenter', // Rehab marketing sites
+        'answers.com', 'wiki.answers'
     ],
 
     async search(query, apiKey, cx, groqKey = null) {
