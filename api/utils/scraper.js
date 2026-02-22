@@ -75,6 +75,32 @@ export const ScraperAPI = {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             
             const html = await res.text();
+            
+            // Try to find DOI in HTML content (for sites like ScienceDirect)
+            const doiInHtml = this._extractDoiFromHtml(html);
+            if (doiInHtml) {
+                const doiData = await DoiAPI.fetchFromCrossref(doiInHtml);
+                if (doiData) {
+                    console.log('[Scraper] DOI found in HTML:', doiInHtml);
+                    return {
+                        ...source,
+                        id: index + 1,
+                        title: doiData.title,
+                        content: doiData.abstract || this._extractContent(html) || source.snippet || '',
+                        doi: doiData.doi,
+                        meta: {
+                            author: this._formatAuthors(doiData.authors),
+                            authors: doiData.authors,
+                            year: doiData.year,
+                            published: doiData.year,
+                            siteName: doiData.journal,
+                            isDOI: true
+                        }
+                    };
+                }
+            }
+            
+            // Fallback to regular HTML scraping
             const meta = this._extractMeta(html, source.link);
             const content = this._extractContent(html);
             
@@ -88,6 +114,30 @@ export const ScraperAPI = {
             clearTimeout(timeout);
             throw e;
         }
+    },
+
+    _extractDoiFromHtml(html) {
+        // Look for DOI in meta tags and common patterns
+        const patterns = [
+            /<meta[^>]*name=["'](?:citation_doi|dc\.identifier|DC\.Identifier)["'][^>]*content=["']([^"']+)["']/i,
+            /<meta[^>]*content=["']([^"']+)["'][^>]*name=["']citation_doi["']/i,
+            /doi\.org\/(10\.[^\s"'<>]+)/i,
+            /DOI[:\s]*(10\.\d{4,}\/[^\s"'<>]+)/i,
+            /"doi"[:\s]*"(10\.[^"]+)"/i
+        ];
+        
+        for (const pattern of patterns) {
+            const match = html.match(pattern);
+            if (match) {
+                let doi = match[1]
+                    .replace(/^https?:\/\/doi\.org\//i, '')
+                    .replace(/[.,;)}\]]+$/, '');
+                if (doi.startsWith('10.')) {
+                    return doi;
+                }
+            }
+        }
+        return null;
     },
 
     _extractMeta(html, url) {
