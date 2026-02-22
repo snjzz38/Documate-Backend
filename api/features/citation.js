@@ -238,18 +238,38 @@ function processInsertions(text, insertions, sources, style, outputType) {
     // Footer
     let footer = '\n\n';
     if (outputType === 'footnotes') {
+        // FOOTNOTES: Keep in order of appearance (by footnote number)
         footer += '### Footnotes\n\n';
         footnotes.forEach(f => footer += `${f.num}. ${f.cit}\n\n`);
     } else {
+        // IN-TEXT / BIBLIOGRAPHY: Sort alphabetically by author
         footer += '### References\n\n';
-        sources.filter(s => used.has(s.id)).forEach(s => {
+        const usedSources = sources.filter(s => used.has(s.id));
+        
+        // Sort by author name alphabetically
+        usedSources.sort((a, b) => {
+            const authorA = getAuthorName(a).toLowerCase();
+            const authorB = getAuthorName(b).toLowerCase();
+            return authorA.localeCompare(authorB);
+        });
+        
+        usedSources.forEach(s => {
             footer += formatBib(s, style) + '\n\n';
         });
     }
 
+    // Further Reading also alphabetically
     const unused = sources.filter(s => !used.has(s.id));
     if (unused.length) {
         footer += '\n### Further Reading\n\n';
+        
+        // Sort unused sources alphabetically too
+        unused.sort((a, b) => {
+            const authorA = getAuthorName(a).toLowerCase();
+            const authorB = getAuthorName(b).toLowerCase();
+            return authorA.localeCompare(authorB);
+        });
+        
         unused.forEach(s => footer += formatBib(s, style) + '\n\n');
     }
 
