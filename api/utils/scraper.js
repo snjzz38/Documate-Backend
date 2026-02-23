@@ -1,3 +1,4 @@
+
 // api/utils/scraper.js
 // Scrapes web pages for citation metadata, prioritizing DOI when available
 
@@ -8,32 +9,35 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 export const ScraperAPI = {
     async scrape(sources) {
         const results = await Promise.all(
-            sources.slice(0, 10).map(async (source, index) => {
+            sources.slice(0, 20).map(async (source, index) => {
                 try {
-                    // STEP 1: Try DOI first (most reliable metadata)
-                    const doiData = await DoiAPI.resolve(source.link, source.snippet);
+                    // STEP 1: Check if URL contains doi.org
+                    const isDOIorg = source.link.includes('doi.org/');
                     
-                    if (doiData) {
-                        console.log('[Scraper] DOI found for:', source.link);
-                        return {
-                            ...source,
-                            id: index + 1,
-                            title: doiData.title,
-                            content: doiData.abstract || source.snippet || '',
-                            doi: doiData.doi,
-                            meta: {
-                                author: this._formatAuthors(doiData.authors),
-                                authors: doiData.authors,
-                                year: doiData.year,
-                                published: doiData.year,
-                                siteName: doiData.journal,
-                                isDOI: true
-                            }
-                        };
+                    if (isDOIorg) {
+                        const doiData = await DoiAPI.resolve(source.link, source.snippet);
+                        if (doiData) {
+                            console.log('[Scraper] DOI.org source:', source.link);
+                            return {
+                                ...source,
+                                id: index + 1,
+                                title: doiData.title,
+                                content: doiData.abstract || source.snippet || '',
+                                doi: doiData.doi,
+                                meta: {
+                                    author: this._formatAuthors(doiData.authors),
+                                    authors: doiData.authors,
+                                    year: doiData.year,
+                                    published: doiData.year,
+                                    siteName: doiData.journal,
+                                    isDOI: true
+                                }
+                            };
+                        }
                     }
                     
-                    // STEP 2: Fallback to HTML scraping
-                    console.log('[Scraper] No DOI, scraping HTML:', source.link);
+                    // STEP 2: For all other sites, scrape HTML
+                    console.log('[Scraper] Scraping:', source.link);
                     return await this._scrapeHTML(source, index);
                     
                 } catch (e) {
@@ -59,6 +63,14 @@ export const ScraperAPI = {
     },
 
     async _scrapeHTML(source, index) {
+        // Skip PDF links - can't extract text from them
+        if (source.link.toLowerCase().endsWith('.pdf') || 
+            source.link.includes('/pdf/') ||
+            source.link.includes('pdfs.semanticscholar.org')) {
+            console.log('[Scraper] Skipping PDF:', source.link);
+            return this._fallback(source, index);
+        }
+        
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 6000);
         
@@ -74,7 +86,49 @@ export const ScraperAPI = {
             
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             
+            // Check content type - skip if PDF or binary
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('pdf') || contentType.includes('octet-stream')) {
+                console.log('[Scraper] Skipping binary content:', source.link);
+                return this._fallback(source, index);
+            }
+            
             const html = await res.text();
+            
+            // Check if content looks like binary/PDF data
+            if (html.startsWith('%PDF') || html.includes('\x00') || !/^[\x00-\x7F\s]*$/.test(html.substring(0, 500))) {
+                // Check if it's not just unicode - look for PDF signature or null bytes
+                if (html.startsWith('%PDF') || html.substring(0, 100).includes('\x00')) {
+                    console.log('[Scraper] Detected binary content:', source.link);
+                    return this._fallback(source, index);
+                }
+            }
+            
+            // Try to extract DOI from HTML and get metadata from Crossref
+            const doiInHtml = this._extractDoiFromHtml(html);
+            if (doiInHtml) {
+                const doiData = await DoiAPI.fetchFromCrossref(doiInHtml);
+                if (doiData) {
+                    console.log('[Scraper] Found DOI in HTML:', doiInHtml);
+                    return {
+                        ...source,
+                        id: index + 1,
+                        title: doiData.title,
+                        content: doiData.abstract || this._extractContent(html) || source.snippet || '',
+                        doi: doiData.doi,
+                        meta: {
+                            author: this._formatAuthors(doiData.authors),
+                            authors: doiData.authors,
+                            year: doiData.year,
+                            published: doiData.year,
+                            siteName: doiData.journal,
+                            isDOI: true
+                        }
+                    };
+                }
+            }
+            
+            // No DOI found - use regular HTML scraping
             const meta = this._extractMeta(html, source.link);
             const content = this._extractContent(html);
             
@@ -88,6 +142,30 @@ export const ScraperAPI = {
             clearTimeout(timeout);
             throw e;
         }
+    },
+
+    _extractDoiFromHtml(html) {
+        const patterns = [
+            /<meta[^>]*name=["']citation_doi["'][^>]*content=["']([^"']+)["']/i,
+            /<meta[^>]*content=["']([^"']+)["'][^>]*name=["']citation_doi["']/i,
+            /<meta[^>]*name=["']dc\.identifier["'][^>]*content=["'](10\.[^"']+)["']/i,
+            /doi\.org\/(10\.\d{4,}\/[^\s"'<>\]]+)/i,
+            /"doi"\s*:\s*"(10\.[^"]+)"/i,
+            /DOI:\s*(10\.\d{4,}\/[^\s<]+)/i
+        ];
+        
+        for (const pattern of patterns) {
+            const match = html.match(pattern);
+            if (match) {
+                let doi = match[1]
+                    .replace(/^https?:\/\/doi\.org\//i, '')
+                    .replace(/[.,;)}\]]+$/, '');
+                if (doi.startsWith('10.')) {
+                    return doi;
+                }
+            }
+        }
+        return null;
     },
 
     _extractMeta(html, url) {
