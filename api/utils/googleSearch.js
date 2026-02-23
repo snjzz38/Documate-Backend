@@ -10,160 +10,139 @@ const INSTANCES = [
     'https://priv.au'
 ];
 
-// Domains that should never appear in academic citations
 const BANNED_DOMAINS = [
     'reddit', 'quora', 'stackoverflow', 'stackexchange',
     'youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest',
     'amazon', 'ebay', 'etsy', 'alibaba'
 ];
 
-// File extensions that are never citable sources
-const BANNED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.mp3', '.pdf.jpg'];
+const BANNED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.mp3'];
 
-// Domains that get a quality boost (more likely to be credible)
 const PREFERRED_DOMAINS = [
-    'edu', 'gov', 'org', 'pubmed', 'ncbi.nlm.nih.gov', 'jstor', 
-    'scholar.google', 'arxiv', 'nature.com', 'science.org', 
-    'springer', 'wiley', 'tandfonline', 'sagepub', 'oup.com',
-    'cambridge.org', 'pnas.org', 'cell.com', 'bmj.com', 'thelancet.com'
+    'edu', 'gov', 'pubmed', 'ncbi.nlm.nih.gov', 'jstor', 'nature.com',
+    'science.org', 'springer', 'wiley', 'tandfonline', 'sagepub', 'oup.com',
+    'cambridge.org', 'pnas.org', 'cell.com', 'bmj.com', 'thelancet.com', 'arxiv.org'
 ];
 
 export const GoogleSearchAPI = {
 
-    /**
-     * Main entry point. Extracts specific claims, searches for each,
-     * then returns the best deduplicated results.
-     */
     async search(query, apiKey, cx, groqKey = null) {
-        const queries = groqKey
-            ? await this._extractClaimQueries(query, groqKey)
-            : [this._buildFallbackQuery(query)];
+        let queries;
 
-        console.log('[Search] Claim queries:', queries);
-
-        const allResults = [];
-
-        for (const q of queries) {
-            console.log('[Search] Searching for:', q);
-            const results = await this._searchWithFallback(q);
-            allResults.push(...results);
+        if (groqKey) {
+            queries = await this._extractClaimQueries(query, groqKey);
+        } else {
+            queries = [this._buildFallbackQuery(query)];
         }
 
+        console.log('[Search] Running', queries.length, 'queries:', queries);
+
+        // Run all queries in parallel
+        const allResultArrays = await Promise.all(
+            queries.map(q => this._searchWithFallback(q))
+        );
+
+        const allResults = allResultArrays.flat();
+        console.log('[Search] Total raw results:', allResults.length);
+
         const filtered = this._filterAndScore(allResults);
-        console.log('[Search] Final results:', filtered.length);
+        console.log('[Search] Final results after filtering:', filtered.length);
         return filtered;
     },
 
-    /**
-     * NEW: Extract 2-4 specific, searchable claims from the text.
-     * Each claim becomes its own targeted search query.
-     */
     async _extractClaimQueries(text, groqKey) {
-        try {
-            const prompt = `You are helping find academic sources for a student essay. 
+        const prompt = `You are helping find academic sources for a student essay.
 
 ESSAY TEXT:
-"${text.substring(0, 1200)}"
+"${text.substring(0, 1500)}"
 
-TASK: Identify the 2-4 most specific, verifiable CLAIMS or FACTS in this text that need citations. For each claim, write a precise search query (4-8 words) that would find the original source or supporting academic evidence.
+TASK: Return a JSON array of 3-5 search queries. Each query should target a SPECIFIC, VERIFIABLE claim, fact, named study, named researcher, or named theory from the text.
 
-RULES:
-- Focus on SPECIFIC claims: named researchers, studies, statistics, events, named theories
-- If a researcher or study is named, include their name in the query
-- If a specific event is described (e.g. "Pompeii DNA analysis"), search for THAT event
-- Prefer queries that would find peer-reviewed sources, .edu, .gov, or major publications
-- Do NOT write generic queries like "history research study"
+STRICT RULES:
+- If a researcher is named (e.g. "Peter Turchin"), include their name
+- If a specific study or event is described (e.g. "Pompeii DNA victims"), search for THAT
+- If a named theory or database is mentioned (e.g. "Seshat database", "cliodynamics"), include it
+- Every query must be 4-8 words
+- Do NOT write generic queries like "history research study" or "scientific method"
+- Do NOT repeat the same topic twice
 
-EXAMPLES OF GOOD QUERIES:
-- "Peter Turchin cliodynamics secular cycles Seshat"
-- "Pompeii victims DNA analysis misidentification 2024"
-- "smartphone adolescent mental health longitudinal study"
-- "climate change sea level rise Arctic ice 2023"
+Return ONLY a raw JSON array, no explanation, no markdown:
+["query one here", "query two here", "query three here"]`;
 
-OUTPUT FORMAT - return ONLY a JSON array of query strings, nothing else:
-["query one", "query two", "query three"]`;
-
+        try {
             const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-            
-            // Parse JSON array from response
+            console.log('[Search] Groq raw response:', response);
+
             const jsonMatch = response.match(/\[[\s\S]*?\]/);
-            if (!jsonMatch) throw new Error('No JSON array found');
-            
+            if (!jsonMatch) throw new Error('No JSON array in response');
+
             const queries = JSON.parse(jsonMatch[0]);
-            
-            if (!Array.isArray(queries) || queries.length === 0) throw new Error('Empty query array');
-            
-            // Validate and clean each query
-            return queries
-                .filter(q => typeof q === 'string' && q.split(/\s+/).length >= 3)
-                .map(q => q.trim().substring(0, 120))
-                .slice(0, 4);
+
+            if (!Array.isArray(queries) || queries.length === 0) throw new Error('Empty array');
+
+            const cleaned = queries
+                .filter(q => typeof q === 'string' && q.trim().split(/\s+/).length >= 3)
+                .map(q => q.trim().substring(0, 120));
+
+            if (cleaned.length === 0) throw new Error('No valid queries after cleaning');
+
+            console.log('[Search] Extracted queries:', cleaned);
+            return cleaned;
 
         } catch (e) {
-            console.error('[Search] Claim extraction failed:', e.message);
+            console.error('[Search] _extractClaimQueries failed:', e.message);
+            // Fallback: one generic query
             return [this._buildFallbackQuery(text)];
         }
     },
 
-    /**
-     * Try SearXNG instances until one returns results
-     */
     async _searchWithFallback(query) {
         const shuffled = [...INSTANCES].sort(() => Math.random() - 0.5);
 
-        for (const instance of shuffled.slice(0, 3)) {
+        for (const instance of shuffled.slice(0, 4)) {
             try {
-                console.log('[Search] Trying:', instance);
+                console.log('[Search] Trying instance:', instance, 'for:', query);
                 const results = await this._fetch(instance, query);
                 if (results.length > 0) {
-                    console.log('[Search] Got', results.length, 'from', instance);
+                    console.log('[Search] Got', results.length, 'results from', instance);
                     return results;
                 }
             } catch (e) {
-                console.error('[Search] Failed:', instance, e.message);
+                console.error('[Search] Instance failed:', instance, e.message);
             }
         }
 
+        console.warn('[Search] All instances failed for query:', query);
         return [];
     },
 
-    /**
-     * IMPROVED: Filter junk, score by quality, return best results
-     */
     _filterAndScore(results) {
         const seen = new Set();
 
         return results
             .filter(r => {
-                // Must have title and valid URL
                 if (!r.title || !r.link) return false;
 
-                // Block file extensions that are never citable
                 const lowerUrl = r.link.toLowerCase();
-                if (BANNED_EXTENSIONS.some(ext => lowerUrl.endsWith(ext))) return false;
+                if (BANNED_EXTENSIONS.some(ext => lowerUrl.includes(ext))) return false;
 
-                // Block banned social/commerce domains
                 try {
                     const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
                     if (BANNED_DOMAINS.some(b => domain.includes(b))) return false;
-
-                    // One result per domain
                     if (seen.has(domain)) return false;
                     seen.add(domain);
                     return true;
                 } catch { return false; }
             })
             .map(r => {
-                // Score by source quality
                 let score = 0;
                 try {
                     const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
                     if (PREFERRED_DOMAINS.some(p => domain.includes(p))) score += 3;
                     if (domain.endsWith('.edu')) score += 2;
                     if (domain.endsWith('.gov')) score += 2;
-                    // Penalize generic/low-quality patterns
                     if (domain.includes('blog')) score -= 1;
-                    if (r.title.length < 10) score -= 2; // Suspiciously short title
+                    if (r.title.length < 10) score -= 2;
                 } catch {}
                 return { ...r, _score: score };
             })
@@ -171,21 +150,16 @@ OUTPUT FORMAT - return ONLY a JSON array of query strings, nothing else:
             .slice(0, 15);
     },
 
-    /**
-     * Fallback when no AI key: extract named entities and specific terms
-     */
     _buildFallbackQuery(text) {
-        // Prefer capitalized words (likely proper nouns/named things)
         const namedThings = text.match(/\b[A-Z][a-z]{3,}\b/g) || [];
         const uniqueNamed = [...new Set(namedThings)]
-            .filter(w => !['The', 'This', 'That', 'These', 'Those', 'However', 'Furthermore', 'In'].includes(w))
+            .filter(w => !['The','This','That','These','Those','However','Furthermore','In','By','It'].includes(w))
             .slice(0, 4);
 
         if (uniqueNamed.length >= 2) {
             return uniqueNamed.join(' ') + ' research';
         }
 
-        // Last resort: long meaningful words
         const stopWords = new Set([
             'the','a','an','is','are','was','were','be','been','being','have','has','had',
             'do','does','did','will','would','could','should','may','might','must','can',
@@ -247,7 +221,6 @@ OUTPUT FORMAT - return ONLY a JSON array of query strings, nothing else:
             }
         }
 
-        // Fallback parsing
         if (results.length < 3) {
             const divRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
             while ((match = divRegex.exec(html)) !== null) {
