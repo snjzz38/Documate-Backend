@@ -26,29 +26,33 @@ const PREFERRED_DOMAINS = [
 
 export const GoogleSearchAPI = {
 
-    async search(query, apiKey, cx, groqKey = null) {
-        let queries;
+async search(query, apiKey, cx, groqKey = null) {
+    let queries;
 
-        if (groqKey) {
-            queries = await this._extractClaimQueries(query, groqKey);
-        } else {
-            queries = [this._buildFallbackQuery(query)];
-        }
+    if (groqKey) {
+        queries = await this._extractClaimQueries(query, groqKey);
+    } else {
+        queries = [this._buildFallbackQuery(query)];
+    }
 
-        console.log('[Search] Running', queries.length, 'queries:', queries);
+    console.log('[Search] Running', queries.length, 'queries:', queries);
 
-        // Run all queries in parallel
-        const allResultArrays = await Promise.all(
-            queries.map(q => this._searchWithFallback(q))
-        );
+    const allResultArrays = await Promise.all(
+        queries.map(q => this._searchWithFallback(q))
+    );
 
-        const allResults = allResultArrays.flat();
-        console.log('[Search] Total raw results:', allResults.length);
+    const allResults = allResultArrays.flat();
+    console.log('[Search] Total raw results:', allResults.length);
 
-        const filtered = this._filterAndScore(allResults);
-        console.log('[Search] Final results after filtering:', filtered.length);
-        return filtered;
-    },
+    const scored = this._filterAndScore(allResults);
+    console.log('[Search] After scoring:', scored.length);
+
+    // NEW: Groq relevance pass to remove off-topic sources
+    const relevant = await this._filterByRelevance(scored, query, groqKey);
+    console.log('[Search] After relevance filter:', relevant.length);
+
+    return relevant;
+},
 
     async _extractClaimQueries(text, groqKey) {
         const prompt = `You are helping find academic sources for a student essay.
@@ -174,6 +178,46 @@ Return ONLY a raw JSON array, no explanation, no markdown:
         return (meaningful.join(' ') || text.substring(0, 40)) + ' academic research';
     },
 
+    async _filterByRelevance(results, originalText, groqKey) {
+    if (!groqKey || results.length === 0) return results;
+
+    try {
+        const summaries = results.map((r, i) => 
+            `${i}: "${r.title}" - ${r.snippet || '(no snippet)'}`
+        ).join('\n');
+
+        const prompt = `You are filtering search results for relevance to a student essay.
+
+ESSAY TOPIC SUMMARY (first 600 chars):
+"${originalText.substring(0, 600)}"
+
+SEARCH RESULTS:
+${summaries}
+
+TASK: Return a JSON array of the index numbers of results that are ACTUALLY RELEVANT to the essay's specific claims and topics. Exclude anything that is off-topic even if it's from a credible source.
+
+Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
+
+        const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
+        const jsonMatch = response.match(/\[[\s\S]*?\]/);
+        if (!jsonMatch) throw new Error('No JSON array');
+
+        const indices = JSON.parse(jsonMatch[0]);
+        if (!Array.isArray(indices)) throw new Error('Not an array');
+
+        const filtered = indices
+            .filter(i => typeof i === 'number' && i >= 0 && i < results.length)
+            .map(i => results[i]);
+
+        // Safety: if Groq filtered everything out, return originals
+        return filtered.length > 0 ? filtered : results;
+
+    } catch (e) {
+        console.error('[Search] Relevance filter failed:', e.message);
+        return results;
+    }
+},
+    
     async _fetch(instance, query) {
         const url = `${instance}/search?q=${encodeURIComponent(query)}&categories=general,science&language=en`;
 
