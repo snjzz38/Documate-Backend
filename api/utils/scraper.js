@@ -10,31 +10,43 @@ export const ScraperAPI = {
         const results = await Promise.all(
             sources.slice(0, 10).map(async (source, index) => {
                 try {
-                    // STEP 1: Try DOI first (most reliable metadata)
-                    const doiData = await DoiAPI.resolve(source.link, source.snippet);
+                    const isDOIorg = source.link.includes('doi.org/');
                     
-                    if (doiData) {
-                        console.log('[Scraper] DOI found for:', source.link);
-                        return {
-                            ...source,
-                            id: index + 1,
-                            title: doiData.title,
-                            content: doiData.abstract || source.snippet || '',
-                            doi: doiData.doi,
-                            meta: {
-                                author: this._formatAuthors(doiData.authors),
-                                authors: doiData.authors,
-                                year: doiData.year,
-                                published: doiData.year,
-                                siteName: doiData.journal,
-                                isDOI: true
-                            }
-                        };
+                    // CASE 1: doi.org link - fetch metadata from Crossref
+                    if (isDOIorg) {
+                        const doiData = await DoiAPI.resolve(source.link, source.snippet);
+                        if (doiData) {
+                            console.log('[Scraper] DOI.org source:', source.link);
+                            return {
+                                ...source,
+                                id: index + 1,
+                                title: doiData.title,
+                                content: doiData.abstract || source.snippet || '',
+                                doi: doiData.doi,
+                                meta: {
+                                    author: this._formatAuthors(doiData.authors),
+                                    authors: doiData.authors,
+                                    year: doiData.year,
+                                    published: doiData.year,
+                                    siteName: doiData.journal,
+                                    isDOI: true
+                                }
+                            };
+                        }
                     }
                     
-                    // STEP 2: Fallback to HTML scraping
-                    console.log('[Scraper] No DOI, scraping HTML:', source.link);
-                    return await this._scrapeHTML(source, index);
+                    // CASE 2: Non-doi.org site - scrape HTML but check for DOI
+                    console.log('[Scraper] Scraping:', source.link);
+                    const scraped = await this._scrapeHTML(source, index);
+                    
+                    // If this non-doi.org site has a DOI, mark it for removal
+                    // (we prefer doi.org versions of academic papers)
+                    if (scraped.hasDOI) {
+                        console.log('[Scraper] Removing non-doi.org site with DOI:', source.link);
+                        return { ...scraped, _remove: true };
+                    }
+                    
+                    return scraped;
                     
                 } catch (e) {
                     console.error('[Scraper] Error:', source.link, e.message);
@@ -43,7 +55,8 @@ export const ScraperAPI = {
             })
         );
         
-        return results;
+        // Filter out non-doi.org sites that have DOIs
+        return results.filter(r => !r._remove);
     },
 
     _formatAuthors(authors) {
@@ -76,31 +89,9 @@ export const ScraperAPI = {
             
             const html = await res.text();
             
-            // Try to find DOI in HTML content (for sites like ScienceDirect)
-            const doiInHtml = this._extractDoiFromHtml(html);
-            if (doiInHtml) {
-                const doiData = await DoiAPI.fetchFromCrossref(doiInHtml);
-                if (doiData) {
-                    console.log('[Scraper] DOI found in HTML:', doiInHtml);
-                    return {
-                        ...source,
-                        id: index + 1,
-                        title: doiData.title,
-                        content: doiData.abstract || this._extractContent(html) || source.snippet || '',
-                        doi: doiData.doi,
-                        meta: {
-                            author: this._formatAuthors(doiData.authors),
-                            authors: doiData.authors,
-                            year: doiData.year,
-                            published: doiData.year,
-                            siteName: doiData.journal,
-                            isDOI: true
-                        }
-                    };
-                }
-            }
+            // Check if this page has a DOI (we'll filter it out later)
+            const hasDOI = this._checkForDOI(html, source.link);
             
-            // Fallback to regular HTML scraping
             const meta = this._extractMeta(html, source.link);
             const content = this._extractContent(html);
             
@@ -108,7 +99,8 @@ export const ScraperAPI = {
                 ...source,
                 id: index + 1,
                 content: content || source.snippet || '',
-                meta: meta
+                meta: meta,
+                hasDOI: hasDOI
             };
         } catch (e) {
             clearTimeout(timeout);
@@ -116,28 +108,21 @@ export const ScraperAPI = {
         }
     },
 
-    _extractDoiFromHtml(html) {
-        // Look for DOI in meta tags and common patterns
+    _checkForDOI(html, url) {
+        // Check if this page has a DOI embedded
         const patterns = [
-            /<meta[^>]*name=["'](?:citation_doi|dc\.identifier|DC\.Identifier)["'][^>]*content=["']([^"']+)["']/i,
-            /<meta[^>]*content=["']([^"']+)["'][^>]*name=["']citation_doi["']/i,
-            /doi\.org\/(10\.[^\s"'<>]+)/i,
-            /DOI[:\s]*(10\.\d{4,}\/[^\s"'<>]+)/i,
-            /"doi"[:\s]*"(10\.[^"]+)"/i
+            /<meta[^>]*name=["']citation_doi["'][^>]*content=["']([^"']+)["']/i,
+            /<meta[^>]*name=["']dc\.identifier["'][^>]*content=["']10\.[^"']+["']/i,
+            /doi\.org\/10\.\d{4,}/i,
+            /"doi"\s*:\s*"10\.\d{4,}/i
         ];
         
         for (const pattern of patterns) {
-            const match = html.match(pattern);
-            if (match) {
-                let doi = match[1]
-                    .replace(/^https?:\/\/doi\.org\//i, '')
-                    .replace(/[.,;)}\]]+$/, '');
-                if (doi.startsWith('10.')) {
-                    return doi;
-                }
+            if (pattern.test(html)) {
+                return true;
             }
         }
-        return null;
+        return false;
     },
 
     _extractMeta(html, url) {
