@@ -196,7 +196,7 @@ YOUR QUERY (just the search terms, nothing else):`;
             }
         }
         
-        return results.slice(0, 15);
+        return results.slice(0, 30);
     },
 
     _clean(html) {
@@ -227,6 +227,6 @@ YOUR QUERY (just the search terms, nothing else):`;
                 seen.add(domain);
                 return true;
             } catch { return false; }
-        }).slice(0, 10);
+        }).slice(0, 20);
     }
 };
