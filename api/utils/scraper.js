@@ -8,7 +8,7 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 export const ScraperAPI = {
     async scrape(sources) {
         const results = await Promise.all(
-            sources.slice(0, 10).map(async (source, index) => {
+            sources.slice(0, 20).map(async (source, index) => {
                 try {
                     // STEP 1: Check if URL contains doi.org
                     const isDOIorg = source.link.includes('doi.org/');
