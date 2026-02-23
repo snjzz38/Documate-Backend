@@ -62,6 +62,14 @@ export const ScraperAPI = {
     },
 
     async _scrapeHTML(source, index) {
+        // Skip PDF links - can't extract text from them
+        if (source.link.toLowerCase().endsWith('.pdf') || 
+            source.link.includes('/pdf/') ||
+            source.link.includes('pdfs.semanticscholar.org')) {
+            console.log('[Scraper] Skipping PDF:', source.link);
+            return this._fallback(source, index);
+        }
+        
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 6000);
         
@@ -77,7 +85,23 @@ export const ScraperAPI = {
             
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             
+            // Check content type - skip if PDF or binary
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('pdf') || contentType.includes('octet-stream')) {
+                console.log('[Scraper] Skipping binary content:', source.link);
+                return this._fallback(source, index);
+            }
+            
             const html = await res.text();
+            
+            // Check if content looks like binary/PDF data
+            if (html.startsWith('%PDF') || html.includes('\x00') || !/^[\x00-\x7F\s]*$/.test(html.substring(0, 500))) {
+                // Check if it's not just unicode - look for PDF signature or null bytes
+                if (html.startsWith('%PDF') || html.substring(0, 100).includes('\x00')) {
+                    console.log('[Scraper] Detected binary content:', source.link);
+                    return this._fallback(source, index);
+                }
+            }
             
             // Try to extract DOI from HTML and get metadata from Crossref
             const doiInHtml = this._extractDoiFromHtml(html);
