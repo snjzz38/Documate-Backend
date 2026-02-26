@@ -180,7 +180,6 @@ function processInsertions(text, insertions, sources, style, outputType) {
     const footnotes = [];
     let fnNum = 1;
 
-    // Tokenize
     const tokens = [];
     const re = /[a-z0-9]+/gi;
     let m;
@@ -188,17 +187,26 @@ function processInsertions(text, insertions, sources, style, outputType) {
         tokens.push({ word: m[0].toLowerCase(), end: m.index + m[0].length });
     }
 
-    // Find positions
     const valid = insertions.map(ins => {
         if (!ins.anchor || !ins.source_id) return null;
         const words = ins.anchor.toLowerCase().match(/[a-z0-9]+/g);
         if (!words || words.length < 2) return null;
-        
+
+        // Try exact match first
         for (let i = 0; i <= tokens.length - words.length; i++) {
             if (words.every((w, j) => tokens[i + j].word === w)) {
                 return { sourceId: ins.source_id, pos: tokens[i + words.length - 1].end };
             }
         }
+
+        // Fuzzy fallback: try matching just the first 2 words of the anchor
+        const shortWords = words.slice(0, 2);
+        for (let i = 0; i <= tokens.length - shortWords.length; i++) {
+            if (shortWords.every((w, j) => tokens[i + j].word === w)) {
+                return { sourceId: ins.source_id, pos: tokens[i + shortWords.length - 1].end };
+            }
+        }
+
         return null;
     }).filter(Boolean);
 
@@ -225,9 +233,8 @@ function processInsertions(text, insertions, sources, style, outputType) {
         }
     });
 
-    // Insert (reverse order to preserve positions)
     const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-    
+
     [...positions].reverse().forEach(pos => {
         const d = posData.get(pos);
         if (!d) return;
@@ -235,41 +242,21 @@ function processInsertions(text, insertions, sources, style, outputType) {
         result = result.slice(0, pos) + insert + result.slice(pos);
     });
 
-    // Footer
     let footer = '\n\n';
     if (outputType === 'footnotes') {
-        // FOOTNOTES: Keep in order of appearance (by footnote number)
         footer += '### Footnotes\n\n';
         footnotes.forEach(f => footer += `${f.num}. ${f.cit}\n\n`);
     } else {
-        // IN-TEXT / BIBLIOGRAPHY: Sort alphabetically by author
         footer += '### References\n\n';
         const usedSources = sources.filter(s => used.has(s.id));
-        
-        // Sort by author name alphabetically
-        usedSources.sort((a, b) => {
-            const authorA = getAuthorName(a).toLowerCase();
-            const authorB = getAuthorName(b).toLowerCase();
-            return authorA.localeCompare(authorB);
-        });
-        
-        usedSources.forEach(s => {
-            footer += formatBib(s, style) + '\n\n';
-        });
+        usedSources.sort((a, b) => getAuthorName(a).toLowerCase().localeCompare(getAuthorName(b).toLowerCase()));
+        usedSources.forEach(s => footer += formatBib(s, style) + '\n\n');
     }
 
-    // Further Reading also alphabetically
     const unused = sources.filter(s => !used.has(s.id));
     if (unused.length) {
         footer += '\n### Further Reading\n\n';
-        
-        // Sort unused sources alphabetically too
-        unused.sort((a, b) => {
-            const authorA = getAuthorName(a).toLowerCase();
-            const authorB = getAuthorName(b).toLowerCase();
-            return authorA.localeCompare(authorB);
-        });
-        
+        unused.sort((a, b) => getAuthorName(a).toLowerCase().localeCompare(getAuthorName(b).toLowerCase()));
         unused.forEach(s => footer += formatBib(s, style) + '\n\n');
     }
 
@@ -296,13 +283,16 @@ ${srcList}
 TEXT:
 "${text}"
 
-Return JSON only:
+Return JSON only — no explanation, no preamble, no markdown:
 {"insertions":[{"anchor":"3-6 exact words from text","source_id":1}]}
 
 Rules:
-- anchor = exact consecutive words from the text
+- anchor = exact consecutive words copied directly from the TEXT above, character for character
+- Do NOT paraphrase or alter the anchor words in any way
+- Do NOT pick anchor words that span a sentence boundary or include punctuation
 - Create 10+ insertions across all paragraphs
-- Distribute sources evenly`;
+- Distribute sources evenly
+- source_id must match a number from the SOURCES list above`;
 }
 
 // ==========================================================================
