@@ -5,9 +5,6 @@ import { GeminiAPI } from '../utils/geminiAPI.js';
 // RUBRIC PARSER - Extracts criteria from various rubric formats
 // ==========================================================================
 const RubricParser = {
-    /**
-     * Parse rubric text into structured criteria
-     */
     parse(rubricText) {
         if (!rubricText || rubricText.trim().length < 10) {
             return null;
@@ -16,9 +13,7 @@ const RubricParser = {
         const criteria = [];
         const lines = rubricText.split('\n').filter(l => l.trim());
 
-        // Try to detect rubric format
         for (const line of lines) {
-            // Format: "Criterion: X points" or "Criterion (X points)"
             const pointsMatch = line.match(/^(.+?)[\s:]+(\d+)\s*(?:points?|pts?|marks?)?/i);
             if (pointsMatch) {
                 criteria.push({
@@ -29,7 +24,6 @@ const RubricParser = {
                 continue;
             }
 
-            // Format: "- Criterion" or "• Criterion"
             const bulletMatch = line.match(/^[\-•\*]\s*(.+)/);
             if (bulletMatch) {
                 criteria.push({
@@ -40,7 +34,6 @@ const RubricParser = {
                 continue;
             }
 
-            // Format: "1. Criterion" or "A. Criterion"
             const numberedMatch = line.match(/^(?:\d+|[A-Za-z])[\.\)]\s*(.+)/);
             if (numberedMatch) {
                 criteria.push({
@@ -54,9 +47,6 @@ const RubricParser = {
         return criteria.length > 0 ? criteria : null;
     },
 
-    /**
-     * Format criteria for prompt
-     */
     formatForPrompt(criteria) {
         if (!criteria || criteria.length === 0) return null;
 
@@ -73,12 +63,9 @@ const RubricParser = {
 };
 
 // ==========================================================================
-// MATERIAL ANALYZER - Understands context files
+// MATERIAL ANALYZER
 // ==========================================================================
 const MaterialAnalyzer = {
-    /**
-     * Analyze what type of materials were provided
-     */
     analyze(instructions, rubric) {
         const analysis = {
             hasRubric: !!(rubric && rubric.trim().length > 10),
@@ -89,7 +76,6 @@ const MaterialAnalyzer = {
 
         const text = `${instructions || ''} ${rubric || ''}`.toLowerCase();
 
-        // Detect assignment type
         if (text.includes('essay') || text.includes('argument') || text.includes('thesis')) {
             analysis.assignmentType = 'essay';
             analysis.keyRequirements.push('clear thesis statement', 'supporting arguments', 'evidence', 'conclusion');
@@ -117,7 +103,6 @@ const MaterialAnalyzer = {
 function buildGradingPrompt(studentText, instructions, rubric, analysis, parsedCriteria) {
     const parts = [];
 
-    // System context
     parts.push(`ROLE: You are an experienced, fair, and constructive academic grader.
 Your goal is to help students IMPROVE. Be specific, actionable, and encouraging.
 
@@ -128,13 +113,11 @@ GRADING PHILOSOPHY:
 - Reference SPECIFIC parts of the student's work
 - If a rubric is provided, grade EACH criterion explicitly`);
 
-    // Assignment context
     if (analysis.assignmentType !== 'general') {
         parts.push(`\nASSIGNMENT TYPE: ${analysis.assignmentType.toUpperCase()}
 Key areas to evaluate: ${analysis.keyRequirements.join(', ')}`);
     }
 
-    // Instructions
     if (instructions && instructions.trim()) {
         parts.push(`\n═══════════════════════════════════════════════════════════════
 ASSIGNMENT INSTRUCTIONS (What the student was asked to do):
@@ -142,7 +125,6 @@ ASSIGNMENT INSTRUCTIONS (What the student was asked to do):
 ${instructions.trim()}`);
     }
 
-    // Rubric
     if (parsedCriteria) {
         parts.push(`\n═══════════════════════════════════════════════════════════════
 GRADING RUBRIC (You MUST grade each criterion):
@@ -155,13 +137,11 @@ GRADING CRITERIA:
 ${rubric.trim()}`);
     }
 
-    // Student work
     parts.push(`\n═══════════════════════════════════════════════════════════════
 STUDENT SUBMISSION:
 ═══════════════════════════════════════════════════════════════
 ${studentText}`);
 
-    // Output format
     let outputFormat = `\n═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT (Follow this structure exactly):
 ═══════════════════════════════════════════════════════════════
@@ -171,7 +151,6 @@ OUTPUT FORMAT (Follow this structure exactly):
 
 `;
 
-    // If rubric criteria exist, grade each one
     if (parsedCriteria && parsedCriteria.length > 0) {
         outputFormat += `## 📋 Rubric Breakdown\n`;
         parsedCriteria.forEach((c, i) => {
@@ -203,7 +182,6 @@ OUTPUT FORMAT (Follow this structure exactly):
 
     parts.push(outputFormat);
 
-    // Final instructions
     parts.push(`\n═══════════════════════════════════════════════════════════════
 CRITICAL GRADING RULES:
 ═══════════════════════════════════════════════════════════════
@@ -218,6 +196,34 @@ CRITICAL GRADING RULES:
 }
 
 // ==========================================================================
+// FOLLOW-UP PROMPT BUILDER
+// ==========================================================================
+function buildFollowupPrompt(question, context) {
+    return `SYSTEM: You are an expert academic grader having a follow-up conversation with a student about their graded work.
+
+CONTEXT:
+- You already graded their submission
+- Be helpful, specific, and encouraging
+- Reference the original feedback when relevant
+- Keep responses concise but thorough
+
+ORIGINAL STUDENT SUBMISSION:
+${context.studentText.substring(0, 5000)}
+
+${context.instructions ? `ASSIGNMENT INSTRUCTIONS:\n${context.instructions.substring(0, 1000)}\n` : ''}
+
+YOUR PREVIOUS FEEDBACK:
+${context.feedback.substring(0, 3000)}
+
+CONVERSATION HISTORY:
+${context.chatHistory.slice(-6).map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n')}
+
+STUDENT'S QUESTION: ${question}
+
+Respond to the student's question naturally and helpfully. Be specific and reference their work when applicable.`;
+}
+
+// ==========================================================================
 // MAIN HANDLER
 // ==========================================================================
 export default async function handler(req, res) {
@@ -227,24 +233,53 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { text, instructions, rubric, apiKey } = req.body;
+        const { 
+            text, 
+            instructions, 
+            rubric, 
+            apiKey,
+            // Follow-up specific fields
+            action,
+            question,
+            context 
+        } = req.body;
+        
         const GEMINI_KEY = apiKey || process.env.GEMINI_API_KEY;
 
+        // ==========================================================
+        // FOLLOW-UP ACTION
+        // ==========================================================
+        if (action === 'followup') {
+            if (!question || question.trim().length < 2) {
+                throw new Error("Please enter a question.");
+            }
+            if (!context || !context.feedback) {
+                throw new Error("Missing grading context. Please grade a document first.");
+            }
+
+            const prompt = buildFollowupPrompt(question.trim(), context);
+            const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
+
+            return res.status(200).json({
+                success: true,
+                result: response,
+                action: 'followup'
+            });
+        }
+
+        // ==========================================================
+        // GRADING ACTION (default)
+        // ==========================================================
         if (!text) throw new Error("No student text provided.");
         if (text.length < 20) throw new Error("Student submission too short (minimum 20 characters).");
 
-        // Safety limits
         const safeText = text.substring(0, 30000);
         const safeInstructions = (instructions || "").substring(0, 3000);
         const safeRubric = (rubric || "").substring(0, 3000);
 
-        // Analyze materials
         const analysis = MaterialAnalyzer.analyze(safeInstructions, safeRubric);
-        
-        // Parse rubric into criteria
         const parsedCriteria = RubricParser.parse(safeRubric);
 
-        // Build comprehensive prompt
         const prompt = buildGradingPrompt(
             safeText,
             safeInstructions,
@@ -253,12 +288,12 @@ export default async function handler(req, res) {
             parsedCriteria
         );
 
-        // Call Gemini
         const feedback = await GeminiAPI.chat(prompt, GEMINI_KEY);
 
         return res.status(200).json({ 
             success: true, 
             result: feedback,
+            action: 'grade',
             meta: {
                 assignmentType: analysis.assignmentType,
                 hasRubric: analysis.hasRubric,
