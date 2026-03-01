@@ -236,7 +236,8 @@ export default async function handler(req, res) {
         const { 
             text, 
             instructions, 
-            rubric, 
+            rubric,
+            files,  // NEW: Array of {name, type, content, isBase64}
             apiKey,
             // Follow-up specific fields
             action,
@@ -273,8 +274,24 @@ export default async function handler(req, res) {
         if (!text) throw new Error("No student text provided.");
         if (text.length < 20) throw new Error("Student submission too short (minimum 20 characters).");
 
+        // Process uploaded files into rubric/instruction content
+        let fileContent = '';
+        if (files && Array.isArray(files) && files.length > 0) {
+            fileContent = '\n\n═══════════════════════════════════════════════════════════════\nATTACHED FILES:\n═══════════════════════════════════════════════════════════════\n';
+            for (const file of files) {
+                fileContent += `\n--- ${file.name} ---\n`;
+                if (file.isBase64) {
+                    // For binary files like PDFs, just note they're attached
+                    fileContent += `[Binary file attached: ${file.type}]\n`;
+                } else {
+                    // Text content
+                    fileContent += `${file.content.substring(0, 10000)}\n`;
+                }
+            }
+        }
+
         const safeText = text.substring(0, 30000);
-        const safeInstructions = (instructions || "").substring(0, 3000);
+        const safeInstructions = ((instructions || "") + fileContent).substring(0, 5000);
         const safeRubric = (rubric || "").substring(0, 3000);
 
         const analysis = MaterialAnalyzer.analyze(safeInstructions, safeRubric);
@@ -297,7 +314,8 @@ export default async function handler(req, res) {
             meta: {
                 assignmentType: analysis.assignmentType,
                 hasRubric: analysis.hasRubric,
-                criteriaCount: parsedCriteria ? parsedCriteria.length : 0
+                criteriaCount: parsedCriteria ? parsedCriteria.length : 0,
+                filesProcessed: files ? files.length : 0
             }
         });
 
