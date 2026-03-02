@@ -251,7 +251,7 @@ export default async function handler(req, res) {
         // FOLLOW-UP ACTION
         // ==========================================================
         if (action === 'followup') {
-            if (!question || question.trim().length < 2) {
+            if (!question || question.trim().length < 1) {
                 throw new Error("Please enter a question.");
             }
             if (!context || !context.feedback) {
@@ -272,7 +272,7 @@ export default async function handler(req, res) {
         // GRADING ACTION (default)
         // ==========================================================
         if (!text) throw new Error("No student text provided.");
-        if (text.length < 20) throw new Error("Student submission too short (minimum 20 characters).");
+        if (text.length < 10) throw new Error("Student submission too short (minimum 10 characters).");
 
         // Process uploaded files into rubric/instruction content
         let fileContent = '';
