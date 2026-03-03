@@ -1,4 +1,6 @@
 // api/utils/googleSearch.js
+// Uses FREE public SearXNG instances - NO API KEY OR SERVER REQUIRED
+
 import { GroqAPI } from './groqAPI.js';
 
 const INSTANCES = [
@@ -10,220 +12,126 @@ const INSTANCES = [
     'https://priv.au'
 ];
 
-const BANNED_DOMAINS = [
-    'reddit', 'quora', 'stackoverflow', 'stackexchange',
-    'youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest',
-    'amazon', 'ebay', 'etsy', 'alibaba'
-];
-
-const BANNED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.mp3'];
-
-const PREFERRED_DOMAINS = [
-    'edu', 'gov', 'pubmed', 'ncbi.nlm.nih.gov', 'jstor', 'nature.com',
-    'science.org', 'springer', 'wiley', 'tandfonline', 'sagepub', 'oup.com',
-    'cambridge.org', 'pnas.org', 'cell.com', 'bmj.com', 'thelancet.com', 'arxiv.org'
-];
-
 export const GoogleSearchAPI = {
+    // Only ban the obvious non-academic sources
+    BANNED_DOMAINS: [
+        'reddit', 'quora', 'stackoverflow', 'stackexchange',
+        'youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest',
+        'amazon', 'ebay', 'etsy', 'alibaba'
+    ],
 
-async search(query, apiKey, cx, groqKey = null) {
-    let queries;
-
-    if (groqKey) {
-        queries = await this._extractClaimQueries(query, groqKey);
-    } else {
-        queries = [this._buildFallbackQuery(query)];
-    }
-
-    console.log('[Search] Running', queries.length, 'queries:', queries);
-
-    const allResultArrays = await Promise.all(
-        queries.map(q => this._searchWithFallback(q))
-    );
-
-    const allResults = allResultArrays.flat();
-    console.log('[Search] Total raw results:', allResults.length);
-
-    const scored = this._filterAndScore(allResults);
-    console.log('[Search] After scoring:', scored.length);
-
-    // NEW: Groq relevance pass to remove off-topic sources
-    const relevant = await this._filterByRelevance(scored, query, groqKey);
-    console.log('[Search] After relevance filter:', relevant.length);
-
-    return relevant;
-},
-
-    async _extractClaimQueries(text, groqKey) {
-        const prompt = `You are helping find academic sources for a student essay.
-
-ESSAY TEXT:
-"${text.substring(0, 1500)}"
-
-TASK: Return a JSON array of 3-5 search queries. Each query should target a SPECIFIC, VERIFIABLE claim, fact, named study, named researcher, or named theory from the text.
-
-STRICT RULES:
-- If a researcher is named (e.g. "Peter Turchin"), include their name
-- If a specific study or event is described (e.g. "Pompeii DNA victims"), search for THAT
-- If a named theory or database is mentioned (e.g. "Seshat database", "cliodynamics"), include it
-- Every query must be 4-8 words
-- Do NOT write generic queries like "history research study" or "scientific method"
-- Do NOT repeat the same topic twice
-
-Return ONLY a raw JSON array, no explanation, no markdown:
-["query one here", "query two here", "query three here"]`;
-
-        try {
-            const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-            console.log('[Search] Groq raw response:', response);
-
-            const jsonMatch = response.match(/\[[\s\S]*?\]/);
-            if (!jsonMatch) throw new Error('No JSON array in response');
-
-            const queries = JSON.parse(jsonMatch[0]);
-
-            if (!Array.isArray(queries) || queries.length === 0) throw new Error('Empty array');
-
-            const cleaned = queries
-                .filter(q => typeof q === 'string' && q.trim().split(/\s+/).length >= 3)
-                .map(q => q.trim().substring(0, 120));
-
-            if (cleaned.length === 0) throw new Error('No valid queries after cleaning');
-
-            console.log('[Search] Extracted queries:', cleaned);
-            return cleaned;
-
-        } catch (e) {
-            console.error('[Search] _extractClaimQueries failed:', e.message);
-            // Fallback: one generic query
-            return [this._buildFallbackQuery(text)];
-        }
-    },
-
-    async _searchWithFallback(query) {
+    async search(query, apiKey, cx, groqKey = null) {
+        // Build a proper academic search query
+        const searchQuery = groqKey 
+            ? await this._buildAcademicQuery(query, groqKey) 
+            : this._buildFallbackQuery(query);
+        
+        console.log('[Search] Query:', searchQuery);
+        
+        // Try instances until one works
         const shuffled = [...INSTANCES].sort(() => Math.random() - 0.5);
-
-        for (const instance of shuffled.slice(0, 4)) {
+        
+        for (const instance of shuffled.slice(0, 3)) {
             try {
-                console.log('[Search] Trying instance:', instance, 'for:', query);
-                const results = await this._fetch(instance, query);
+                console.log('[Search] Trying:', instance);
+                const results = await this._fetch(instance, searchQuery);
+                
                 if (results.length > 0) {
-                    console.log('[Search] Got', results.length, 'results from', instance);
-                    return results;
+                    console.log('[Search] Success:', results.length, 'results');
+                    return this._dedupe(results);
                 }
             } catch (e) {
-                console.error('[Search] Instance failed:', instance, e.message);
+                console.error('[Search] Failed:', instance, e.message);
             }
         }
-
-        console.warn('[Search] All instances failed for query:', query);
+        
+        console.error('[Search] All instances failed');
         return [];
     },
 
-    _filterAndScore(results) {
-        const seen = new Set();
+    /**
+     * Use AI to build MULTIPLE academic search queries for different topics
+     */
+    async _buildAcademicQuery(text, groqKey) {
+        try {
+            const prompt = `You are building search queries to find ACADEMIC sources for a student paper.
 
-        return results
-            .filter(r => {
-                if (!r.title || !r.link) return false;
+TEXT TO CITE:
+"${text.substring(0, 1200)}"
 
-                const lowerUrl = r.link.toLowerCase();
-                if (BANNED_EXTENSIONS.some(ext => lowerUrl.includes(ext))) return false;
+TASK: Identify ALL distinct topics/claims in this text and create a search query for EACH.
 
-                try {
-                    const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
-                    if (BANNED_DOMAINS.some(b => domain.includes(b))) return false;
-                    if (seen.has(domain)) return false;
-                    seen.add(domain);
-                    return true;
-                } catch { return false; }
-            })
-            .map(r => {
-                let score = 0;
-                try {
-                    const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
-                    if (PREFERRED_DOMAINS.some(p => domain.includes(p))) score += 3;
-                    if (domain.endsWith('.edu')) score += 2;
-                    if (domain.endsWith('.gov')) score += 2;
-                    if (domain.includes('blog')) score -= 1;
-                    if (r.title.length < 10) score -= 2;
-                } catch {}
-                return { ...r, _score: score };
-            })
-            .sort((a, b) => b._score - a._score)
-            .slice(0, 15);
-    },
+RULES:
+1. Create 2-4 separate queries (one per topic/claim)
+2. Each query should be 3-6 words
+3. Include academic keywords: research, study, effects, impact, analysis
+4. Separate queries with | character
 
-    _buildFallbackQuery(text) {
-        const namedThings = text.match(/\b[A-Z][a-z]{3,}\b/g) || [];
-        const uniqueNamed = [...new Set(namedThings)]
-            .filter(w => !['The','This','That','These','Those','However','Furthermore','In','By','It'].includes(w))
-            .slice(0, 4);
+EXAMPLE:
+Text: "The eruption of Pompeii killed thousands. Peter Turchin's cliodynamics predicts societal collapse."
+Output: Pompeii eruption archaeological research | Turchin cliodynamics societal collapse study
 
-        if (uniqueNamed.length >= 2) {
-            return uniqueNamed.join(' ') + ' research';
+YOUR QUERIES (separated by |):`;
+            
+            const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
+            
+            // Parse multiple queries
+            const queries = response
+                .replace(/["'\n]/g, ' ')
+                .replace(/^(queries?:|search:|output:)/gi, '')
+                .split('|')
+                .map(q => q.trim())
+                .filter(q => q.length > 5 && q.split(/\s+/).length >= 2)
+                .slice(0, 4);
+            
+            if (queries.length > 0) {
+                // Return joined with OR for broader search, or just first if single
+                return queries.length === 1 ? queries[0] : queries.join(' | ');
+            }
+            
+            return this._buildFallbackQuery(text);
+        } catch (e) {
+            console.error('[Search] Query building failed:', e.message);
+            return this._buildFallbackQuery(text);
         }
-
-        const stopWords = new Set([
-            'the','a','an','is','are','was','were','be','been','being','have','has','had',
-            'do','does','did','will','would','could','should','may','might','must','can',
-            'this','that','these','those','they','their','what','which','who','where',
-            'when','why','how','all','each','every','both','few','more','most','other',
-            'some','such','no','nor','not','only','own','same','so','than','too','very',
-            'just','also','now','people','things','many','much','often','even','well',
-            'make','made','take','get','put','use','used','using','instead','through'
-        ]);
-        const words = text.toLowerCase().match(/\b[a-z]{6,}\b/g) || [];
-        const meaningful = [...new Set(words)].filter(w => !stopWords.has(w)).slice(0, 4);
-        return (meaningful.join(' ') || text.substring(0, 40)) + ' academic research';
     },
 
-    async _filterByRelevance(results, originalText, groqKey) {
-    if (!groqKey || results.length === 0) return results;
+    /**
+     * Fallback: Extract topic + add "research study"
+     */
+    _buildFallbackQuery(text) {
+        // Words to ignore completely
+        const stopWords = new Set([
+            'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+            'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+            'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these',
+            'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'my', 'your',
+            'his', 'her', 'its', 'our', 'their', 'what', 'which', 'who', 'whom',
+            'where', 'when', 'why', 'how', 'all', 'each', 'every', 'both', 'few',
+            'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
+            'own', 'same', 'so', 'than', 'too', 'very', 'just', 'also', 'now',
+            'people', 'things', 'way', 'many', 'much', 'often', 'even', 'well',
+            'make', 'made', 'take', 'get', 'put', 'use', 'used', 'using'
+        ]);
+        
+        // Extract meaningful words (5+ chars, not in stop list)
+        const words = text.toLowerCase().match(/\b[a-z]{5,}\b/g) || [];
+        const meaningful = [...new Set(words)]
+            .filter(w => !stopWords.has(w))
+            .slice(0, 4);
+        
+        // Add "research" to make it academic
+        const query = meaningful.join(' ') + ' research study';
+        
+        return query || text.substring(0, 40) + ' research';
+    },
 
-    try {
-        const summaries = results.map((r, i) => 
-            `${i}: "${r.title}" - ${r.snippet || '(no snippet)'}`
-        ).join('\n');
-
-        const prompt = `You are filtering search results for relevance to a student essay.
-
-ESSAY TOPIC SUMMARY (first 600 chars):
-"${originalText.substring(0, 600)}"
-
-SEARCH RESULTS:
-${summaries}
-
-TASK: Return a JSON array of the index numbers of results that are ACTUALLY RELEVANT to the essay's specific claims and topics. Exclude anything that is off-topic even if it's from a credible source.
-
-Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
-
-        const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-        const jsonMatch = response.match(/\[[\s\S]*?\]/);
-        if (!jsonMatch) throw new Error('No JSON array');
-
-        const indices = JSON.parse(jsonMatch[0]);
-        if (!Array.isArray(indices)) throw new Error('Not an array');
-
-        const filtered = indices
-            .filter(i => typeof i === 'number' && i >= 0 && i < results.length)
-            .map(i => results[i]);
-
-        // Safety: if Groq filtered everything out, return originals
-        return filtered.length > 0 ? filtered : results;
-
-    } catch (e) {
-        console.error('[Search] Relevance filter failed:', e.message);
-        return results;
-    }
-},
-    
     async _fetch(instance, query) {
         const url = `${instance}/search?q=${encodeURIComponent(query)}&categories=general,science&language=en`;
-
+        
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
-
+        
         try {
             const res = await fetch(url, {
                 signal: controller.signal,
@@ -233,7 +141,9 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
                 }
             });
             clearTimeout(timeout);
+            
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            
             const html = await res.text();
             return this._parseResults(html);
         } catch (e) {
@@ -244,33 +154,38 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
 
     _parseResults(html) {
         const results = [];
-
+        
+        // Parse <article class="result"> blocks
         const articleRegex = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
         let match;
-
+        
         while ((match = articleRegex.exec(html)) !== null) {
             const block = match[1];
+            
             const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/);
-            const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/) ||
-                               block.match(/<a[^>]*>([\s\S]*?)<\/a>/);
+            const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/) || 
+                              block.match(/<a[^>]*>([\s\S]*?)<\/a>/);
             const snippetMatch = block.match(/<p[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/p>/);
-
+            
             if (urlMatch && titleMatch) {
                 const url = urlMatch[1];
                 const title = this._clean(titleMatch[1]);
                 const snippet = snippetMatch ? this._clean(snippetMatch[1]) : '';
+                
                 if (title && url && !url.includes('searx')) {
                     results.push({ title, link: url, snippet });
                 }
             }
         }
-
+        
+        // Fallback parsing
         if (results.length < 3) {
             const divRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
             while ((match = divRegex.exec(html)) !== null) {
                 const block = match[1];
                 const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/);
                 const titleMatch = block.match(/<h[34][^>]*>([\s\S]*?)<\/h[34]>/);
+                
                 if (urlMatch && titleMatch) {
                     const url = urlMatch[1];
                     const title = this._clean(titleMatch[1]);
@@ -280,15 +195,38 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
                 }
             }
         }
-
+        
         return results.slice(0, 30);
     },
 
     _clean(html) {
         return (html || '')
             .replace(/<[^>]+>/g, '')
-            .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-            .replace(/\s+/g, ' ').trim().substring(0, 300);
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 300);
+    },
+
+    _dedupe(items) {
+        const seen = new Set();
+        return items.filter(item => {
+            try {
+                const domain = new URL(item.link).hostname.replace('www.', '').toLowerCase();
+                
+                // Only ban the obvious non-academic sources
+                if (this.BANNED_DOMAINS.some(b => domain.includes(b))) return false;
+                
+                // One result per domain
+                if (seen.has(domain)) return false;
+                seen.add(domain);
+                return true;
+            } catch { return false; }
+        }).slice(0, 20);
     }
 };
