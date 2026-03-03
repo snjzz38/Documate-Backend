@@ -9,11 +9,13 @@ const INSTANCES = [
     'https://search.bus-hit.me',
     'https://searx.be',
     'https://search.ononoki.org',
-    'https://priv.au'
+    'https://priv.au',
+    'https://searx.work',
+    'https://search.mdosch.de',
+    'https://searx.ramondia.net'
 ];
 
 export const GoogleSearchAPI = {
-    // Only ban the obvious non-academic sources
     BANNED_DOMAINS: [
         'reddit', 'quora', 'stackoverflow', 'stackexchange',
         'youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest',
@@ -21,109 +23,98 @@ export const GoogleSearchAPI = {
     ],
 
     async search(query, apiKey, cx, groqKey = null) {
-        // Build a proper academic search query
-        const searchQuery = groqKey 
-            ? await this._buildAcademicQuery(query, groqKey) 
-            : this._buildFallbackQuery(query);
+        // Build multiple queries for different topics
+        const queries = groqKey 
+            ? await this._buildQueries(query, groqKey) 
+            : [this._buildFallbackQuery(query)];
         
-        console.log('[Search] Query:', searchQuery);
+        console.log('[Search] Queries:', queries);
         
-        // Try instances until one works
+        let allResults = [];
         const shuffled = [...INSTANCES].sort(() => Math.random() - 0.5);
         
-        for (const instance of shuffled.slice(0, 3)) {
-            try {
-                console.log('[Search] Trying:', instance);
-                const results = await this._fetch(instance, searchQuery);
-                
-                if (results.length > 0) {
-                    console.log('[Search] Success:', results.length, 'results');
-                    return this._dedupe(results);
+        // Search for each query separately
+        for (const q of queries) {
+            for (const instance of shuffled.slice(0, 4)) {
+                try {
+                    console.log('[Search] Trying:', instance, 'for:', q);
+                    const results = await this._fetch(instance, q);
+                    
+                    if (results.length > 0) {
+                        console.log('[Search] Got', results.length, 'results for:', q);
+                        allResults = allResults.concat(results);
+                        break;
+                    }
+                } catch (e) {
+                    console.error('[Search] Failed:', instance, e.message);
                 }
-            } catch (e) {
-                console.error('[Search] Failed:', instance, e.message);
             }
         }
         
-        console.error('[Search] All instances failed');
-        return [];
+        // If still no results, try a simpler query
+        if (allResults.length === 0) {
+            console.log('[Search] Trying fallback query...');
+            const fallback = this._buildFallbackQuery(query);
+            for (const instance of shuffled.slice(0, 4)) {
+                try {
+                    const results = await this._fetch(instance, fallback);
+                    if (results.length > 0) {
+                        allResults = results;
+                        break;
+                    }
+                } catch (e) {
+                    console.error('[Search] Fallback failed:', instance);
+                }
+            }
+        }
+        
+        if (allResults.length === 0) {
+            console.error('[Search] All queries failed');
+            return [];
+        }
+        
+        return this._dedupe(allResults);
     },
 
-    /**
-     * Use AI to build MULTIPLE academic search queries for different topics
-     */
-    async _buildAcademicQuery(text, groqKey) {
+    async _buildQueries(text, groqKey) {
         try {
-            const prompt = `You are building search queries to find ACADEMIC sources for a student paper.
+            const prompt = `Identify 2-3 main topics in this text. Create one search query per topic.
 
-TEXT TO CITE:
+TEXT:
 "${text.substring(0, 1200)}"
 
-TASK: Identify ALL distinct topics/claims in this text and create a search query for EACH.
-
-RULES:
-1. Create 2-4 separate queries (one per topic/claim)
-2. Each query should be 3-6 words
-3. Include academic keywords: research, study, effects, impact, analysis
-4. Separate queries with | character
-
-EXAMPLE:
-Text: "The eruption of Pompeii killed thousands. Peter Turchin's cliodynamics predicts societal collapse."
-Output: Pompeii eruption archaeological research | Turchin cliodynamics societal collapse study
-
-YOUR QUERIES (separated by |):`;
+Output format - one query per line (3-6 words each):
+topic one research study
+topic two academic analysis`;
             
             const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
             
-            // Parse multiple queries
             const queries = response
-                .replace(/["'\n]/g, ' ')
-                .replace(/^(queries?:|search:|output:)/gi, '')
-                .split('|')
-                .map(q => q.trim())
-                .filter(q => q.length > 5 && q.split(/\s+/).length >= 2)
-                .slice(0, 4);
+                .split('\n')
+                .map(q => q.replace(/^[\d\.\-\*\•]+\s*/, '').replace(/["']/g, '').trim())
+                .filter(q => q.length > 5 && q.split(/\s+/).length >= 2 && q.split(/\s+/).length <= 8)
+                .slice(0, 3);
             
-            if (queries.length > 0) {
-                // Return joined with OR for broader search, or just first if single
-                return queries.length === 1 ? queries[0] : queries.join(' | ');
-            }
-            
-            return this._buildFallbackQuery(text);
+            console.log('[Search] Parsed queries:', queries);
+            return queries.length > 0 ? queries : [this._buildFallbackQuery(text)];
         } catch (e) {
             console.error('[Search] Query building failed:', e.message);
-            return this._buildFallbackQuery(text);
+            return [this._buildFallbackQuery(text)];
         }
     },
 
-    /**
-     * Fallback: Extract topic + add "research study"
-     */
     _buildFallbackQuery(text) {
-        // Words to ignore completely
         const stopWords = new Set([
             'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
             'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
             'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these',
             'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'my', 'your',
-            'his', 'her', 'its', 'our', 'their', 'what', 'which', 'who', 'whom',
-            'where', 'when', 'why', 'how', 'all', 'each', 'every', 'both', 'few',
-            'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
-            'own', 'same', 'so', 'than', 'too', 'very', 'just', 'also', 'now',
-            'people', 'things', 'way', 'many', 'much', 'often', 'even', 'well',
-            'make', 'made', 'take', 'get', 'put', 'use', 'used', 'using'
+            'people', 'things', 'way', 'many', 'much', 'often', 'even', 'well'
         ]);
         
-        // Extract meaningful words (5+ chars, not in stop list)
         const words = text.toLowerCase().match(/\b[a-z]{5,}\b/g) || [];
-        const meaningful = [...new Set(words)]
-            .filter(w => !stopWords.has(w))
-            .slice(0, 4);
-        
-        // Add "research" to make it academic
-        const query = meaningful.join(' ') + ' research study';
-        
-        return query || text.substring(0, 40) + ' research';
+        const meaningful = [...new Set(words)].filter(w => !stopWords.has(w)).slice(0, 4);
+        return meaningful.join(' ') + ' research study';
     },
 
     async _fetch(instance, query) {
@@ -155,7 +146,6 @@ YOUR QUERIES (separated by |):`;
     _parseResults(html) {
         const results = [];
         
-        // Parse <article class="result"> blocks
         const articleRegex = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
         let match;
         
@@ -178,7 +168,6 @@ YOUR QUERIES (separated by |):`;
             }
         }
         
-        // Fallback parsing
         if (results.length < 3) {
             const divRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
             while ((match = divRegex.exec(html)) !== null) {
@@ -219,10 +208,7 @@ YOUR QUERIES (separated by |):`;
             try {
                 const domain = new URL(item.link).hostname.replace('www.', '').toLowerCase();
                 
-                // Only ban the obvious non-academic sources
                 if (this.BANNED_DOMAINS.some(b => domain.includes(b))) return false;
-                
-                // One result per domain
                 if (seen.has(domain)) return false;
                 seen.add(domain);
                 return true;
