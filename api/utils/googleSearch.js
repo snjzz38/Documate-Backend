@@ -1,4 +1,3 @@
-javascript
 // api/utils/googleSearch.js
 import { GroqAPI } from './groqAPI.js';
 
