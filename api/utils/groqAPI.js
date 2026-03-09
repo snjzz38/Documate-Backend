@@ -4,7 +4,6 @@
 const GROQ_MODELS = [
     "qwen/qwen3-32b",
     "llama-3.1-8b-instant",
-    "meta-llama/llama-4-maverick-17b-128e-instruct",
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-guard-4-12b",
     "meta-llama/llama-prompt-guard-2-22m",
