@@ -184,10 +184,6 @@ function buildBibliographyHTML(sources, style) {
     const s = String(style || 'chicago').toLowerCase();
     
     let title = 'References';
-    let fontFamily = 'Times New Roman, serif';
-    let fontSize = '12pt';
-    let lineHeight = '2'; // Double-spaced
-    
     if (s.includes('mla')) {
         title = 'Works Cited';
     } else if (s.includes('apa')) {
@@ -196,25 +192,16 @@ function buildBibliographyHTML(sources, style) {
         title = 'Bibliography';
     }
     
-    const entries = sources.map(src => formatBibText(src, style)).join('</p><p class="bib-entry">');
+    // Build entries with inline styles for proper hanging indent
+    const entries = sources.map(src => {
+        const text = formatBibText(src, style);
+        return `<p style="text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2;">${text}</p>`;
+    }).join('');
     
-    return `<div class="bibliography" style="font-family: ${fontFamily}; font-size: ${fontSize};">
-<p class="bib-title" style="text-align: center; font-weight: bold; margin-bottom: 12px;">${title}</p>
-<div class="bib-entries" style="line-height: ${lineHeight};">
-<p class="bib-entry">${entries}</p>
-</div>
-</div>
-
-<style>
-.bibliography { max-width: 100%; }
-.bib-entry { 
-    text-indent: -0.5in; 
-    padding-left: 0.5in; 
-    margin-bottom: 0;
-    margin-top: 0;
-}
-.bib-entry a { color: #1a73e8; word-break: break-all; }
-</style>`;
+    return `<div class="bibliography" style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; background: #fff; color: #000;">
+<p style="text-align: center; margin-bottom: 24px; font-weight: normal;">${title}</p>
+${entries}
+</div>`;
 }
 
 // ==========================================================================
@@ -284,17 +271,18 @@ function processInsertions(text, insertions, sources, style, outputType) {
     // Footer with proper HTML formatting
     let footer = '\n\n';
     const s = String(style || 'chicago').toLowerCase();
+    const bibStyle = "font-family: 'Times New Roman', Times, serif; font-size: 12pt; background: #fff; color: #000;";
+    const entryStyle = "text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2;";
     
     if (outputType === 'footnotes') {
         // FOOTNOTES: Keep in order of appearance
         let title = s.includes('mla') ? 'Notes' : s.includes('apa') ? 'Footnotes' : 'Notes';
-        footer += `<div class="bibliography" style="font-family: Times New Roman, serif; font-size: 12pt;">`;
-        footer += `<p class="bib-title" style="text-align: center; font-weight: bold; margin-bottom: 12px;">${title}</p>`;
-        footer += `<div class="bib-entries" style="line-height: 2;">`;
+        footer += `<div class="bibliography" style="${bibStyle}">`;
+        footer += `<p style="text-align: center; margin-bottom: 24px;">${title}</p>`;
         footnotes.forEach(f => {
-            footer += `<p class="footnote-entry" style="text-indent: -0.5in; padding-left: 0.5in; margin: 0;">${f.num}. ${f.cit}</p>`;
+            footer += `<p style="${entryStyle}">${f.num}. ${f.cit}</p>`;
         });
-        footer += `</div></div>`;
+        footer += `</div>`;
     } else {
         // IN-TEXT: Sort alphabetically by author
         let title = s.includes('mla') ? 'Works Cited' : s.includes('apa') ? 'References' : 'Bibliography';
@@ -306,13 +294,12 @@ function processInsertions(text, insertions, sources, style, outputType) {
             return authorA.localeCompare(authorB);
         });
         
-        footer += `<div class="bibliography" style="font-family: Times New Roman, serif; font-size: 12pt;">`;
-        footer += `<p class="bib-title" style="text-align: center; font-weight: bold; margin-bottom: 12px;">${title}</p>`;
-        footer += `<div class="bib-entries" style="line-height: 2;">`;
+        footer += `<div class="bibliography" style="${bibStyle}">`;
+        footer += `<p style="text-align: center; margin-bottom: 24px;">${title}</p>`;
         usedSources.forEach(src => {
-            footer += `<p class="bib-entry" style="text-indent: -0.5in; padding-left: 0.5in; margin: 0;">${formatBibText(src, style)}</p>`;
+            footer += `<p style="${entryStyle}">${formatBibText(src, style)}</p>`;
         });
-        footer += `</div></div>`;
+        footer += `</div>`;
     }
 
     // Further Reading
@@ -324,13 +311,12 @@ function processInsertions(text, insertions, sources, style, outputType) {
             return authorA.localeCompare(authorB);
         });
         
-        footer += `<div class="bibliography" style="font-family: Times New Roman, serif; font-size: 12pt; margin-top: 20px;">`;
-        footer += `<p class="bib-title" style="text-align: center; font-weight: bold; margin-bottom: 12px;">Further Reading</p>`;
-        footer += `<div class="bib-entries" style="line-height: 2;">`;
+        footer += `<div class="bibliography" style="${bibStyle} margin-top: 24px;">`;
+        footer += `<p style="text-align: center; margin-bottom: 24px;">Further Reading</p>`;
         unused.forEach(src => {
-            footer += `<p class="bib-entry" style="text-indent: -0.5in; padding-left: 0.5in; margin: 0;">${formatBibText(src, style)}</p>`;
+            footer += `<p style="${entryStyle}">${formatBibText(src, style)}</p>`;
         });
-        footer += `</div></div>`;
+        footer += `</div>`;
     }
 
     footer += `<p style="margin-top: 16px; font-size: 10px; color: #666;"><i>${used.size}/${sources.length} sources cited</i></p>`;
