@@ -135,8 +135,8 @@ function formatInText(source, style) {
     return `(${author} ${year})`;
 }
 
-// Format single bibliography entry (returns plain text for processing)
-function formatBibText(source, style) {
+// Format bibliography entry
+function formatBib(source, style) {
     const s = String(style || 'chicago').toLowerCase();
     const year = getYear(source);
     const site = cleanSiteName(source.meta?.siteName || source.title);
@@ -162,46 +162,13 @@ function formatBibText(source, style) {
     const title = source.title || 'Untitled';
 
     if (s.includes('apa')) {
-        // APA 7: Author. (Year). Title. Site Name. URL
-        return `${author}. (${year}). ${title}. <i>${site}</i>. <a href="${url}" target="_blank">${url}</a>`;
+        return `${author}. (${year}). ${title}. *${site}*. ${url}`;
     }
     if (s.includes('mla')) {
-        // MLA 9: Author. "Title." Site Name, Year, URL.
-        return `${author}. "${title}." <i>${site}</i>, ${year}, <a href="${url}" target="_blank">${url}</a>.`;
+        return `${author}. "${title}." *${site}*, ${year}, ${url}.`;
     }
-    // Chicago: Author. "Title." Site Name. Year. URL (Accessed Date)
-    return `${author}. "${title}." <i>${site}</i>. ${year}. <a href="${url}" target="_blank">${url}</a> (Accessed ${today}).`;
-}
-
-// Format bibliography entry with hanging indent
-function formatBib(source, style) {
-    const text = formatBibText(source, style);
-    return `<p class="bib-entry">${text}</p>`;
-}
-
-// Build complete formatted bibliography HTML
-function buildBibliographyHTML(sources, style) {
-    const s = String(style || 'chicago').toLowerCase();
-    
-    let title = 'References';
-    if (s.includes('mla')) {
-        title = 'Works Cited';
-    } else if (s.includes('apa')) {
-        title = 'References';
-    } else {
-        title = 'Bibliography';
-    }
-    
-    // Build entries with inline styles for proper hanging indent
-    const entries = sources.map(src => {
-        const text = formatBibText(src, style);
-        return `<p style="text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2;">${text}</p>`;
-    }).join('');
-    
-    return `<div class="bibliography" style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; background: #fff; color: #000;">
-<p style="text-align: center; margin-bottom: 24px; font-weight: normal;">${title}</p>
-${entries}
-</div>`;
+    // Chicago
+    return `${author}. "${title}." *${site}*. ${year}. ${url} (Accessed ${today})`;
 }
 
 // ==========================================================================
@@ -251,7 +218,7 @@ function processInsertions(text, insertions, sources, style, outputType) {
         used.add(src.id);
 
         if (outputType === 'footnotes') {
-            footnotes.push({ num: fnNum, cit: formatBibText(src, style) });
+            footnotes.push({ num: fnNum, cit: formatBib(src, style) });
             posData.set(pos, { type: 'fn', num: fnNum++ });
         } else {
             posData.set(pos, { type: 'it', cit: formatInText(src, style) });
@@ -268,58 +235,45 @@ function processInsertions(text, insertions, sources, style, outputType) {
         result = result.slice(0, pos) + insert + result.slice(pos);
     });
 
-    // Footer with proper HTML formatting
+    // Footer
     let footer = '\n\n';
-    const s = String(style || 'chicago').toLowerCase();
-    const bibStyle = "font-family: 'Times New Roman', Times, serif; font-size: 12pt; background: #fff; color: #000;";
-    const entryStyle = "text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2;";
-    
     if (outputType === 'footnotes') {
-        // FOOTNOTES: Keep in order of appearance
-        let title = s.includes('mla') ? 'Notes' : s.includes('apa') ? 'Footnotes' : 'Notes';
-        footer += `<div class="bibliography" style="${bibStyle}">`;
-        footer += `<p style="text-align: center; margin-bottom: 24px;">${title}</p>`;
-        footnotes.forEach(f => {
-            footer += `<p style="${entryStyle}">${f.num}. ${f.cit}</p>`;
-        });
-        footer += `</div>`;
+        // FOOTNOTES: Keep in order of appearance (by footnote number)
+        footer += '### Footnotes\n\n';
+        footnotes.forEach(f => footer += `${f.num}. ${f.cit}\n\n`);
     } else {
-        // IN-TEXT: Sort alphabetically by author
-        let title = s.includes('mla') ? 'Works Cited' : s.includes('apa') ? 'References' : 'Bibliography';
-        const usedSources = sources.filter(src => used.has(src.id));
+        // IN-TEXT / BIBLIOGRAPHY: Sort alphabetically by author
+        footer += '### References\n\n';
+        const usedSources = sources.filter(s => used.has(s.id));
         
+        // Sort by author name alphabetically
         usedSources.sort((a, b) => {
             const authorA = getAuthorName(a).toLowerCase();
             const authorB = getAuthorName(b).toLowerCase();
             return authorA.localeCompare(authorB);
         });
         
-        footer += `<div class="bibliography" style="${bibStyle}">`;
-        footer += `<p style="text-align: center; margin-bottom: 24px;">${title}</p>`;
-        usedSources.forEach(src => {
-            footer += `<p style="${entryStyle}">${formatBibText(src, style)}</p>`;
+        usedSources.forEach(s => {
+            footer += formatBib(s, style) + '\n\n';
         });
-        footer += `</div>`;
     }
 
-    // Further Reading
-    const unused = sources.filter(src => !used.has(src.id));
+    // Further Reading also alphabetically
+    const unused = sources.filter(s => !used.has(s.id));
     if (unused.length) {
+        footer += '\n### Further Reading\n\n';
+        
+        // Sort unused sources alphabetically too
         unused.sort((a, b) => {
             const authorA = getAuthorName(a).toLowerCase();
             const authorB = getAuthorName(b).toLowerCase();
             return authorA.localeCompare(authorB);
         });
         
-        footer += `<div class="bibliography" style="${bibStyle} margin-top: 24px;">`;
-        footer += `<p style="text-align: center; margin-bottom: 24px;">Further Reading</p>`;
-        unused.forEach(src => {
-            footer += `<p style="${entryStyle}">${formatBibText(src, style)}</p>`;
-        });
-        footer += `</div>`;
+        unused.forEach(s => footer += formatBib(s, style) + '\n\n');
     }
 
-    footer += `<p style="margin-top: 16px; font-size: 10px; color: #666;"><i>${used.size}/${sources.length} sources cited</i></p>`;
+    footer += `\n---\n*${used.size}/${sources.length} sources cited*`;
 
     return result + footer;
 }
@@ -428,16 +382,8 @@ FORMAT:
                 seen.add(key);
                 return true;
             });
-            
-            // Sort alphabetically by author
-            uniqueSources.sort((a, b) => {
-                const authorA = getAuthorName(a).toLowerCase();
-                const authorB = getAuthorName(b).toLowerCase();
-                return authorA.localeCompare(authorB);
-            });
-            
-            const html = buildBibliographyHTML(uniqueSources, style);
-            return res.status(200).json({ success: true, sources: uniqueSources, text: html });
+            const bibs = uniqueSources.map(s => formatBib(s, style)).join('\n\n');
+            return res.status(200).json({ success: true, sources: uniqueSources, text: bibs });
         }
 
         // CITATION MODE
