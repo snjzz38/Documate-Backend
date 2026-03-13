@@ -3,7 +3,7 @@
 
 // Replace YOUR_WORKER_NAME with your Cloudflare worker subdomain
 // Example: if your worker URL is hackclub-proxy.johndoe.workers.dev, use that
-const WORKER_URL = "https://hackclub-proxy.YOUR_WORKER_NAME.workers.dev";
+const WORKER_URL = "https://hackclub-proxy.documate-ai-document-assistant.workers.dev";
 
 export const HackClubAPI = {
     /**
