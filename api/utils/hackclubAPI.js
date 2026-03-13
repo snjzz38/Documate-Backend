@@ -1,17 +1,23 @@
 // api/utils/hackclubAPI.js
-// HackClub API wrapper for agent mode
+// HackClub API wrapper - uses Cloudflare Worker proxy
+
+// Replace YOUR_WORKER_NAME with your Cloudflare worker subdomain
+// Example: if your worker URL is hackclub-proxy.johndoe.workers.dev, use that
+const WORKER_URL = "https://hackclub-proxy.YOUR_WORKER_NAME.workers.dev";
 
 export const HackClubAPI = {
-    async chat(messages, apiKey, systemPrompt = null) {
-        const HACKCLUB_KEY = apiKey || process.env.HACKCLUB_API_KEY;
-        
-        if (!HACKCLUB_KEY) {
-            throw new Error("HackClub API key not configured");
-        }
-
+    /**
+     * Send a chat request to HackClub AI
+     * @param {string|Array} messages - Message string or array of {role, content}
+     * @param {string} apiKey - Optional API key (uses worker's key if not provided)
+     * @param {string} systemPrompt - Optional system prompt
+     * @param {string} model - Model to use (default: qwen/qwen3-32b)
+     */
+    async chat(messages, apiKey = null, systemPrompt = null, model = "qwen/qwen3-32b") {
         const payload = {
-            model: "gpt-4o",
-            messages: []
+            model,
+            messages: [],
+            stream: false
         };
 
         // Add system prompt if provided
@@ -27,43 +33,38 @@ export const HackClubAPI = {
         }
 
         try {
-            const response = await fetch("https://ai.hackclub.com/chat/completions", {
+            const response = await fetch(WORKER_URL, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Bearer ${HACKCLUB_KEY}`
                 },
                 body: JSON.stringify(payload)
             });
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HackClub API error: ${response.status} - ${errorText}`);
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || `API error: ${response.status}`);
             }
 
-            const data = await response.json();
-            
-            if (data.choices && data.choices[0] && data.choices[0].message) {
-                return data.choices[0].message.content;
-            }
-            
-            throw new Error("Invalid response format from HackClub API");
+            return data.content;
         } catch (error) {
             console.error("[HackClubAPI] Error:", error);
             throw error;
         }
     },
 
-    // Stream response (for longer outputs)
-    async stream(messages, apiKey, systemPrompt = null, onChunk) {
-        const HACKCLUB_KEY = apiKey || process.env.HACKCLUB_API_KEY;
-        
-        if (!HACKCLUB_KEY) {
-            throw new Error("HackClub API key not configured");
-        }
-
+    /**
+     * Stream a chat response
+     * @param {string|Array} messages - Message string or array
+     * @param {string} apiKey - Optional API key
+     * @param {string} systemPrompt - Optional system prompt
+     * @param {function} onChunk - Callback for each chunk
+     * @param {string} model - Model to use
+     */
+    async stream(messages, apiKey = null, systemPrompt = null, onChunk = null, model = "qwen/qwen3-32b") {
         const payload = {
-            model: "gpt-4o",
+            model,
             messages: [],
             stream: true
         };
@@ -78,17 +79,17 @@ export const HackClubAPI = {
             payload.messages.push({ role: "user", content: messages });
         }
 
-        const response = await fetch("https://ai.hackclub.com/chat/completions", {
+        const response = await fetch(WORKER_URL, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${HACKCLUB_KEY}`
             },
             body: JSON.stringify(payload)
         });
 
         if (!response.ok) {
-            throw new Error(`HackClub API error: ${response.status}`);
+            const error = await response.json();
+            throw new Error(error.error || `API error: ${response.status}`);
         }
 
         const reader = response.body.getReader();
