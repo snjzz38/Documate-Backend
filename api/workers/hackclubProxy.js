@@ -1,6 +1,13 @@
-// workers/hackclub-proxy.js
+// hackclubProxy.js
 // Cloudflare Worker to proxy HackClub AI API requests
-// Deploy to Cloudflare Workers
+// 
+// DEPLOYMENT:
+// 1. Go to Cloudflare Dashboard → Workers & Pages → Create Application → Create Worker
+// 2. Name it something like "hackclub-proxy"
+// 3. Paste this code and deploy
+// 4. Go to Settings → Variables → Add Secret: HACKCLUB_API_KEY = your key
+// 5. Copy your worker URL (e.g., hackclub-proxy.johndoe.workers.dev)
+// 6. Update WORKER_URL in hackclubAPI.js with that URL
 
 export default {
     async fetch(request, env) {
