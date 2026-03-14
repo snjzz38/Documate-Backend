@@ -287,20 +287,34 @@ export default async function handler(req, res) {
                         break;
                     }
                     
+                    // Build source name mapping for better attribution
+                    const sourceNames = {};
+                    sources.slice(0, 5).forEach((s, i) => {
+                        // Prefer author, then clean site name, then title
+                        let name = s.author;
+                        if (!name || name.length < 3) {
+                            name = cleanSiteName(s.site);
+                        }
+                        // Make it more readable
+                        if (name === 'Pmc' || name === 'Ncbi') name = 'NIH Research';
+                        if (name === 'Arxiv') name = 'arXiv';
+                        sourceNames[i] = name;
+                    });
+                    
                     // Build prompt to extract quotes
-                    let prompt = `Extract 3-5 important, factual quotes from these sources. Each quote should be a complete sentence that makes a strong point.
+                    let prompt = `Extract 3-5 important, factual quotes from these sources.
 
-FORMAT YOUR RESPONSE EXACTLY LIKE THIS (one per line):
-SOURCE_NAME: "Exact quote from the source."
+OUTPUT FORMAT (exactly like this, one per line):
+SOURCE_NAME: "Exact quote from the text."
 
 SOURCES:\n`;
                     
-                    sources.slice(0, 5).forEach(s => {
-                        const authorOrSite = s.author || cleanSiteName(s.site);
-                        prompt += `\n--- ${authorOrSite} (${s.title}) ---\n${s.text?.substring(0, 1500) || ''}\n`;
+                    sources.slice(0, 5).forEach((s, i) => {
+                        const sourceName = sourceNames[i];
+                        prompt += `\n--- ${sourceName} ---\n${s.text?.substring(0, 1500) || ''}\n`;
                     });
                     
-                    prompt += `\nExtract 3-5 of the best quotes. Use the exact wording from the sources:`;
+                    prompt += `\nExtract 3-5 quotes. Use these exact source names: ${Object.values(sourceNames).join(', ')}`;
                     
                     const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     
@@ -352,31 +366,57 @@ SOURCES:\n`;
                         const citationStyle = options.citationStyle || 'mla9';
                         
                         prompt += `═══════════════════════════════════════════════════════════════
-REQUIRED QUOTES - INCORPORATE THESE INTO YOUR WRITING:
+QUOTES TO INCORPORATE INTO YOUR WRITING:
 ═══════════════════════════════════════════════════════════════\n`;
 
-                        // Show how to format based on citation type
-                        if (citationType === 'in-text') {
+                        // Different instructions based on citation type
+                        if (citationType === 'footnotes') {
+                            prompt += `FORMAT: Use superscript numbers after quotes. Write the number in parentheses like (1), (2), etc.
+Example: "This is a quote from the source."(1)
+
+DO NOT use square brackets like [1]. Use parentheses: (1), (2), (3)\n\n`;
+                        } else if (citationType === 'in-text') {
                             if (citationStyle.includes('apa')) {
-                                prompt += `Use APA in-text citations: According to Author (Year), "quote" or "quote" (Author, Year).\n\n`;
+                                prompt += `FORMAT: Use APA parenthetical citations.
+Example: "This is a quote" (Author Name, 2024).
+Example: According to Author Name (2024), "this is a quote."\n\n`;
                             } else if (citationStyle.includes('mla')) {
-                                prompt += `Use MLA in-text citations: According to Author, "quote" or "quote" (Author).\n\n`;
+                                prompt += `FORMAT: Use MLA parenthetical citations.
+Example: "This is a quote" (Author Name).
+Example: According to Author Name, "this is a quote."\n\n`;
                             } else {
-                                prompt += `Use Chicago in-text citations: According to Author, "quote" (Author Year).\n\n`;
+                                prompt += `FORMAT: Use Chicago parenthetical citations.
+Example: "This is a quote" (Author Name 2024).
+Example: According to Author Name, "this is a quote" (2024).\n\n`;
                             }
-                        } else if (citationType === 'footnotes') {
-                            prompt += `Use footnote markers after quotes: "quote."[1] - The footnotes will be added separately.\n\n`;
                         } else {
-                            prompt += `Use attribution phrases: According to [actual source name], "quote" or As [author name] states, "quote".\n\n`;
+                            // Bibliography - no in-text citations needed
+                            prompt += `FORMAT: Use attribution phrases only (NO parenthetical citations, NO numbers).
+Example: According to NASA, "this is a quote."
+Example: Research from the EPA states that "this is a quote."
+Example: As explained by the IPCC, "this is a quote."\n\n`;
                         }
 
-                        prompt += `QUOTES TO INCLUDE (use the ACTUAL source names shown, never write "[Source]"):\n`;
+                        prompt += `QUOTES (use the SOURCE NAME shown for attribution):\n`;
                         quotes.forEach((q, i) => {
-                            prompt += `${i + 1}. Source: "${q.source}" — Quote: "${q.quote}"\n`;
+                            if (citationType === 'footnotes') {
+                                prompt += `(${i + 1}) From ${q.source}: "${q.quote}"\n`;
+                            } else {
+                                prompt += `• From ${q.source}: "${q.quote}"\n`;
+                            }
                         });
-                        prompt += `\nInclude 2-3 quotes with proper attribution using the actual source names above.
-NEVER write "[Source]" literally - always use the real source name.
-═══════════════════════════════════════════════════════════════\n\n`;
+                        
+                        prompt += `\nRULES:
+- Include 2-3 quotes with proper attribution
+- Use the exact SOURCE NAME shown above (e.g., "According to NASA" not "According to [Source]")
+- NEVER write [Source], [1], [2], or any placeholder text
+- NEVER use square brackets for citation numbers`;
+                        
+                        if (citationType === 'footnotes') {
+                            prompt += `\n- Use (1), (2), (3) for footnote numbers, NOT [1], [2], [3]`;
+                        }
+                        
+                        prompt += `\n═══════════════════════════════════════════════════════════════\n\n`;
                     }
                     
                     prompt += 'Write the content now:';
