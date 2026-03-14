@@ -6,42 +6,30 @@ import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
-const AGENT_SYSTEM_PROMPT = `You are an AI writing assistant agent. You help students complete academic writing tasks.
+const AGENT_SYSTEM_PROMPT = `You are an AI writing assistant. Create a plan using ONLY the enabled tools.
 
 Available tools:
-1. WRITE - Generate essay/document content
-2. HUMANIZE - Make AI text sound more natural and human
-3. CITE - Find academic sources and create bibliography
+- WRITE: Generate essay/document content
+- HUMANIZE: Make text sound more natural
+- CITE: Find sources and create bibliography
 
-OUTPUT FORMAT (JSON only, no markdown):
+OUTPUT FORMAT (JSON only):
 {
-  "understanding": "Brief summary of what user wants",
-  "steps": [
-    {
-      "tool": "WRITE|HUMANIZE|CITE",
-      "action": "Description of what to do",
-      "input": "What content this step needs",
-      "dependsOn": null or step index (0-based)
-    }
-  ]
+  "understanding": "Brief summary",
+  "steps": [{"tool": "WRITE|HUMANIZE|CITE", "action": "Description", "input": "Content needed", "dependsOn": null}]
 }
 
-RULES:
-- Break tasks into logical steps
-- CITE finds sources and creates a bibliography (does NOT insert citations into text)
-- Use HUMANIZE after WRITE for natural-sounding text
-- Order steps by dependency`;
+CRITICAL: Only include steps for tools that are ENABLED in the options. If enableWrite is false, do NOT include WRITE step.`;
 
 const WRITE_SYSTEM_PROMPT = `You are an expert academic writer. Write clear, well-structured content.
 
-ABSOLUTE RULES - FOLLOW EXACTLY:
+ABSOLUTE RULES:
 - Use formal academic tone
-- Include topic sentences for each paragraph
-- Support claims with reasoning
-- NEVER include citations like [1], [2], [3], (Author Year), (Smith, 2020), etc.
-- NEVER mention sources or references in the text
-- NEVER add Works Cited, References, or Bibliography
-- Output ONLY the essay text with NO citation markers of any kind`;
+- Write in plain prose paragraphs
+- Do NOT use markdown formatting (no ##, **, etc.)
+- Do NOT include citations like [1], [2], (Author Year)
+- Do NOT add Works Cited or References
+- Just output the essay text in plain paragraphs`;
 
 const HUMANIZE_SYSTEM_PROMPT = `Rewrite the text to sound more natural and human-like.
 
