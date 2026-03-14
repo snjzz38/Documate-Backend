@@ -1,114 +1,51 @@
 // api/features/agent.js
-// Agent Mode - Research-first approach with proper quote and citation integration
+// Agent Mode - Simplified research-first approach
 // 
-// API CALLS PER RUN:
-// - RESEARCH: 1 Groq (query) + SearXNG + scraper calls
-// - QUOTES: 1 Gemini (extract quotes from research)
-// - WRITE: 1 Gemini
-// - HUMANIZE: 1 Gemini  
-// - CITE: 0 (uses citation.js formatting)
+// FLOW: RESEARCH → QUOTES (optional) → WRITE → HUMANIZE (optional) → CITE (optional)
+// API CALLS: Research (1 Groq + scraper), Quotes (1 Gemini), Write (1 Gemini), Humanize (1 Gemini)
 
 import { GeminiAPI } from '../utils/geminiAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
 // ==========================================================================
-// GEMINI VISION - For processing images
+// HELPERS
 // ==========================================================================
 async function geminiVision(prompt, files, apiKey) {
-    const models = ['gemini-2.0-flash', 'gemini-1.5-flash'];
-    
-    for (const model of models) {
+    for (const model of ['gemini-2.0-flash', 'gemini-1.5-flash']) {
         try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-            
             const parts = [{ text: prompt }];
             
             for (const file of files) {
                 if (file.type?.startsWith('image/')) {
-                    parts.push({
-                        inline_data: {
-                            mime_type: file.type,
-                            data: file.data
-                        }
-                    });
+                    parts.push({ inline_data: { mime_type: file.type, data: file.data } });
                 }
             }
             
-            const response = await fetch(url, {
+            const res = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ parts }],
-                    generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
-                })
+                body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.7, maxOutputTokens: 4096 } })
             });
             
-            const data = await response.json();
+            const data = await res.json();
             if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
                 return data.candidates[0].content.parts[0].text;
             }
-        } catch (e) {
-            console.log(`[Agent] Vision ${model} failed:`, e.message);
-        }
+        } catch (e) { console.log(`[Agent] Vision ${model} failed:`, e.message); }
     }
     throw new Error('Vision API failed');
 }
 
-// ==========================================================================
-// CITATION FORMATTING (reuses logic from citation.js)
-// ==========================================================================
 function cleanSiteName(site) {
     if (!site) return 'Unknown';
-    return site
-        .replace(/^(www\.|https?:\/\/)/i, '')
-        .replace(/\.(com|org|edu|gov|net|io|co).*$/i, '')
-        .split(/[\/\?#]/)[0]
-        .split('.')[0]
-        .replace(/[-_]/g, ' ')
-        .split(' ')
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-        .join(' ')
-        .substring(0, 30);
+    let name = site.replace(/^(www\.|https?:\/\/)/i, '').split(/[\/\?#\.]/)[0];
+    // Fix common junk names
+    const fixes = { pmc: 'NIH', ncbi: 'NIH', arxiv: 'arXiv', noaa: 'NOAA', nasa: 'NASA', epa: 'EPA', ipcc: 'IPCC' };
+    if (fixes[name.toLowerCase()]) return fixes[name.toLowerCase()];
+    return name.charAt(0).toUpperCase() + name.slice(1);
 }
-
-function formatBibEntry(source, style) {
-    const s = String(style || 'mla9').toLowerCase();
-    const author = source.author || cleanSiteName(source.site);
-    const title = source.title || 'Untitled';
-    const site = cleanSiteName(source.site);
-    const year = source.year || 'n.d.';
-    const url = source.url || '';
-    
-    if (s.includes('apa')) {
-        return `${author}. (${year}). ${title}. <i>${site}</i>. <a href="${url}" target="_blank" style="color:#1a73e8;">${url}</a>`;
-    }
-    if (s.includes('mla')) {
-        return `${author}. "${title}." <i>${site}</i>, ${year}, <a href="${url}" target="_blank" style="color:#1a73e8;">${url}</a>.`;
-    }
-    // Chicago
-    return `${author}. "${title}." <i>${site}</i>. ${year}. <a href="${url}" target="_blank" style="color:#1a73e8;">${url}</a>.`;
-}
-
-// ==========================================================================
-// PROMPTS
-// ==========================================================================
-const WRITE_PROMPT = `You are an expert academic writer. Write accurate, well-structured content based on the provided research.
-
-RULES:
-- Use formal academic tone with plain prose paragraphs
-- NO markdown formatting (no ##, **, etc.)
-- NO Works Cited or References section
-- Base your writing on the research provided`;
-
-const HUMANIZE_PROMPT = `Rewrite this text to sound more natural and human-like while keeping all quotes intact.
-
-RULES:
-- Vary sentence structure and length
-- Use natural transitions
-- Keep the same meaning and length
-- PRESERVE all quoted text and attributions exactly as written
-- Output ONLY the rewritten text`;
 
 // ==========================================================================
 // MAIN HANDLER
@@ -125,365 +62,185 @@ export default async function handler(req, res) {
         const GROQ_KEY = process.env.GROQ_API_KEY;
 
         // ==========================================================================
-        // ACTION: PLAN - Create execution plan
+        // PLAN
         // ==========================================================================
         if (action === 'plan') {
-            const steps = [];
+            const steps = [{ tool: 'RESEARCH', action: 'Search and gather factual information', dependsOn: null }];
             
-            // ALWAYS start with research
-            steps.push({
-                tool: 'RESEARCH',
-                action: 'Search and gather factual information',
-                input: task,
-                dependsOn: null
-            });
-            
-            // QUOTES step - extract quotes from research (if enabled)
             if (options.enableQuotes) {
-                steps.push({
-                    tool: 'QUOTES',
-                    action: 'Extract key quotes from sources',
-                    input: 'Uses research results',
-                    dependsOn: 0
-                });
+                steps.push({ tool: 'QUOTES', action: 'Extract key quotes from sources', dependsOn: 0 });
             }
-            
-            // WRITE uses research (and quotes if available)
             if (options.enableWrite !== false) {
-                steps.push({
-                    tool: 'WRITE',
-                    action: 'Generate content with research' + (options.enableQuotes ? ' and quotes' : ''),
-                    input: 'Uses research' + (options.enableQuotes ? ' and quotes' : ''),
-                    dependsOn: options.enableQuotes ? 1 : 0
-                });
+                steps.push({ tool: 'WRITE', action: 'Generate content' + (options.enableQuotes ? ' with quotes' : ''), dependsOn: steps.length - 1 });
             }
-            
-            // HUMANIZE if enabled
             if (options.enableHumanize) {
-                steps.push({
-                    tool: 'HUMANIZE',
-                    action: 'Make the text sound natural',
-                    input: 'Uses previous output',
-                    dependsOn: steps.length - 1
-                });
+                steps.push({ tool: 'HUMANIZE', action: 'Make text sound natural', dependsOn: steps.length - 1 });
             }
-            
-            // CITE formats sources (no extra API call)
             if (options.enableCite) {
-                const styleNames = { 'mla9': 'MLA 9th', 'apa7': 'APA 7th', 'chicago': 'Chicago' };
-                const typeNames = { 'bibliography': 'bibliography', 'in-text': 'in-text citations', 'footnotes': 'footnotes' };
-                const styleName = styleNames[options.citationStyle] || options.citationStyle || 'MLA 9th';
-                const typeName = typeNames[options.citationType] || options.citationType || 'bibliography';
-                
-                steps.push({
-                    tool: 'CITE',
-                    action: `Format ${styleName} ${typeName}`,
-                    input: 'Uses sources from research',
-                    dependsOn: 0
+                const styles = { mla9: 'MLA 9th', apa7: 'APA 7th', chicago: 'Chicago' };
+                const types = { bibliography: 'bibliography', 'in-text': 'in-text citations', footnotes: 'footnotes' };
+                steps.push({ 
+                    tool: 'CITE', 
+                    action: `Format ${styles[options.citationStyle] || 'MLA 9th'} ${types[options.citationType] || 'bibliography'}`,
+                    dependsOn: 0 
                 });
             }
 
-            const plan = {
-                understanding: `${task.substring(0, 150)}${task.length > 150 ? '...' : ''}`,
-                steps
-            };
-
-            return res.status(200).json({ success: true, plan });
+            return res.status(200).json({ 
+                success: true, 
+                plan: { understanding: task.substring(0, 150), steps } 
+            });
         }
 
         // ==========================================================================
-        // ACTION: EXECUTE_STEP
+        // EXECUTE STEP
         // ==========================================================================
         if (action === 'execute_step') {
             const { step, context = {}, options = {} } = req.body;
-            if (!step || !step.tool) throw new Error("Invalid step");
-
             let result = { success: true, output: '', type: 'text' };
-            const hasImages = options.files?.some(f => f.type?.startsWith('image/'));
 
             switch (step.tool.toUpperCase()) {
-                // ============================================================
-                // RESEARCH - Search web and scrape content
-                // ============================================================
                 case 'RESEARCH': {
-                    let searchQuery = context.task || step.input || '';
-                    let imageDescription = null;
+                    let query = context.task || '';
+                    let imageDesc = null;
                     
-                    // If image attached, describe it first
-                    if (hasImages && options.files) {
-                        const descPrompt = `Analyze this image. What is the main topic? What key concepts does it relate to? Provide a description for research purposes.`;
-                        imageDescription = await geminiVision(descPrompt, options.files, GEMINI_KEY);
-                        searchQuery = imageDescription.substring(0, 300);
+                    // Handle images
+                    if (options.files?.some(f => f.type?.startsWith('image/'))) {
+                        imageDesc = await geminiVision('Describe this image. What topic does it relate to?', options.files, GEMINI_KEY);
+                        query = imageDesc.substring(0, 300);
                     }
                     
-                    console.log('[Agent] Research query:', searchQuery.substring(0, 100));
-                    
-                    // Search - use simple query for short inputs
-                    let searchResults;
-                    if (searchQuery.split(/\s+/).length <= 10) {
-                        searchResults = await GoogleSearchAPI.search(searchQuery + ' facts research', null, null, null);
-                    } else {
-                        searchResults = await GoogleSearchAPI.search(searchQuery, null, null, GROQ_KEY);
+                    // Search
+                    let results = await GoogleSearchAPI.search(query + ' facts', null, null, null);
+                    if (!results?.length) {
+                        results = await GoogleSearchAPI.search(query.split(/\s+/).slice(0, 4).join(' '), null, null, null);
                     }
                     
-                    // Fallback search
-                    if (!searchResults || searchResults.length === 0) {
-                        const simpleQuery = searchQuery.split(/\s+/).slice(0, 5).join(' ') + ' overview';
-                        searchResults = await GoogleSearchAPI.search(simpleQuery, null, null, null);
-                    }
-                    
-                    if (!searchResults || searchResults.length === 0) {
-                        result.output = { 
-                            text: imageDescription || 'Unable to find sources.', 
-                            sources: [],
-                            imageDescription 
-                        };
+                    if (!results?.length) {
+                        result.output = { text: imageDesc || 'No sources found.', sources: [], imageDesc };
                         result.type = 'research';
                         break;
                     }
                     
-                    // Scrape results
-                    const sources = await ScraperAPI.scrape(searchResults.slice(0, 8));
-                    
+                    // Scrape
+                    const scraped = await ScraperAPI.scrape(results.slice(0, 8));
+                    const sources = [];
                     let researchText = '';
-                    const validSources = [];
                     
-                    for (const source of sources) {
-                        const text = source.text || source.content || source.snippet || '';
+                    for (const s of scraped) {
+                        const text = s.text || s.content || s.snippet || '';
                         if (text.length > 50) {
-                            researchText += `\n\n[Source: ${source.title}]\n${text.substring(0, 3000)}`;
-                            validSources.push({
-                                title: source.title,
-                                url: source.link,
-                                site: source.meta?.siteName || new URL(source.link).hostname.replace('www.', ''),
-                                author: source.meta?.author || null,
-                                year: source.meta?.year || new Date().getFullYear().toString(),
-                                doi: source.doi || null,
-                                text: text.substring(0, 3000) // Store for quote extraction
+                            const author = s.meta?.author || null;
+                            const site = cleanSiteName(s.meta?.siteName || s.link);
+                            const displayName = author || site;
+                            
+                            researchText += `\n\n[${displayName}]\n${text.substring(0, 2500)}`;
+                            sources.push({
+                                id: sources.length + 1,
+                                title: s.title,
+                                url: s.link,
+                                site,
+                                author,
+                                year: s.meta?.year || 'n.d.',
+                                displayName,
+                                text: text.substring(0, 2500)
                             });
                         }
                     }
                     
-                    console.log('[Agent] Found', validSources.length, 'sources');
-                    
-                    result.output = {
-                        text: researchText,
-                        sources: validSources,
-                        imageDescription
-                    };
+                    result.output = { text: researchText, sources, imageDesc };
                     result.type = 'research';
                     break;
                 }
 
-                // ============================================================
-                // QUOTES - Extract quotes from research (1 Gemini call)
-                // ============================================================
                 case 'QUOTES': {
                     const sources = context.researchSources || [];
+                    if (!sources.length) { result.output = []; result.type = 'quotes'; break; }
                     
-                    if (sources.length === 0) {
-                        result.output = [];
-                        result.type = 'quotes';
-                        break;
-                    }
-                    
-                    // Build source name mapping for better attribution
-                    const sourceNames = {};
-                    sources.slice(0, 5).forEach((s, i) => {
-                        // Prefer author, then clean site name, then title
-                        let name = s.author;
-                        if (!name || name.length < 3) {
-                            name = cleanSiteName(s.site);
-                        }
-                        // Make it more readable
-                        if (name === 'Pmc' || name === 'Ncbi') name = 'NIH Research';
-                        if (name === 'Arxiv') name = 'arXiv';
-                        sourceNames[i] = name;
-                    });
-                    
-                    // Build prompt to extract quotes
-                    let prompt = `Extract 3-5 important, factual quotes from these sources.
+                    let prompt = `Extract 3-5 important factual quotes from these sources.
+FORMAT (one per line): AuthorOrSource: "exact quote"
 
-OUTPUT FORMAT (exactly like this, one per line):
-SOURCE_NAME: "Exact quote from the text."
-
-SOURCES:\n`;
-                    
-                    sources.slice(0, 5).forEach((s, i) => {
-                        const sourceName = sourceNames[i];
-                        prompt += `\n--- ${sourceName} ---\n${s.text?.substring(0, 1500) || ''}\n`;
+`;
+                    sources.slice(0, 5).forEach(s => {
+                        prompt += `--- ${s.displayName} ---\n${s.text?.substring(0, 1200) || ''}\n\n`;
                     });
-                    
-                    prompt += `\nExtract 3-5 quotes. Use these exact source names: ${Object.values(sourceNames).join(', ')}`;
                     
                     const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    
-                    // Parse quotes from response
                     const quotes = [];
-                    const lines = response.split('\n').filter(l => l.includes('"'));
                     
-                    for (const line of lines) {
+                    for (const line of response.split('\n')) {
                         const match = line.match(/^([^:]+):\s*"([^"]+)"/);
-                        if (match) {
-                            quotes.push({
-                                source: match[1].trim(),
-                                quote: match[2].trim()
-                            });
-                        }
+                        if (match) quotes.push({ source: match[1].trim(), quote: match[2].trim() });
                     }
-                    
-                    console.log('[Agent] Extracted', quotes.length, 'quotes');
                     
                     result.output = quotes;
                     result.type = 'quotes';
                     break;
                 }
 
-                // ============================================================
-                // WRITE - Generate content using research and quotes
-                // ============================================================
                 case 'WRITE': {
-                    const research = context.researchData || {};
-                    const researchText = research.text || '';
-                    const imageDesc = research.imageDescription || '';
-                    const userTask = context.task || '';
-                    const quotes = context.extractedQuotes || [];
+                    const { researchData = {}, extractedQuotes = [], task: userTask } = context;
                     
-                    let prompt = WRITE_PROMPT + '\n\n';
-                    prompt += `TASK: ${userTask}\n\n`;
+                    let prompt = `You are an expert academic writer. Write accurate content based on the research provided.
+
+RULES:
+- Use formal academic tone, plain prose paragraphs
+- NO markdown (##, **, etc.)
+- NO bibliography/references section at the end
+- When citing sources, mention the organization AND author when available
+  Example: "According to NASA scientist Alicia Cermak..." or "Research from the NIH shows..."
+
+TASK: ${userTask}
+
+RESEARCH:
+${researchData.text?.substring(0, 8000) || ''}
+`;
                     
-                    if (imageDesc) {
-                        prompt += `IMAGE ANALYSIS:\n${imageDesc}\n\n`;
+                    if (extractedQuotes.length > 0) {
+                        prompt += `
+QUOTES TO INCLUDE (use 2-3 with proper attribution):
+${extractedQuotes.map((q, i) => `${i + 1}. ${q.source}: "${q.quote}"`).join('\n')}
+
+Attribution examples:
+- According to [full name/org], "quote"
+- As [name] from [organization] explains, "quote"
+- Research from [organization] shows that "quote"
+
+NEVER write "[Source]" literally - use the actual names above.
+`;
                     }
                     
-                    if (researchText) {
-                        prompt += `RESEARCH:\n${researchText.substring(0, 8000)}\n\n`;
-                    }
-                    
-                    // Add quotes if available
-                    if (quotes.length > 0) {
-                        const citationType = options.citationType || 'bibliography';
-                        const citationStyle = options.citationStyle || 'mla9';
-                        
-                        prompt += `═══════════════════════════════════════════════════════════════
-QUOTES TO INCORPORATE INTO YOUR WRITING:
-═══════════════════════════════════════════════════════════════\n`;
-
-                        // Different instructions based on citation type
-                        if (citationType === 'footnotes') {
-                            prompt += `FORMAT: Use superscript numbers after quotes. Write the number in parentheses like (1), (2), etc.
-Example: "This is a quote from the source."(1)
-
-DO NOT use square brackets like [1]. Use parentheses: (1), (2), (3)\n\n`;
-                        } else if (citationType === 'in-text') {
-                            if (citationStyle.includes('apa')) {
-                                prompt += `FORMAT: Use APA parenthetical citations.
-Example: "This is a quote" (Author Name, 2024).
-Example: According to Author Name (2024), "this is a quote."\n\n`;
-                            } else if (citationStyle.includes('mla')) {
-                                prompt += `FORMAT: Use MLA parenthetical citations.
-Example: "This is a quote" (Author Name).
-Example: According to Author Name, "this is a quote."\n\n`;
-                            } else {
-                                prompt += `FORMAT: Use Chicago parenthetical citations.
-Example: "This is a quote" (Author Name 2024).
-Example: According to Author Name, "this is a quote" (2024).\n\n`;
-                            }
-                        } else {
-                            // Bibliography - no in-text citations needed
-                            prompt += `FORMAT: Use attribution phrases only (NO parenthetical citations, NO numbers).
-Example: According to NASA, "this is a quote."
-Example: Research from the EPA states that "this is a quote."
-Example: As explained by the IPCC, "this is a quote."\n\n`;
-                        }
-
-                        prompt += `QUOTES (use the SOURCE NAME shown for attribution):\n`;
-                        quotes.forEach((q, i) => {
-                            if (citationType === 'footnotes') {
-                                prompt += `(${i + 1}) From ${q.source}: "${q.quote}"\n`;
-                            } else {
-                                prompt += `• From ${q.source}: "${q.quote}"\n`;
-                            }
-                        });
-                        
-                        prompt += `\nRULES:
-- Include 2-3 quotes with proper attribution
-- Use the exact SOURCE NAME shown above (e.g., "According to NASA" not "According to [Source]")
-- NEVER write [Source], [1], [2], or any placeholder text
-- NEVER use square brackets for citation numbers`;
-                        
-                        if (citationType === 'footnotes') {
-                            prompt += `\n- Use (1), (2), (3) for footnote numbers, NOT [1], [2], [3]`;
-                        }
-                        
-                        prompt += `\n═══════════════════════════════════════════════════════════════\n\n`;
-                    }
-                    
-                    prompt += 'Write the content now:';
-                    
+                    prompt += '\nWrite the content now:';
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'text';
                     break;
                 }
 
-                // ============================================================
-                // HUMANIZE - Make text more natural (preserves quotes)
-                // ============================================================
                 case 'HUMANIZE': {
-                    const text = step.input || context.previousOutput || '';
-                    if (!text || text.length < 50) throw new Error("No text to humanize");
+                    const text = context.previousOutput || '';
+                    if (text.length < 50) throw new Error('No text to humanize');
                     
-                    const prompt = `${HUMANIZE_PROMPT}\n\nText to rewrite:\n\n${text}`;
+                    const prompt = `Rewrite this to sound more natural and human-like.
+RULES: Vary sentences, use natural transitions, keep same meaning/length, preserve all quotes exactly.
+
+${text}`;
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'text';
                     break;
                 }
 
-                // ============================================================
-                // CITE - Format citations (no API call, uses citation.js logic)
-                // ============================================================
                 case 'CITE': {
-                    const sources = context.researchSources || [];
-                    const style = options.citationStyle || 'mla9';
-                    const citationType = options.citationType || 'bibliography';
-                    
-                    // Format each source based on type
-                    const formatted = sources.map((s, idx) => {
-                        const author = s.author || cleanSiteName(s.site);
-                        const year = s.year || 'n.d.';
-                        
-                        let inText = '';
-                        if (style.includes('apa')) {
-                            inText = `(${author}, ${year})`;
-                        } else if (style.includes('mla')) {
-                            inText = `(${author})`;
-                        } else {
-                            inText = `(${author} ${year})`;
-                        }
-                        
-                        return {
-                            ...s,
-                            formatted: formatBibEntry(s, style),
-                            inText: inText,
-                            footnote: `${idx + 1}. ${author}, "${s.title}," ${year}.`
-                        };
-                    });
-                    
-                    result.output = formatted;
+                    // Just pass sources through - frontend handles formatting
+                    result.output = context.researchSources || [];
                     result.type = 'citations';
-                    result.citationType = citationType;
                     break;
                 }
-
-                default:
-                    throw new Error(`Unknown tool: ${step.tool}`);
             }
 
             return res.status(200).json(result);
         }
 
         throw new Error(`Unknown action: ${action}`);
-
     } catch (error) {
         console.error("[Agent] Error:", error);
         return res.status(500).json({ success: false, error: error.message });
