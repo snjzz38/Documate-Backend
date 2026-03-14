@@ -214,6 +214,14 @@ export default async function handler(req, res) {
                         const text = source.text || source.content || source.snippet || '';
                         if (text.length > 50) {
                             researchText += `\n\n[Source: ${source.title}]\n${text.substring(0, 2500)}`;
+                            
+                            // Extract better quotes - look for meaningful sentences
+                            const sentences = text.match(/[A-Z][^.!?]*[.!?]/g) || [];
+                            const goodQuotes = sentences
+                                .filter(s => s.length > 40 && s.length < 200)
+                                .filter(s => !s.toLowerCase().includes('cookie') && !s.toLowerCase().includes('subscribe'))
+                                .slice(0, 2);
+                            
                             validSources.push({
                                 title: source.title,
                                 url: source.link,
@@ -221,8 +229,7 @@ export default async function handler(req, res) {
                                 author: source.meta?.author || null,
                                 year: source.meta?.year || new Date().getFullYear().toString(),
                                 doi: source.doi || null,
-                                // Store a key quote for the quotes feature
-                                quote: text.substring(0, 200).split('.')[0] + '.'
+                                quotes: goodQuotes
                             });
                         }
                     }
@@ -264,17 +271,29 @@ export default async function handler(req, res) {
                     
                     // Add quotes instruction if enabled
                     if (enableQuotes && sources.length > 0) {
-                        prompt += `IMPORTANT: Include 2-3 direct quotes from the research to add credibility. Format quotes like: According to [source], "quote here."\n\n`;
-                        prompt += `Available quotes:\n`;
+                        prompt += `═══════════════════════════════════════════════════════════════
+QUOTES REQUIREMENT - YOU MUST INCLUDE THESE IN YOUR WRITING:
+═══════════════════════════════════════════════════════════════
+Incorporate 2-3 of these EXACT quotes into your writing. Use attribution phrases like:
+- According to [Author/Source], "quote"
+- [Author] argues that "quote"  
+- As stated by [Source], "quote"
+- Research from [Source] indicates that "quote"
+
+AVAILABLE QUOTES TO USE:\n`;
                         sources.slice(0, 5).forEach((s, i) => {
-                            if (s.quote) {
-                                prompt += `- From ${s.site}: "${s.quote}"\n`;
+                            const authorOrSite = s.author || s.site;
+                            if (s.quotes && s.quotes.length > 0) {
+                                s.quotes.forEach(q => {
+                                    prompt += `• ${authorOrSite}: "${q}"\n`;
+                                });
                             }
                         });
-                        prompt += '\n';
+                        prompt += `\nYou MUST include at least 2 of these quotes with proper attribution.\n`;
+                        prompt += `═══════════════════════════════════════════════════════════════\n\n`;
                     }
                     
-                    prompt += 'Now write the requested content using the facts from the research above:';
+                    prompt += 'Now write the requested content:';
                     
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'text';
