@@ -6,51 +6,53 @@ import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
-const AGENT_SYSTEM_PROMPT = `You are an AI writing assistant agent. You help students complete academic writing tasks by orchestrating multiple tools.
+const AGENT_SYSTEM_PROMPT = `You are an AI writing assistant agent. You help students complete academic writing tasks.
 
 Available tools:
 1. WRITE - Generate essay/document content
 2. HUMANIZE - Make AI text sound more natural and human
-3. CITE - Find and format academic citations
-4. GRADE - Evaluate writing against rubric/instructions
+3. CITE - Find academic sources and create bibliography
 
-When given a task, analyze what needs to be done and output a JSON plan.
-
-OUTPUT FORMAT (JSON only, no markdown code blocks):
+OUTPUT FORMAT (JSON only, no markdown):
 {
   "understanding": "Brief summary of what user wants",
   "steps": [
     {
-      "tool": "WRITE|HUMANIZE|CITE|GRADE",
+      "tool": "WRITE|HUMANIZE|CITE",
       "action": "Description of what to do",
-      "input": "What content/text this step needs",
+      "input": "What content this step needs",
       "dependsOn": null or step index (0-based)
     }
-  ],
-  "finalOutput": "Description of what user will receive"
+  ]
 }
 
 RULES:
-- Break complex tasks into logical steps
-- Use CITE when academic sources are needed
-- Use HUMANIZE after WRITE if user wants natural-sounding text
-- Use GRADE only if user wants feedback on existing work
-- Each step should be atomic and clear
+- Break tasks into logical steps
+- CITE finds sources and creates a bibliography (does NOT insert citations into text)
+- Use HUMANIZE after WRITE for natural-sounding text
 - Order steps by dependency`;
 
-const WRITE_SYSTEM_PROMPT = `You are an expert academic writer. Write clear, well-structured content based on the given instructions. 
+const WRITE_SYSTEM_PROMPT = `You are an expert academic writer. Write clear, well-structured content.
+
+ABSOLUTE RULES - FOLLOW EXACTLY:
 - Use formal academic tone
 - Include topic sentences for each paragraph
 - Support claims with reasoning
-- Do NOT include citations (those will be added separately)
-- Output ONLY the essay/content, no meta-commentary`;
+- NEVER include citations like [1], [2], [3], (Author Year), (Smith, 2020), etc.
+- NEVER mention sources or references in the text
+- NEVER add Works Cited, References, or Bibliography
+- Output ONLY the essay text with NO citation markers of any kind`;
 
-const HUMANIZE_SYSTEM_PROMPT = `You are a writing editor. Rewrite the given text to sound more natural and human-like while preserving the meaning and academic quality.
+const HUMANIZE_SYSTEM_PROMPT = `Rewrite the text to sound more natural and human-like.
+
+ABSOLUTE RULES - FOLLOW EXACTLY:
 - Vary sentence structure and length
-- Use more natural transitions
-- Add subtle personality without being unprofessional
-- Keep the same approximate length
-- Output ONLY the rewritten text`;
+- Use natural transitions
+- Keep the same meaning and approximate length
+- NEVER add citations like [1], [2], [3], (Author Year), (Smith, 2020), etc.
+- NEVER add Works Cited, References, or Bibliography
+- If the input has citation markers, REMOVE them
+- Output ONLY the rewritten text with NO citation markers`;
 
 // ==========================================================================
 // MAIN HANDLER
@@ -62,129 +64,84 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { 
-            action,
-            task,
-            options = {},
-            groqKey,
-            googleKey
-        } = req.body;
+        const { action, task, options = {}, groqKey, googleKey } = req.body;
 
         const GEMINI_KEY = process.env.GEMINI_API_KEY;
         const GROQ_KEY = groqKey || process.env.GROQ_API_KEY;
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
 
         // ==========================================================================
-        // ACTION: PLAN - Create execution plan from task description
+        // ACTION: PLAN
         // ==========================================================================
         if (action === 'plan') {
             if (!task || task.length < 10) {
                 throw new Error("Please provide a detailed task description");
             }
 
-            const prompt = `${AGENT_SYSTEM_PROMPT}\n\nTASK FROM USER:\n${task}\n\nOPTIONS ENABLED:\n${JSON.stringify(options)}\n\nRespond with JSON only, no markdown code blocks.`;
-            
+            const prompt = `${AGENT_SYSTEM_PROMPT}\n\nTASK: ${task}\n\nOPTIONS: ${JSON.stringify(options)}\n\nRespond with JSON only.`;
             const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
             
-            // Parse JSON from response
             let plan;
             try {
                 const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '');
                 const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    plan = JSON.parse(jsonMatch[0]);
-                } else {
-                    throw new Error("No valid plan generated");
-                }
+                plan = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+                if (!plan) throw new Error("No plan");
             } catch (e) {
-                console.error("[Agent] Plan parse error:", e);
-                console.error("[Agent] Raw response:", response);
                 throw new Error("Failed to generate execution plan");
             }
 
-            return res.status(200).json({ 
-                success: true, 
-                plan,
-                rawResponse: response
-            });
+            return res.status(200).json({ success: true, plan });
         }
 
         // ==========================================================================
-        // ACTION: EXECUTE_STEP - Execute a single step from the plan
+        // ACTION: EXECUTE_STEP
         // ==========================================================================
         if (action === 'execute_step') {
             const { step, context = {} } = req.body;
-            
-            if (!step || !step.tool) {
-                throw new Error("Invalid step");
-            }
+            if (!step || !step.tool) throw new Error("Invalid step");
 
-            let result = { success: true, output: '' };
+            let result = { success: true, output: '', type: 'text' };
 
             switch (step.tool.toUpperCase()) {
                 case 'WRITE': {
-                    const prompt = `${WRITE_SYSTEM_PROMPT}\n\n${step.action}\n\nINSTRUCTIONS:\n${step.input || context.task || ''}`;
+                    const prompt = `${WRITE_SYSTEM_PROMPT}\n\nTask: ${step.action}\n\nDetails: ${step.input || context.task || ''}`;
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    result.type = 'text';
                     break;
                 }
 
                 case 'HUMANIZE': {
-                    const textToHumanize = step.input || context.previousOutput || '';
-                    if (!textToHumanize) {
-                        throw new Error("No text to humanize");
-                    }
-                    const prompt = `${HUMANIZE_SYSTEM_PROMPT}\n\nRewrite this text to sound more natural:\n\n${textToHumanize}`;
+                    const text = step.input || context.previousOutput || '';
+                    if (!text) throw new Error("No text to humanize");
+                    const prompt = `${HUMANIZE_SYSTEM_PROMPT}\n\nText to rewrite:\n\n${text}`;
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    result.type = 'text';
                     break;
                 }
 
                 case 'CITE': {
                     const searchContext = step.input || context.previousOutput || context.task || '';
-                    
                     const raw = await GoogleSearchAPI.search(searchContext, GOOGLE_KEY, null, GROQ_KEY);
                     
                     if (!raw || raw.length === 0) {
-                        result.output = "No sources found for the given topic.";
-                        result.type = 'error';
+                        result.output = [];
+                        result.type = 'citations';
                         break;
                     }
 
                     const sources = await ScraperAPI.scrape(raw);
+                    const style = options.citationStyle || 'mla9';
                     
-                    const style = options.citationStyle || 'mla';
-                    const citations = sources.slice(0, 8).map((s, i) => {
-                        const author = s.meta?.author || cleanSiteName(s.title);
-                        const year = s.meta?.year || 'n.d.';
-                        const title = s.title || 'Untitled';
-                        const url = s.doi ? `https://doi.org/${s.doi}` : s.link;
-                        const site = cleanSiteName(s.meta?.siteName || s.title);
-                        
-                        return {
-                            id: i + 1,
-                            author,
-                            year,
-                            title,
-                            url,
-                            site,
-                            formatted: formatCitation(author, year, title, site, url, style)
-                        };
-                    });
+                    const citations = sources.slice(0, 8).map((s, i) => ({
+                        id: i + 1,
+                        author: s.meta?.author || cleanSiteName(s.title),
+                        year: s.meta?.year || 'n.d.',
+                        title: s.title || 'Untitled',
+                        url: s.doi ? `https://doi.org/${s.doi}` : s.link,
+                        site: cleanSiteName(s.meta?.siteName || s.title)
+                    }));
 
                     result.output = citations;
                     result.type = 'citations';
-                    result.sources = sources;
-                    break;
-                }
-
-                case 'GRADE': {
-                    const textToGrade = step.input || context.previousOutput || '';
-                    const instructions = options.rubric || 'Provide constructive feedback';
-                    
-                    const prompt = `Grade this student submission:\n\n${textToGrade}\n\nRUBRIC/INSTRUCTIONS:\n${instructions}`;
-                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    result.type = 'feedback';
                     break;
                 }
 
@@ -196,38 +153,42 @@ export default async function handler(req, res) {
         }
 
         // ==========================================================================
-        // ACTION: INTEGRATE_CITATIONS - Insert citations into text
+        // ACTION: BUILD_BIBLIOGRAPHY
         // ==========================================================================
-        if (action === 'integrate_citations') {
-            const { text, citations, style = 'mla' } = req.body;
+        if (action === 'build_bibliography') {
+            const { citations, style = 'mla9' } = req.body;
             
-            if (!text || !citations || citations.length === 0) {
-                throw new Error("Need text and citations to integrate");
+            if (!citations || citations.length === 0) {
+                return res.status(200).json({ success: true, bibliography: '' });
             }
 
-            const prompt = `Insert these citations into the text at appropriate places. Return the text with in-text citations added.
+            // Sort alphabetically by author
+            const sorted = [...citations].sort((a, b) => 
+                a.author.toLowerCase().localeCompare(b.author.toLowerCase())
+            );
 
-TEXT:
-${text}
+            const bibTitle = style.includes('mla') ? 'Works Cited' : 
+                            style.includes('apa') ? 'References' : 'Bibliography';
 
-AVAILABLE CITATIONS:
-${citations.map(c => `[${c.id}] ${c.author} (${c.year}) - ${c.title}`).join('\n')}
-
-RULES:
-- Add in-text citations like (Author, Year) for APA or (Author) for MLA
-- Place citations after relevant claims/statements
-- Use at least 3-5 citations
-- Return ONLY the text with citations inserted, nothing else`;
-
-            const citedText = await GeminiAPI.chat(prompt, GEMINI_KEY);
-            const bibliography = citations.map(c => c.formatted).join('\n\n');
-
-            return res.status(200).json({
-                success: true,
-                citedText,
-                bibliography,
-                citationCount: citations.length
+            // Build HTML bibliography
+            let bibHtml = `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; text-align: center; margin-bottom: 16px;">${bibTitle}</div>`;
+            
+            sorted.forEach(c => {
+                const urlHtml = `<a href="${c.url}" target="_blank" style="color: #1a73e8;">${c.url}</a>`;
+                let entry;
+                
+                if (style.includes('apa')) {
+                    entry = `${c.author}. (${c.year}). ${c.title}. <i>${c.site}</i>. ${urlHtml}`;
+                } else if (style.includes('mla')) {
+                    entry = `${c.author}. "${c.title}." <i>${c.site}</i>, ${c.year}, ${urlHtml}.`;
+                } else {
+                    entry = `${c.author}. "${c.title}." <i>${c.site}</i>. ${c.year}. ${urlHtml}.`;
+                }
+                
+                bibHtml += `<p style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; text-indent: -36px; padding-left: 36px; margin: 0 0 8px 0; line-height: 2;">${entry}</p>`;
             });
+
+            return res.status(200).json({ success: true, bibliography: bibHtml });
         }
 
         throw new Error("Invalid action");
@@ -250,17 +211,4 @@ function cleanSiteName(site) {
         .replace(/[→\-–|]/g, ' ')
         .trim()
         .split(/[.\s]/)[0] || 'Unknown';
-}
-
-function formatCitation(author, year, title, site, url, style) {
-    const s = String(style).toLowerCase();
-    
-    if (s.includes('apa')) {
-        return `${author}. (${year}). ${title}. <i>${site}</i>. ${url}`;
-    }
-    if (s.includes('mla')) {
-        return `${author}. "${title}." <i>${site}</i>, ${year}, ${url}.`;
-    }
-    // Chicago
-    return `${author}. "${title}." <i>${site}</i>. ${year}. ${url}.`;
 }
