@@ -172,12 +172,29 @@ export default async function handler(req, res) {
                         searchQuery = imageDescription.substring(0, 300);
                     }
                     
-                    // Search for sources
-                    const searchResults = await GoogleSearchAPI.search(searchQuery, null, null, GROQ_KEY);
+                    console.log('[Agent] Research query:', searchQuery.substring(0, 100));
+                    
+                    // Search for sources - use simple direct query for short inputs
+                    let searchResults;
+                    if (searchQuery.split(/\s+/).length <= 10) {
+                        // Short query - search directly without Groq processing
+                        searchResults = await GoogleSearchAPI.search(searchQuery + ' facts research', null, null, null);
+                    } else {
+                        searchResults = await GoogleSearchAPI.search(searchQuery, null, null, GROQ_KEY);
+                    }
+                    
+                    console.log('[Agent] Search results:', searchResults?.length || 0);
+                    
+                    if (!searchResults || searchResults.length === 0) {
+                        // Fallback: try a simpler search
+                        const simpleQuery = searchQuery.split(/\s+/).slice(0, 5).join(' ') + ' overview';
+                        console.log('[Agent] Trying fallback search:', simpleQuery);
+                        searchResults = await GoogleSearchAPI.search(simpleQuery, null, null, null);
+                    }
                     
                     if (!searchResults || searchResults.length === 0) {
                         result.output = { 
-                            text: imageDescription || 'No sources found.', 
+                            text: imageDescription || 'Unable to find sources. Please try a different topic.', 
                             sources: [],
                             imageDescription 
                         };
@@ -186,6 +203,7 @@ export default async function handler(req, res) {
                     }
                     
                     // Scrape top results for content
+                    console.log('[Agent] Scraping', Math.min(searchResults.length, 8), 'results');
                     const sources = await ScraperAPI.scrape(searchResults.slice(0, 8));
                     
                     // Build research text from scraped content
@@ -193,21 +211,26 @@ export default async function handler(req, res) {
                     const validSources = [];
                     
                     for (const source of sources) {
-                        if (source.text && source.text.length > 100) {
-                            researchText += `\n\n[Source: ${source.title}]\n${source.text.substring(0, 2500)}`;
+                        const text = source.text || source.content || source.snippet || '';
+                        if (text.length > 50) {
+                            researchText += `\n\n[Source: ${source.title}]\n${text.substring(0, 2500)}`;
                             validSources.push({
                                 title: source.title,
                                 url: source.link,
                                 site: source.meta?.siteName || new URL(source.link).hostname.replace('www.', ''),
                                 author: source.meta?.author || null,
                                 year: source.meta?.year || new Date().getFullYear().toString(),
-                                doi: source.doi || null
+                                doi: source.doi || null,
+                                // Store a key quote for the quotes feature
+                                quote: text.substring(0, 200).split('.')[0] + '.'
                             });
                         }
                     }
                     
+                    console.log('[Agent] Found', validSources.length, 'valid sources');
+                    
                     result.output = {
-                        text: researchText || 'Limited information found.',
+                        text: researchText || 'Limited information found in sources.',
                         sources: validSources,
                         imageDescription
                     };
@@ -224,6 +247,8 @@ export default async function handler(req, res) {
                     const researchText = research.text || '';
                     const imageDesc = research.imageDescription || '';
                     const userTask = context.task || '';
+                    const sources = research.sources || [];
+                    const enableQuotes = options.enableQuotes || false;
                     
                     // Build the writing prompt
                     let prompt = WRITE_PROMPT + '\n\n';
@@ -237,7 +262,19 @@ export default async function handler(req, res) {
                         prompt += `FACTUAL RESEARCH (base your writing on this):\n${researchText.substring(0, 10000)}\n\n`;
                     }
                     
-                    prompt += 'Now write the requested content using ONLY the facts from the research above. Do not invent information:';
+                    // Add quotes instruction if enabled
+                    if (enableQuotes && sources.length > 0) {
+                        prompt += `IMPORTANT: Include 2-3 direct quotes from the research to add credibility. Format quotes like: According to [source], "quote here."\n\n`;
+                        prompt += `Available quotes:\n`;
+                        sources.slice(0, 5).forEach((s, i) => {
+                            if (s.quote) {
+                                prompt += `- From ${s.site}: "${s.quote}"\n`;
+                            }
+                        });
+                        prompt += '\n';
+                    }
+                    
+                    prompt += 'Now write the requested content using the facts from the research above:';
                     
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'text';
