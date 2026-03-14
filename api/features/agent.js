@@ -170,9 +170,14 @@ export default async function handler(req, res) {
             
             // CITE formats sources (no extra API call)
             if (options.enableCite) {
+                const styleNames = { 'mla9': 'MLA 9th', 'apa7': 'APA 7th', 'chicago': 'Chicago' };
+                const typeNames = { 'bibliography': 'bibliography', 'in-text': 'in-text citations', 'footnotes': 'footnotes' };
+                const styleName = styleNames[options.citationStyle] || options.citationStyle || 'MLA 9th';
+                const typeName = typeNames[options.citationType] || options.citationType || 'bibliography';
+                
                 steps.push({
                     tool: 'CITE',
-                    action: `Format bibliography in ${options.citationStyle || 'MLA 9th'} style`,
+                    action: `Format ${styleName} ${typeName}`,
                     input: 'Uses sources from research',
                     dependsOn: 0
                 });
@@ -343,20 +348,34 @@ SOURCES:\n`;
                     
                     // Add quotes if available
                     if (quotes.length > 0) {
+                        const citationType = options.citationType || 'bibliography';
+                        const citationStyle = options.citationStyle || 'mla9';
+                        
                         prompt += `═══════════════════════════════════════════════════════════════
-REQUIRED QUOTES - YOU MUST INCORPORATE THESE INTO YOUR WRITING:
-═══════════════════════════════════════════════════════════════
-Use these exact quotes with proper attribution. Examples of how to integrate:
-- According to [Source], "[quote]"
-- [Source] states that "[quote]"
-- As [Source] explains, "[quote]"
-- Research from [Source] shows that "[quote]"
+REQUIRED QUOTES - INCORPORATE THESE INTO YOUR WRITING:
+═══════════════════════════════════════════════════════════════\n`;
 
-QUOTES TO INCLUDE:\n`;
+                        // Show how to format based on citation type
+                        if (citationType === 'in-text') {
+                            if (citationStyle.includes('apa')) {
+                                prompt += `Use APA in-text citations: According to Author (Year), "quote" or "quote" (Author, Year).\n\n`;
+                            } else if (citationStyle.includes('mla')) {
+                                prompt += `Use MLA in-text citations: According to Author, "quote" or "quote" (Author).\n\n`;
+                            } else {
+                                prompt += `Use Chicago in-text citations: According to Author, "quote" (Author Year).\n\n`;
+                            }
+                        } else if (citationType === 'footnotes') {
+                            prompt += `Use footnote markers after quotes: "quote."[1] - The footnotes will be added separately.\n\n`;
+                        } else {
+                            prompt += `Use attribution phrases: According to [actual source name], "quote" or As [author name] states, "quote".\n\n`;
+                        }
+
+                        prompt += `QUOTES TO INCLUDE (use the ACTUAL source names shown, never write "[Source]"):\n`;
                         quotes.forEach((q, i) => {
-                            prompt += `${i + 1}. ${q.source}: "${q.quote}"\n`;
+                            prompt += `${i + 1}. Source: "${q.source}" — Quote: "${q.quote}"\n`;
                         });
-                        prompt += `\nYou MUST include at least 2-3 of these quotes with attribution.
+                        prompt += `\nInclude 2-3 quotes with proper attribution using the actual source names above.
+NEVER write "[Source]" literally - always use the real source name.
 ═══════════════════════════════════════════════════════════════\n\n`;
                     }
                     
@@ -381,20 +400,38 @@ QUOTES TO INCLUDE:\n`;
                 }
 
                 // ============================================================
-                // CITE - Format bibliography (no API call, uses citation.js logic)
+                // CITE - Format citations (no API call, uses citation.js logic)
                 // ============================================================
                 case 'CITE': {
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'mla9';
+                    const citationType = options.citationType || 'bibliography';
                     
-                    // Format each source
-                    const formatted = sources.map(s => ({
-                        ...s,
-                        formatted: formatBibEntry(s, style)
-                    }));
+                    // Format each source based on type
+                    const formatted = sources.map((s, idx) => {
+                        const author = s.author || cleanSiteName(s.site);
+                        const year = s.year || 'n.d.';
+                        
+                        let inText = '';
+                        if (style.includes('apa')) {
+                            inText = `(${author}, ${year})`;
+                        } else if (style.includes('mla')) {
+                            inText = `(${author})`;
+                        } else {
+                            inText = `(${author} ${year})`;
+                        }
+                        
+                        return {
+                            ...s,
+                            formatted: formatBibEntry(s, style),
+                            inText: inText,
+                            footnote: `${idx + 1}. ${author}, "${s.title}," ${year}.`
+                        };
+                    });
                     
                     result.output = formatted;
                     result.type = 'citations';
+                    result.citationType = citationType;
                     break;
                 }
 
