@@ -1,39 +1,39 @@
 // api/features/agent.js
-// Agent Mode - AI orchestrates multiple tools based on user task
+// Agent Mode - Research-first approach with proper image handling
+// 
+// API CALLS PER RUN:
+// - RESEARCH: 1 Groq (query gen) + 1-4 SearXNG + scraper calls
+// - WRITE: 1 Gemini
+// - HUMANIZE: 1 Gemini  
+// - CITE: 0 (just formatting)
+// - Image description: 1 Gemini Vision (if image attached)
+//
+// Typical run (Write+Humanize+Cite): ~3-4 Gemini + 1 Groq + searches
 
 import { GeminiAPI } from '../utils/geminiAPI.js';
-import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
 // ==========================================================================
-// GEMINI VISION - For processing images/PDFs
+// GEMINI VISION - For processing images
 // ==========================================================================
 async function geminiVision(prompt, files, apiKey) {
-    const models = [
-        'gemini-2.0-flash',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro'
-    ];
+    const models = ['gemini-2.0-flash', 'gemini-1.5-flash'];
     
     for (const model of models) {
         try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
             
-            // Build parts array with text and images
             const parts = [{ text: prompt }];
             
             for (const file of files) {
-                if (file.type.startsWith('image/')) {
+                if (file.type?.startsWith('image/')) {
                     parts.push({
                         inline_data: {
                             mime_type: file.type,
                             data: file.data
                         }
                     });
-                } else if (file.type === 'application/pdf') {
-                    // PDFs need different handling - for now just note them
-                    parts[0].text += `\n\n[PDF attached: ${file.name}]`;
                 }
             }
             
@@ -42,67 +42,42 @@ async function geminiVision(prompt, files, apiKey) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     contents: [{ parts }],
-                    generationConfig: {
-                        temperature: 0.7,
-                        maxOutputTokens: 4096
-                    }
+                    generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
                 })
             });
             
             const data = await response.json();
-            
             if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
                 return data.candidates[0].content.parts[0].text;
             }
-            
-            if (data.error) {
-                console.log(`[Agent] Gemini ${model} error:`, data.error.message);
-                continue;
-            }
         } catch (e) {
-            console.log(`[Agent] Gemini ${model} failed:`, e.message);
-            continue;
+            console.log(`[Agent] Vision ${model} failed:`, e.message);
         }
     }
-    
-    throw new Error('All Gemini models failed for vision request');
+    throw new Error('Vision API failed');
 }
 
-const AGENT_SYSTEM_PROMPT = `You are an AI writing assistant. Create a plan using ONLY the enabled tools.
+// ==========================================================================
+// PROMPTS
+// ==========================================================================
+const WRITE_PROMPT = `You are an expert academic writer. Use the PROVIDED RESEARCH to write accurate, well-sourced content.
 
-Available tools:
-- WRITE: Generate essay/document content (can analyze images if attached)
-- HUMANIZE: Make text sound more natural
-- CITE: Find sources and create bibliography
+CRITICAL RULES:
+- Base your writing ONLY on the RESEARCH PROVIDED - do not make up facts
+- Use formal academic tone with plain prose paragraphs
+- NO markdown formatting (no ##, **, etc.)
+- NO in-text citations like [1], [2], (Author, Year)
+- NO Works Cited or References section
+- Output ONLY the essay/content text`;
 
-OUTPUT FORMAT (JSON only):
-{
-  "understanding": "Brief summary",
-  "steps": [{"tool": "WRITE|HUMANIZE|CITE", "action": "Description", "input": "Content needed", "dependsOn": null}]
-}
+const HUMANIZE_PROMPT = `Rewrite this text to sound more natural and human-like.
 
-CRITICAL: Only include steps for tools that are ENABLED in the options. If enableWrite is false, do NOT include WRITE step.`;
-
-const WRITE_SYSTEM_PROMPT = `You are an expert academic writer. Write clear, well-structured content.
-
-ABSOLUTE RULES:
-- Use formal academic tone
-- Write in plain prose paragraphs
-- Do NOT use markdown formatting (no ##, **, etc.)
-- Do NOT include citations like [1], [2], (Author Year)
-- Do NOT add Works Cited or References
-- Just output the essay text in plain paragraphs`;
-
-const HUMANIZE_SYSTEM_PROMPT = `Rewrite the text to sound more natural and human-like.
-
-ABSOLUTE RULES - FOLLOW EXACTLY:
+RULES:
 - Vary sentence structure and length
 - Use natural transitions
 - Keep the same meaning and approximate length
-- NEVER add citations like [1], [2], [3], (Author Year), (Smith, 2020), etc.
-- NEVER add Works Cited, References, or Bibliography
-- If the input has citation markers, REMOVE them
-- Output ONLY the rewritten text with NO citation markers`;
+- Remove any citation markers if present
+- Output ONLY the rewritten text`;
 
 // ==========================================================================
 // MAIN HANDLER
@@ -114,39 +89,58 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { action, task, options = {}, groqKey, googleKey } = req.body;
-
+        const { action, task, options = {} } = req.body;
         const GEMINI_KEY = process.env.GEMINI_API_KEY;
-        const GROQ_KEY = groqKey || process.env.GROQ_API_KEY;
-        const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
+        const GROQ_KEY = process.env.GROQ_API_KEY;
 
         // ==========================================================================
-        // ACTION: PLAN
+        // ACTION: PLAN - Create execution plan (no API calls, just builds steps)
         // ==========================================================================
         if (action === 'plan') {
-            if (!task || task.length < 10) {
-                throw new Error("Please provide a detailed task description");
-            }
-
-            // Build prompt with file descriptions if present
-            let fileContext = '';
-            if (options.files && options.files.length > 0) {
-                fileContext = '\n\nATTACHED FILES:\n' + options.files.map(f => `- ${f.name} (${f.type})`).join('\n');
-                fileContext += '\n(Files will be processed with the task)';
-            }
-
-            const prompt = `${AGENT_SYSTEM_PROMPT}\n\nTASK: ${task}${fileContext}\n\nOPTIONS: ${JSON.stringify({...options, files: undefined})}\n\nRespond with JSON only.`;
-            const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
+            const steps = [];
             
-            let plan;
-            try {
-                const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-                const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-                plan = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
-                if (!plan) throw new Error("No plan");
-            } catch (e) {
-                throw new Error("Failed to generate execution plan");
+            // ALWAYS start with research to get real facts
+            steps.push({
+                tool: 'RESEARCH',
+                action: 'Search and gather factual information on the topic',
+                input: task,
+                dependsOn: null
+            });
+            
+            // WRITE uses research results
+            if (options.enableWrite !== false) {
+                steps.push({
+                    tool: 'WRITE',
+                    action: `Generate content based on research`,
+                    input: 'Uses research from step 1',
+                    dependsOn: 0
+                });
             }
+            
+            // HUMANIZE if enabled
+            if (options.enableHumanize) {
+                steps.push({
+                    tool: 'HUMANIZE',
+                    action: 'Make the text sound more natural',
+                    input: 'Uses output from previous step',
+                    dependsOn: steps.length - 1
+                });
+            }
+            
+            // CITE formats sources found during research (no extra search)
+            if (options.enableCite) {
+                steps.push({
+                    tool: 'CITE',
+                    action: `Format bibliography in ${options.citationStyle || 'MLA 9th'} style`,
+                    input: 'Uses sources from research step',
+                    dependsOn: 0
+                });
+            }
+
+            const plan = {
+                understanding: `${task.substring(0, 150)}${task.length > 150 ? '...' : ''}`,
+                steps
+            };
 
             return res.status(200).json({ success: true, plan });
         }
@@ -159,53 +153,117 @@ export default async function handler(req, res) {
             if (!step || !step.tool) throw new Error("Invalid step");
 
             let result = { success: true, output: '', type: 'text' };
-            
-            // Build file context if files are attached
-            let fileContext = '';
-            if (options.files && options.files.length > 0) {
-                // For text-based files, we could extract content
-                // For images/PDFs, just note they're attached
-                fileContext = '\n\n[Attached files: ' + options.files.map(f => f.name).join(', ') + ']';
-            }
+            const hasImages = options.files?.some(f => f.type?.startsWith('image/'));
 
             switch (step.tool.toUpperCase()) {
-                case 'WRITE': {
-                    const prompt = `${WRITE_SYSTEM_PROMPT}\n\nTask: ${step.action}\n\nDetails: ${step.input || context.task || ''}${fileContext}`;
-                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    break;
-                }
-
-                case 'HUMANIZE': {
-                    const text = step.input || context.previousOutput || '';
-                    if (!text) throw new Error("No text to humanize");
-                    const prompt = `${HUMANIZE_SYSTEM_PROMPT}\n\nText to rewrite:\n\n${text}`;
-                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    break;
-                }
-
-                case 'CITE': {
-                    const searchContext = step.input || context.previousOutput || context.task || '';
-                    const raw = await GoogleSearchAPI.search(searchContext, GOOGLE_KEY, null, GROQ_KEY);
+                // ============================================================
+                // RESEARCH - Search web and scrape content
+                // API calls: 1 Groq (query) + SearXNG + scraper
+                // ============================================================
+                case 'RESEARCH': {
+                    let searchQuery = context.task || step.input || '';
+                    let imageDescription = null;
                     
-                    if (!raw || raw.length === 0) {
-                        result.output = [];
-                        result.type = 'citations';
+                    // If image attached, describe it first to understand the topic
+                    if (hasImages && options.files) {
+                        const descPrompt = `Analyze this image carefully. What is the main topic or subject? What key concepts, terms, or themes does it relate to? Provide a detailed description that could be used to research this topic.`;
+                        imageDescription = await geminiVision(descPrompt, options.files, GEMINI_KEY);
+                        // Use image description to inform search
+                        searchQuery = imageDescription.substring(0, 300);
+                    }
+                    
+                    // Search for sources
+                    const searchResults = await GoogleSearchAPI.search(searchQuery, null, null, GROQ_KEY);
+                    
+                    if (!searchResults || searchResults.length === 0) {
+                        result.output = { 
+                            text: imageDescription || 'No sources found.', 
+                            sources: [],
+                            imageDescription 
+                        };
+                        result.type = 'research';
                         break;
                     }
-
-                    const sources = await ScraperAPI.scrape(raw);
-                    const style = options.citationStyle || 'mla9';
                     
-                    const citations = sources.slice(0, 8).map((s, i) => ({
-                        id: i + 1,
-                        author: s.meta?.author || cleanSiteName(s.title),
-                        year: s.meta?.year || 'n.d.',
-                        title: s.title || 'Untitled',
-                        url: s.doi ? `https://doi.org/${s.doi}` : s.link,
-                        site: cleanSiteName(s.meta?.siteName || s.title)
-                    }));
+                    // Scrape top results for content
+                    const sources = await ScraperAPI.scrape(searchResults.slice(0, 8));
+                    
+                    // Build research text from scraped content
+                    let researchText = '';
+                    const validSources = [];
+                    
+                    for (const source of sources) {
+                        if (source.text && source.text.length > 100) {
+                            researchText += `\n\n[Source: ${source.title}]\n${source.text.substring(0, 2500)}`;
+                            validSources.push({
+                                title: source.title,
+                                url: source.link,
+                                site: source.meta?.siteName || new URL(source.link).hostname.replace('www.', ''),
+                                author: source.meta?.author || null,
+                                year: source.meta?.year || new Date().getFullYear().toString(),
+                                doi: source.doi || null
+                            });
+                        }
+                    }
+                    
+                    result.output = {
+                        text: researchText || 'Limited information found.',
+                        sources: validSources,
+                        imageDescription
+                    };
+                    result.type = 'research';
+                    break;
+                }
 
-                    result.output = citations;
+                // ============================================================
+                // WRITE - Generate content using research
+                // API calls: 1 Gemini
+                // ============================================================
+                case 'WRITE': {
+                    const research = context.researchData || {};
+                    const researchText = research.text || '';
+                    const imageDesc = research.imageDescription || '';
+                    const userTask = context.task || '';
+                    
+                    // Build the writing prompt
+                    let prompt = WRITE_PROMPT + '\n\n';
+                    prompt += `USER REQUEST: ${userTask}\n\n`;
+                    
+                    if (imageDesc) {
+                        prompt += `IMAGE ANALYSIS:\n${imageDesc}\n\n`;
+                    }
+                    
+                    if (researchText) {
+                        prompt += `FACTUAL RESEARCH (base your writing on this):\n${researchText.substring(0, 10000)}\n\n`;
+                    }
+                    
+                    prompt += 'Now write the requested content using ONLY the facts from the research above. Do not invent information:';
+                    
+                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
+                    result.type = 'text';
+                    break;
+                }
+
+                // ============================================================
+                // HUMANIZE - Make text more natural
+                // API calls: 1 Gemini
+                // ============================================================
+                case 'HUMANIZE': {
+                    const text = step.input || context.previousOutput || '';
+                    if (!text || text.length < 50) throw new Error("No text to humanize");
+                    
+                    const prompt = `${HUMANIZE_PROMPT}\n\nText to rewrite:\n\n${text}`;
+                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
+                    result.type = 'text';
+                    break;
+                }
+
+                // ============================================================
+                // CITE - Format sources from research (no API calls)
+                // ============================================================
+                case 'CITE': {
+                    const sources = context.researchSources || [];
+                    result.output = sources;
                     result.type = 'citations';
                     break;
                 }
@@ -217,63 +275,10 @@ export default async function handler(req, res) {
             return res.status(200).json(result);
         }
 
-        // ==========================================================================
-        // ACTION: BUILD_BIBLIOGRAPHY
-        // ==========================================================================
-        if (action === 'build_bibliography') {
-            const { citations, style = 'mla9' } = req.body;
-            
-            if (!citations || citations.length === 0) {
-                return res.status(200).json({ success: true, bibliography: '' });
-            }
-
-            // Sort alphabetically by author
-            const sorted = [...citations].sort((a, b) => 
-                a.author.toLowerCase().localeCompare(b.author.toLowerCase())
-            );
-
-            const bibTitle = style.includes('mla') ? 'Works Cited' : 
-                            style.includes('apa') ? 'References' : 'Bibliography';
-
-            // Build HTML bibliography
-            let bibHtml = `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; text-align: center; margin-bottom: 16px;">${bibTitle}</div>`;
-            
-            sorted.forEach(c => {
-                const urlHtml = `<a href="${c.url}" target="_blank" style="color: #1a73e8;">${c.url}</a>`;
-                let entry;
-                
-                if (style.includes('apa')) {
-                    entry = `${c.author}. (${c.year}). ${c.title}. <i>${c.site}</i>. ${urlHtml}`;
-                } else if (style.includes('mla')) {
-                    entry = `${c.author}. "${c.title}." <i>${c.site}</i>, ${c.year}, ${urlHtml}.`;
-                } else {
-                    entry = `${c.author}. "${c.title}." <i>${c.site}</i>. ${c.year}. ${urlHtml}.`;
-                }
-                
-                bibHtml += `<p style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; text-indent: -36px; padding-left: 36px; margin: 0 0 8px 0; line-height: 2;">${entry}</p>`;
-            });
-
-            return res.status(200).json({ success: true, bibliography: bibHtml });
-        }
-
-        throw new Error("Invalid action");
+        throw new Error(`Unknown action: ${action}`);
 
     } catch (error) {
         console.error("[Agent] Error:", error);
         return res.status(500).json({ success: false, error: error.message });
     }
-}
-
-// ==========================================================================
-// HELPERS
-// ==========================================================================
-function cleanSiteName(site) {
-    if (!site) return 'Unknown';
-    return String(site)
-        .replace(/^www\./, '')
-        .replace(/^https?:\/\//, '')
-        .replace(/\.(com|org|edu|net|gov|io)$/i, '')
-        .replace(/[→\-–|]/g, ' ')
-        .trim()
-        .split(/[.\s]/)[0] || 'Unknown';
 }
