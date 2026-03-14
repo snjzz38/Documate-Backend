@@ -263,4 +263,4 @@ function formatCitation(author, year, title, site, url, style) {
     }
     // Chicago
     return `${author}. "${title}." <i>${site}</i>. ${year}. ${url}.`;
-}eqweqeqe
+}
