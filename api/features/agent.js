@@ -1,7 +1,7 @@
 // api/features/agent.js
 // Agent Mode - AI orchestrates multiple tools based on user task
 
-import { HackClubAPI } from '../utils/hackclubAPI.js';
+import { GeminiAPI } from '../utils/geminiAPI.js';
 import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
@@ -16,7 +16,7 @@ Available tools:
 
 When given a task, analyze what needs to be done and output a JSON plan.
 
-OUTPUT FORMAT (JSON only):
+OUTPUT FORMAT (JSON only, no markdown code blocks):
 {
   "understanding": "Brief summary of what user wants",
   "steps": [
@@ -36,7 +36,7 @@ RULES:
 - Use HUMANIZE after WRITE if user wants natural-sounding text
 - Use GRADE only if user wants feedback on existing work
 - Each step should be atomic and clear
-- Order steps by dependency (citations before inserting them, etc.)`;
+- Order steps by dependency`;
 
 const WRITE_SYSTEM_PROMPT = `You are an expert academic writer. Write clear, well-structured content based on the given instructions. 
 - Use formal academic tone
@@ -65,14 +65,12 @@ export default async function handler(req, res) {
         const { 
             action,
             task,
-            content,
             options = {},
-            apiKey,
             groqKey,
             googleKey
         } = req.body;
 
-        const HACKCLUB_KEY = apiKey || process.env.HACKCLUB_API_KEY;
+        const GEMINI_KEY = process.env.GEMINI_API_KEY;
         const GROQ_KEY = groqKey || process.env.GROQ_API_KEY;
         const GOOGLE_KEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
 
@@ -84,14 +82,15 @@ export default async function handler(req, res) {
                 throw new Error("Please provide a detailed task description");
             }
 
-            const userMessage = `TASK FROM USER:\n${task}\n\nOPTIONS ENABLED:\n${JSON.stringify(options)}`;
+            const prompt = `${AGENT_SYSTEM_PROMPT}\n\nTASK FROM USER:\n${task}\n\nOPTIONS ENABLED:\n${JSON.stringify(options)}\n\nRespond with JSON only, no markdown code blocks.`;
             
-            const response = await HackClubAPI.chat(userMessage, HACKCLUB_KEY, AGENT_SYSTEM_PROMPT);
+            const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
             
             // Parse JSON from response
             let plan;
             try {
-                const jsonMatch = response.match(/\{[\s\S]*\}/);
+                const cleaned = response.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+                const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
                     plan = JSON.parse(jsonMatch[0]);
                 } else {
@@ -99,6 +98,7 @@ export default async function handler(req, res) {
                 }
             } catch (e) {
                 console.error("[Agent] Plan parse error:", e);
+                console.error("[Agent] Raw response:", response);
                 throw new Error("Failed to generate execution plan");
             }
 
@@ -123,8 +123,8 @@ export default async function handler(req, res) {
 
             switch (step.tool.toUpperCase()) {
                 case 'WRITE': {
-                    const prompt = `${step.action}\n\nINSTRUCTIONS:\n${step.input || context.task || ''}`;
-                    result.output = await HackClubAPI.chat(prompt, HACKCLUB_KEY, WRITE_SYSTEM_PROMPT);
+                    const prompt = `${WRITE_SYSTEM_PROMPT}\n\n${step.action}\n\nINSTRUCTIONS:\n${step.input || context.task || ''}`;
+                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'text';
                     break;
                 }
@@ -134,11 +134,8 @@ export default async function handler(req, res) {
                     if (!textToHumanize) {
                         throw new Error("No text to humanize");
                     }
-                    result.output = await HackClubAPI.chat(
-                        `Rewrite this text to sound more natural:\n\n${textToHumanize}`,
-                        HACKCLUB_KEY,
-                        HUMANIZE_SYSTEM_PROMPT
-                    );
+                    const prompt = `${HUMANIZE_SYSTEM_PROMPT}\n\nRewrite this text to sound more natural:\n\n${textToHumanize}`;
+                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'text';
                     break;
                 }
@@ -146,7 +143,6 @@ export default async function handler(req, res) {
                 case 'CITE': {
                     const searchContext = step.input || context.previousOutput || context.task || '';
                     
-                    // Search for sources
                     const raw = await GoogleSearchAPI.search(searchContext, GOOGLE_KEY, null, GROQ_KEY);
                     
                     if (!raw || raw.length === 0) {
@@ -155,10 +151,8 @@ export default async function handler(req, res) {
                         break;
                     }
 
-                    // Scrape sources
                     const sources = await ScraperAPI.scrape(raw);
                     
-                    // Format citations
                     const style = options.citationStyle || 'mla';
                     const citations = sources.slice(0, 8).map((s, i) => {
                         const author = s.meta?.author || cleanSiteName(s.title);
@@ -189,7 +183,7 @@ export default async function handler(req, res) {
                     const instructions = options.rubric || 'Provide constructive feedback';
                     
                     const prompt = `Grade this student submission:\n\n${textToGrade}\n\nRUBRIC/INSTRUCTIONS:\n${instructions}`;
-                    result.output = await HackClubAPI.chat(prompt, HACKCLUB_KEY);
+                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     result.type = 'feedback';
                     break;
                 }
@@ -225,9 +219,7 @@ RULES:
 - Use at least 3-5 citations
 - Return ONLY the text with citations inserted, nothing else`;
 
-            const citedText = await HackClubAPI.chat(prompt, HACKCLUB_KEY);
-            
-            // Build bibliography
+            const citedText = await GeminiAPI.chat(prompt, GEMINI_KEY);
             const bibliography = citations.map(c => c.formatted).join('\n\n');
 
             return res.status(200).json({
