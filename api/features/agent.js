@@ -66,7 +66,14 @@ export default async function handler(req, res) {
                 throw new Error("Please provide a detailed task description");
             }
 
-            const prompt = `${AGENT_SYSTEM_PROMPT}\n\nTASK: ${task}\n\nOPTIONS: ${JSON.stringify(options)}\n\nRespond with JSON only.`;
+            // Build prompt with file descriptions if present
+            let fileContext = '';
+            if (options.files && options.files.length > 0) {
+                fileContext = '\n\nATTACHED FILES:\n' + options.files.map(f => `- ${f.name} (${f.type})`).join('\n');
+                fileContext += '\n(Files will be processed with the task)';
+            }
+
+            const prompt = `${AGENT_SYSTEM_PROMPT}\n\nTASK: ${task}${fileContext}\n\nOPTIONS: ${JSON.stringify({...options, files: undefined})}\n\nRespond with JSON only.`;
             const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
             
             let plan;
@@ -86,14 +93,22 @@ export default async function handler(req, res) {
         // ACTION: EXECUTE_STEP
         // ==========================================================================
         if (action === 'execute_step') {
-            const { step, context = {} } = req.body;
+            const { step, context = {}, options = {} } = req.body;
             if (!step || !step.tool) throw new Error("Invalid step");
 
             let result = { success: true, output: '', type: 'text' };
+            
+            // Build file context if files are attached
+            let fileContext = '';
+            if (options.files && options.files.length > 0) {
+                // For text-based files, we could extract content
+                // For images/PDFs, just note they're attached
+                fileContext = '\n\n[Attached files: ' + options.files.map(f => f.name).join(', ') + ']';
+            }
 
             switch (step.tool.toUpperCase()) {
                 case 'WRITE': {
-                    const prompt = `${WRITE_SYSTEM_PROMPT}\n\nTask: ${step.action}\n\nDetails: ${step.input || context.task || ''}`;
+                    const prompt = `${WRITE_SYSTEM_PROMPT}\n\nTask: ${step.action}\n\nDetails: ${step.input || context.task || ''}${fileContext}`;
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     break;
                 }
