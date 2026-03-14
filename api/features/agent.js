@@ -6,10 +6,72 @@ import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
+// ==========================================================================
+// GEMINI VISION - For processing images/PDFs
+// ==========================================================================
+async function geminiVision(prompt, files, apiKey) {
+    const models = [
+        'gemini-2.0-flash',
+        'gemini-1.5-flash',
+        'gemini-1.5-pro'
+    ];
+    
+    for (const model of models) {
+        try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+            
+            // Build parts array with text and images
+            const parts = [{ text: prompt }];
+            
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    parts.push({
+                        inline_data: {
+                            mime_type: file.type,
+                            data: file.data
+                        }
+                    });
+                } else if (file.type === 'application/pdf') {
+                    // PDFs need different handling - for now just note them
+                    parts[0].text += `\n\n[PDF attached: ${file.name}]`;
+                }
+            }
+            
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts }],
+                    generationConfig: {
+                        temperature: 0.7,
+                        maxOutputTokens: 4096
+                    }
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+                return data.candidates[0].content.parts[0].text;
+            }
+            
+            if (data.error) {
+                console.log(`[Agent] Gemini ${model} error:`, data.error.message);
+                continue;
+            }
+        } catch (e) {
+            console.log(`[Agent] Gemini ${model} failed:`, e.message);
+            continue;
+        }
+    }
+    
+    throw new Error('All Gemini models failed for vision request');
+}
+
 const AGENT_SYSTEM_PROMPT = `You are an AI writing assistant. Create a plan using ONLY the enabled tools.
 
 Available tools:
-- WRITE: Generate essay/document content
+- WRITE: Generate essay/document content (can analyze images if attached)
 - HUMANIZE: Make text sound more natural
 - CITE: Find sources and create bibliography
 
