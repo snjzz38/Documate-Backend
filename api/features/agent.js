@@ -172,14 +172,48 @@ Be specific and detailed about the FORMAT the student needs to follow.`,
                         break;
                     }
                     
-                    // Scrape and build sources
-                    const scraped = await ScraperAPI.scrape(results.slice(0, 10));
+                    // Scrape and build sources - filter for relevance
+                    const scraped = await ScraperAPI.scrape(results.slice(0, 12));
                     const sources = [];
                     let researchText = '';
                     
+                    // Extract main topic keywords for relevance filtering
+                    const topicLower = query.toLowerCase();
+                    const topicKeywords = topicLower.match(/\b\w{4,}\b/g) || [];
+                    
                     for (const s of scraped) {
                         const text = s.text || s.content || s.snippet || '';
-                        if (text.length > 100) {
+                        const titleLower = (s.title || '').toLowerCase();
+                        const textLower = text.toLowerCase();
+                        
+                        // Skip obviously irrelevant sources
+                        const irrelevantPatterns = [
+                            /velocity.?based.?training/i,
+                            /safari|macrumors|forum/i,
+                            /powershell|script|download/i,
+                            /rendite|commerzbank/i, // German finance
+                            /chatgpt|chomsky/i
+                        ];
+                        
+                        let isIrrelevant = false;
+                        for (const pattern of irrelevantPatterns) {
+                            if (pattern.test(titleLower) || pattern.test(textLower.substring(0, 500))) {
+                                isIrrelevant = true;
+                                break;
+                            }
+                        }
+                        
+                        if (isIrrelevant) continue;
+                        
+                        // Check if source is relevant to topic (at least 2 keyword matches)
+                        let relevanceScore = 0;
+                        for (const kw of topicKeywords) {
+                            if (titleLower.includes(kw) || textLower.includes(kw)) {
+                                relevanceScore++;
+                            }
+                        }
+                        
+                        if (text.length > 100 && (relevanceScore >= 2 || topicKeywords.length < 3)) {
                             const author = s.meta?.author || null;
                             const site = cleanSiteName(s.meta?.siteName || s.link);
                             const displayName = author || site;
@@ -196,6 +230,9 @@ Be specific and detailed about the FORMAT the student needs to follow.`,
                                 displayName,
                                 text: text.substring(0, 2000)
                             });
+                            
+                            // Limit to 8 relevant sources
+                            if (sources.length >= 8) break;
                         }
                     }
                     
@@ -248,49 +285,63 @@ SOURCES:
                     let prompt = `You are an expert academic writer who follows instructions EXACTLY.
 
 ═══════════════════════════════════════════════════════════════
-CRITICAL: FOLLOW THE USER'S FORMAT EXACTLY
+CRITICAL: FOLLOW THE USER'S FORMAT/STRUCTURE
 ═══════════════════════════════════════════════════════════════
 
-If the instructions specify a TABLE with columns like:
-- "Arguments For" | "Arguments Against" → Create that exact table
-- "Decision" section → Include a Decision section
-- "Justification" section → Include a Justification section
-
 If the instructions ask for specific sections, include EXACTLY those sections.
-DO NOT create your own structure - copy the structure from the instructions.
+Use HEADINGS for organization (not tables - tables are hard to type in documents).
+
+Example format conversion:
+- If they want "Arguments For | Arguments Against" → Use two heading sections instead of a table
+- "Decision" section → Include a Decision heading
+- "Justification" section → Include a Justification heading
 
 USER'S TASK:
 ${userTask}
 
 ${userInstructions ? `═══════════════════════════════════════════════════════════════
-INSTRUCTIONS FROM UPLOADED FILE (FOLLOW THIS FORMAT):
+INSTRUCTIONS FROM UPLOADED FILE (FOLLOW THIS STRUCTURE):
 ═══════════════════════════════════════════════════════════════
 ${userInstructions}
 ` : ''}
 
-RESEARCH SOURCES (use these facts in your writing):
+RESEARCH SOURCES (use ONLY these - they are topic-specific):
 ${researchData.text?.substring(0, 8000) || ''}
 
 ${extractedQuotes.length > 0 ? `
 ═══════════════════════════════════════════════════════════════
-QUOTES TO INCLUDE (incorporate 2-3 of these with attribution):
+QUOTES TO INCLUDE (use 2-3 with attribution):
 ═══════════════════════════════════════════════════════════════
 ${extractedQuotes.map((q, i) => `${i + 1}. ${q.source}: "${q.quote}"`).join('\n')}
-
-Use these quotes naturally: According to [Source], "quote..." or As [Source] explains, "quote..."
 ` : ''}
 
-WRITING RULES:
-1. Follow the EXACT structure/format from the instructions
-2. If a table is required, create the table with the specified columns
+CRITICAL RULES:
+1. Follow the user's required sections/structure
+2. Use HEADINGS (not tables) for organization
 3. Use formal academic tone
-4. DO NOT add a bibliography/references section (added separately)
-5. Include the quotes naturally with attribution
-6. NO markdown headers (##) unless the format requires them
+4. DO NOT include any References/Bibliography/Works Cited section - that is added separately
+5. DO NOT write "References:" or list sources at the end
+6. Include quotes naturally with attribution when available
+7. Only cite sources that are RELEVANT to the topic
 
-Write the content now, matching the user's required format EXACTLY:`; 
+Write the content now (NO references section at the end):`; 
                     
                     result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
+                    
+                    // Strip any references section the AI might have added
+                    let cleanOutput = result.output;
+                    const refPatterns = [
+                        /\n\n\*?\*?References\*?\*?:?\n[\s\S]*$/i,
+                        /\n\n\*?\*?Works Cited\*?\*?:?\n[\s\S]*$/i,
+                        /\n\n\*?\*?Bibliography\*?\*?:?\n[\s\S]*$/i,
+                        /\n\n\*?\*?Sources\*?\*?:?\n[\s\S]*$/i,
+                        /\n\nAPA REFERENCES:[\s\S]*$/i
+                    ];
+                    for (const pattern of refPatterns) {
+                        cleanOutput = cleanOutput.replace(pattern, '');
+                    }
+                    
+                    result.output = cleanOutput.trim();
                     result.type = 'text';
                     break;
                 }
