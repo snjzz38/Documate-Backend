@@ -1,186 +1,298 @@
-// api/features/agent.js - Agent Mode
-// FLOW: RESEARCH → QUOTES → WRITE → HUMANIZE → INSERT_CITATIONS → GRADE → CITE
+// api/utils/googleSearch.js
+// SearXNG-based search with academic source prioritization
+import { GroqAPI } from './groqAPI.js';
 
-import { GeminiAPI } from '../utils/geminiAPI.js';
-import { GroqAPI } from '../utils/groqAPI.js';
-import { GoogleSearchAPI } from '../utils/googleSearch.js';
-import { ScraperAPI } from '../utils/scraper.js';
+const INSTANCES = [
+    'https://search.sapti.me',
+    'https://searx.tiekoetter.com', 
+    'https://search.bus-hit.me',
+    'https://searx.be',
+    'https://search.ononoki.org',
+    'https://priv.au',
+    'https://searx.work',
+    'https://search.mdosch.de'
+];
 
-// Helpers
-async function vision(prompt, files, key) {
-    const imgs = files.filter(f => f.type?.startsWith('image/') && f.data);
-    if (!imgs.length) return 'No image provided. Please describe your assignment.';
-    
-    for (const model of ['gemini-2.0-flash', 'gemini-1.5-flash']) {
+// Sites that are never useful for academic research
+const BANNED_DOMAINS = [
+    'reddit', 'quora', 'stackoverflow', 'stackexchange',
+    'youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest',
+    'amazon', 'ebay', 'etsy', 'alibaba', 'aliexpress',
+    'macrumors', 'forums', 'discord', 'telegram',
+    'commerzbank', 'investopedia' // financial sites unless relevant
+];
+
+const BANNED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.mp3', '.pdf.jpg', '.zip', '.exe'];
+
+// Academic and authoritative sources get priority
+const PREFERRED_DOMAINS = [
+    // Academic databases
+    'edu', 'gov', 'pubmed', 'ncbi.nlm.nih.gov', 'nih.gov', 'jstor', 'doi.org',
+    'scholar.google', 'arxiv', 'researchgate', 'academia.edu',
+    // Major publishers
+    'nature.com', 'science.org', 'sciencedirect', 'springer', 'wiley', 
+    'tandfonline', 'sagepub', 'oup.com', 'cambridge.org', 'pnas.org', 
+    'cell.com', 'bmj.com', 'thelancet.com', 'nejm.org', 'jama',
+    // Trusted organizations  
+    'who.int', 'cdc.gov', 'nasa.gov', 'noaa.gov', 'epa.gov',
+    'nationalacademies', 'genome.gov', 'niehs.nih.gov'
+];
+
+export const GoogleSearchAPI = {
+
+    async search(query, apiKey, cx, groqKey = null) {
+        // Generate focused search queries
+        const queries = groqKey
+            ? await this._extractTopicQueries(query, groqKey)
+            : [this._buildSimpleQuery(query)];
+
+        console.log('[Search] Queries:', queries);
+
+        // Run all queries in parallel
+        const allResultArrays = await Promise.all(
+            queries.map(q => this._searchWithFallback(q))
+        );
+
+        const allResults = allResultArrays.flat();
+        console.log('[Search] Total raw results:', allResults.length);
+
+        // Filter and score results
+        const filtered = this._filterAndScore(allResults, query);
+        console.log('[Search] After filtering:', filtered.length);
+
+        return filtered;
+    },
+
+    async _extractTopicQueries(text, groqKey) {
         try {
-            const parts = [{ text: prompt }, ...imgs.map(f => ({
-                inline_data: { mime_type: f.type, data: f.data.includes(',') ? f.data.split(',')[1] : f.data }
-            }))];
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.4, maxOutputTokens: 4096 } })
-            });
-            const data = await res.json();
-            if (data.candidates?.[0]?.content?.parts?.[0]?.text) return data.candidates[0].content.parts[0].text;
-        } catch (e) { console.log(`[Agent] Vision ${model}:`, e.message); }
-    }
-    return 'Could not read image. Please describe your assignment.';
-}
+            const prompt = `Generate 3-5 specific search queries for academic research on this topic.
 
-const cleanSite = s => {
-    if (!s) return 'Unknown';
-    const n = s.replace(/^(www\.|https?:\/\/)/i, '').split(/[\/\?#\.]/)[0].toLowerCase();
-    return { pmc: 'NIH', ncbi: 'NIH', arxiv: 'arXiv', noaa: 'NOAA', nasa: 'NASA', pubmed: 'PubMed' }[n] || n.charAt(0).toUpperCase() + n.slice(1);
-};
-
-const getAuthor = src => (src.author?.length > 2 ? src.author : src.displayName || cleanSite(src.site));
-
-const stripRefs = text => [/\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources)\*?\*?[\s\S]*$/i, /\n\n#{1,3}\s*(?:References|Works Cited)[\s\S]*$/i]
-    .reduce((t, p) => t.replace(p, ''), text).trim();
-
-const stripMarkdown = text => text
-    .replace(/\*\*([^*]+)\*\*/g, '$1')  // **bold**
-    .replace(/\*([^*]+)\*/g, '$1')       // *italic*
-    .replace(/__([^_]+)__/g, '$1')       // __bold__
-    .replace(/_([^_]+)_/g, '$1')         // _italic_
-    .replace(/^#{1,6}\s*/gm, '')         // # headings
-    .replace(/`([^`]+)`/g, '$1')         // `code`
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // [link](url)
-
-const extractTopic = text => {
-    for (const p of [/(?:topic|about|write about|essay on)[:\s]+["']?([^"'\n.!?]{10,80})["']?/i, /(?:designer babies|gene editing|CRISPR|climate change)/i, /(?:ethics of|effects of)\s+([^.!?\n]{5,50})/i]) {
-        const m = text.match(p); if (m) return m[1] || m[0];
-    }
-    const skip = new Set(['write','essay','paragraph','summary','discuss','explain','citations','please','about','using']);
-    return (text.toLowerCase().match(/\b[a-z]{4,}\b/g) || []).filter(w => !skip.has(w)).slice(0, 5).join(' ') || text.substring(0, 80);
-};
-
-export default async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') return res.status(200).end();
-
-    try {
-        const { action, task, options = {} } = req.body;
-        const GEMINI = process.env.GEMINI_API_KEY, GROQ = process.env.GROQ_API_KEY;
-
-        if (action === 'plan') {
-            const steps = [{ tool: 'RESEARCH', action: 'Search and gather information' }];
-            if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Extract quotes' });
-            if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Generate content' });
-            if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Make natural' });
-            if (options.enableCite && options.citationType !== 'bibliography') steps.push({ tool: 'INSERT_CITATIONS', action: 'Insert citations' });
-            if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Check quality' });
-            if (options.enableCite) steps.push({ tool: 'CITE', action: `Format ${{ mla9: 'MLA', apa7: 'APA', chicago: 'Chicago' }[options.citationStyle] || 'MLA'} ${options.citationType || 'bibliography'}` });
-            return res.status(200).json({ success: true, plan: { understanding: task.substring(0, 150), steps } });
-        }
-
-        if (action === 'execute_step') {
-            const { step, context = {}, options = {} } = req.body;
-            let result = { success: true, output: '', type: 'text' };
-
-            switch (step.tool.toUpperCase()) {
-                case 'RESEARCH': {
-                    let instructions = '';
-                    if (options.files?.some(f => f.type?.startsWith('image/')))
-                        instructions = await vision('Extract: 1) Main TOPIC 2) Required FORMAT/sections 3) Citation needs. TOPIC on first line.', options.files, GEMINI);
-                    const query = extractTopic(instructions + ' ' + (context.task || ''));
-                    console.log('[Agent] Query:', query);
-                    
-                    const results = await GoogleSearchAPI.search(query, null, null, GROQ);
-                    if (!results?.length) { result.output = { text: '', sources: [], instructions }; result.type = 'research'; break; }
-                    
-                    const scraped = await ScraperAPI.scrape(results.slice(0, 10));
-                    const sources = [], texts = [];
-                    for (const s of scraped) {
-                        const txt = s.text || s.content || s.snippet || '';
-                        if (txt.length > 100) {
-                            const site = cleanSite(s.meta?.siteName || s.link), name = s.meta?.author || site;
-                            texts.push(`[${name}, ${s.meta?.year || 'n.d.'}]\n${txt.substring(0, 2000)}`);
-                            sources.push({ id: sources.length + 1, title: s.title, url: s.link, site, author: s.meta?.author, year: s.meta?.year || 'n.d.', displayName: name, text: txt.substring(0, 2000) });
-                        }
-                    }
-                    result.output = { text: texts.join('\n\n'), sources, instructions }; result.type = 'research'; break;
-                }
-
-                case 'QUOTES': {
-                    const src = context.researchSources || [];
-                    if (!src.length) { result.output = []; result.type = 'quotes'; break; }
-                    const resp = await GeminiAPI.chat(`Extract 3-5 quotes.\nFORMAT: Source: "quote"\n\n${src.slice(0,5).map(s => `--- ${s.displayName} ---\n${s.text?.substring(0,1200)}`).join('\n\n')}`, GEMINI);
-                    result.output = resp.split('\n').map(l => l.match(/^([^:]+):\s*"([^"]+)"/)).filter(Boolean).map(m => ({ source: m[1].trim(), quote: m[2].trim() }));
-                    result.type = 'quotes'; break;
-                }
-
-                case 'WRITE': {
-                    const { researchData = {}, extractedQuotes = [], task } = context;
-                    const prompt = `Expert writer. Follow format exactly. Use HEADINGS not tables.
-
-TASK: ${task}${researchData.instructions ? `\nINSTRUCTIONS:\n${researchData.instructions}` : ''}
-RESEARCH:\n${researchData.text?.substring(0, 8000) || ''}${extractedQuotes.length ? `\nQUOTES:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}
+TEXT:
+"${text.substring(0, 800)}"
 
 RULES:
-1. Follow structure, formal tone, NO bibliography
-2. Include quotes with attribution
-3. OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold, no italics, no special formatting
-4. Use simple headings like "Arguments For" not "**Arguments For**" or "### Arguments For"`;
-                    result.output = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI))); result.type = 'text'; break;
-                }
+- Each query should be 3-6 words
+- Focus on the MAIN TOPIC and key concepts
+- Include specific terms, names, or theories mentioned
+- Make queries specific enough to find relevant academic sources
+- Avoid generic words like "research", "study", "analysis"
 
-                case 'HUMANIZE': {
-                    const text = context.previousOutput || '';
-                    if (text.length < 50) throw new Error('No text');
-                    let output = await GeminiAPI.chat(`Rewrite naturally. Keep structure, preserve quotes, NO references section.
+Return ONLY a JSON array:
+["specific query one", "specific query two", "specific query three"]`;
 
-OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold, no italics, no special characters like * or #.
-
-TEXT:\n${text}`, GEMINI);
-                    result.output = stripMarkdown(stripRefs(output));
-                    result.type = 'text'; break;
-                }
-
-                case 'INSERT_CITATIONS': {
-                    const text = context.previousOutput || '', sources = context.researchSources || [];
-                    const style = options.citationStyle || 'apa7', type = options.citationType || 'in-text';
-                    if (!text || !sources.length) { result.output = text; result.type = 'text'; break; }
-                    
-                    try {
-                        const resp = await GroqAPI.chat([{ role: 'user', content: `Insert citations.\nSOURCES:\n${sources.map(s => `[${s.id}] ${getAuthor(s)} (${s.year})`).join('\n')}\n\nTEXT:\n"${text.substring(0,5000)}"\n\nJSON: {"insertions":[{"anchor":"3-5 words","source_id":1}]}` }], GROQ, false);
-                        const json = resp.match(/\{[\s\S]*\}/);
-                        if (json) {
-                            const ins = JSON.parse(json[0]).insertions || [];
-                            let cited = text;
-                            const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-                            const pos = [];
-                            let fn = 1;
-                            for (const i of ins) {
-                                if (!i.anchor) continue;
-                                const p = cited.toLowerCase().indexOf(i.anchor.toLowerCase());
-                                if (p === -1) continue;
-                                const s = sources.find(x => x.id === i.source_id);
-                                if (!s) continue;
-                                const a = getAuthor(s);
-                                const cit = type === 'footnotes' ? toSuper(fn++) : style.includes('apa') ? ` (${a}, ${s.year})` : style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
-                                pos.push({ p: p + i.anchor.length, cit, src: s });
-                            }
-                            pos.sort((a, b) => b.p - a.p).forEach(x => cited = cited.slice(0, x.p) + x.cit + cited.slice(x.p));
-                            result.output = cited; result.citedSources = pos.map(x => x.src);
-                        } else result.output = text;
-                    } catch { result.output = text; }
-                    result.type = 'text'; break;
-                }
-
-                case 'GRADE': {
-                    const text = context.previousOutput || '', inst = context.researchData?.instructions || context.task || '';
-                    if (text.length < 50) { result.output = { grade: 'N/A', feedback: 'No content' }; result.type = 'grade'; break; }
-                    const resp = await GeminiAPI.chat(`Grade:\n\nREQUIREMENTS:\n${inst}\n\nWORK:\n${text.substring(0,5000)}\n\nGRADE: A-F\nSTRENGTHS:\nIMPROVEMENTS:`, GEMINI);
-                    result.output = { grade: resp.match(/GRADE:\s*([A-F][+-]?)/i)?.[1] || 'B', feedback: resp }; result.type = 'grade'; break;
-                }
-
-                case 'CITE': { result.output = context.researchSources || []; result.type = 'citations'; break; }
-            }
-            return res.status(200).json(result);
+            const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
+            const jsonMatch = response.match(/\[[\s\S]*?\]/);
+            
+            if (!jsonMatch) throw new Error('No JSON array');
+            
+            const queries = JSON.parse(jsonMatch[0]);
+            const cleaned = queries
+                .filter(q => typeof q === 'string' && q.trim().length >= 8)
+                .map(q => q.trim().substring(0, 100));
+            
+            if (cleaned.length === 0) throw new Error('No valid queries');
+            
+            console.log('[Search] Generated queries:', cleaned);
+            return cleaned;
+            
+        } catch (e) {
+            console.error('[Search] Query generation failed:', e.message);
+            return [this._buildSimpleQuery(text)];
         }
-        throw new Error(`Unknown action: ${action}`);
-    } catch (e) { console.error('[Agent]', e); return res.status(500).json({ success: false, error: e.message }); }
-}
+    },
+
+    _buildSimpleQuery(text) {
+        // Extract key terms from the text
+        const words = text.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+        const stopWords = new Set([
+            'the','this','that','these','those','they','their','what','which','where',
+            'when','why','how','have','has','had','will','would','could','should',
+            'about','write','essay','paragraph','summary','discuss','explain','describe'
+        ]);
+        
+        const meaningful = [...new Set(words)]
+            .filter(w => !stopWords.has(w))
+            .slice(0, 5);
+        
+        return meaningful.join(' ') || text.substring(0, 50);
+    },
+
+    async _searchWithFallback(query) {
+        const shuffled = [...INSTANCES].sort(() => Math.random() - 0.5);
+
+        for (const instance of shuffled.slice(0, 4)) {
+            try {
+                console.log('[Search] Trying:', instance);
+                const results = await this._fetch(instance, query);
+                if (results.length > 0) {
+                    console.log('[Search] Got', results.length, 'results');
+                    return results;
+                }
+            } catch (e) {
+                console.error('[Search] Instance failed:', instance, e.message);
+            }
+        }
+
+        console.warn('[Search] All instances failed for:', query);
+        return [];
+    },
+
+    _filterAndScore(results, originalQuery) {
+        const seen = new Set();
+        const queryLower = originalQuery.toLowerCase();
+        const queryWords = queryLower.match(/\b[a-z]{4,}\b/g) || [];
+
+        return results
+            .filter(r => {
+                if (!r.title || !r.link) return false;
+
+                const lowerUrl = r.link.toLowerCase();
+                const lowerTitle = r.title.toLowerCase();
+                
+                // Skip banned file types
+                if (BANNED_EXTENSIONS.some(ext => lowerUrl.includes(ext))) return false;
+
+                try {
+                    const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
+                    
+                    // Skip banned domains
+                    if (BANNED_DOMAINS.some(b => domain.includes(b))) return false;
+                    
+                    // Skip duplicate domains
+                    if (seen.has(domain)) return false;
+                    seen.add(domain);
+                    
+                    return true;
+                } catch { return false; }
+            })
+            .map(r => {
+                let score = 0;
+                const lowerTitle = r.title.toLowerCase();
+                const lowerSnippet = (r.snippet || '').toLowerCase();
+                
+                try {
+                    const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
+                    
+                    // Boost academic/authoritative sources
+                    if (PREFERRED_DOMAINS.some(p => domain.includes(p))) score += 5;
+                    if (domain.endsWith('.edu')) score += 4;
+                    if (domain.endsWith('.gov')) score += 4;
+                    if (domain.includes('.org')) score += 2;
+                    
+                    // Penalize low-quality indicators
+                    if (domain.includes('blog')) score -= 2;
+                    if (domain.includes('forum')) score -= 3;
+                    if (r.title.length < 15) score -= 2;
+                    
+                    // Boost relevance to query
+                    let relevance = 0;
+                    for (const word of queryWords) {
+                        if (lowerTitle.includes(word)) relevance += 2;
+                        if (lowerSnippet.includes(word)) relevance += 1;
+                    }
+                    score += Math.min(relevance, 6); // Cap relevance boost
+                    
+                } catch {}
+                
+                return { ...r, _score: score };
+            })
+            .sort((a, b) => b._score - a._score)
+            .slice(0, 12);
+    },
+
+    async _fetch(instance, query) {
+        // Add academic focus to search
+        const searchQuery = query + ' scholarly';
+        const url = `${instance}/search?q=${encodeURIComponent(searchQuery)}&categories=general,science&language=en&format=json`;
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+
+        try {
+            // Try JSON format first (cleaner)
+            let res = await fetch(url, {
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json, text/html'
+                }
+            });
+            clearTimeout(timeout);
+            
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            
+            const contentType = res.headers.get('content-type') || '';
+            
+            if (contentType.includes('json')) {
+                const data = await res.json();
+                if (data.results && Array.isArray(data.results)) {
+                    return data.results.map(r => ({
+                        title: r.title || '',
+                        link: r.url || r.link || '',
+                        snippet: r.content || r.snippet || ''
+                    })).filter(r => r.title && r.link);
+                }
+            }
+            
+            // Fallback to HTML parsing
+            const html = await res.text();
+            return this._parseResults(html);
+            
+        } catch (e) {
+            clearTimeout(timeout);
+            throw e;
+        }
+    },
+
+    _parseResults(html) {
+        const results = [];
+
+        // Try article tags first (most SearX instances)
+        const articleRegex = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
+        let match;
+
+        while ((match = articleRegex.exec(html)) !== null) {
+            const block = match[1];
+            const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/);
+            const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/) ||
+                               block.match(/<a[^>]*>([\s\S]*?)<\/a>/);
+            const snippetMatch = block.match(/<p[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/p>/);
+
+            if (urlMatch && titleMatch) {
+                const url = urlMatch[1];
+                const title = this._clean(titleMatch[1]);
+                const snippet = snippetMatch ? this._clean(snippetMatch[1]) : '';
+                if (title && url && !url.includes('searx')) {
+                    results.push({ title, link: url, snippet });
+                }
+            }
+        }
+
+        // Fallback: try div-based results
+        if (results.length < 3) {
+            const divRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+            while ((match = divRegex.exec(html)) !== null) {
+                const block = match[1];
+                const urlMatch = block.match(/href="(https?:\/\/[^"]+)"/);
+                const titleMatch = block.match(/<h[34][^>]*>([\s\S]*?)<\/h[34]>/);
+                if (urlMatch && titleMatch) {
+                    const url = urlMatch[1];
+                    const title = this._clean(titleMatch[1]);
+                    if (title && !url.includes('searx') && !results.some(r => r.link === url)) {
+                        results.push({ title, link: url, snippet: '' });
+                    }
+                }
+            }
+        }
+
+        return results.slice(0, 25);
+    },
+
+    _clean(html) {
+        return (html || '')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ').trim().substring(0, 300);
+    }
+};
