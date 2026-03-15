@@ -1,6 +1,4 @@
-// api/features/agent.js
-// Agent Mode - Clean implementation using existing utilities
-// 
+// api/features/agent.js - Agent Mode
 // FLOW: RESEARCH → QUOTES → WRITE → HUMANIZE → INSERT_CITATIONS → GRADE → CITE
 
 import { GeminiAPI } from '../utils/geminiAPI.js';
@@ -8,85 +6,46 @@ import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
-// ==========================================================================
-// HELPERS
-// ==========================================================================
-async function geminiVision(prompt, files, apiKey) {
-    const models = ['gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+// Helpers
+async function vision(prompt, files, key) {
+    const imgs = files.filter(f => f.type?.startsWith('image/') && f.data);
+    if (!imgs.length) return 'No image provided. Please describe your assignment.';
     
-    // Validate files
-    const imageFiles = files.filter(f => f.type?.startsWith('image/') && f.data);
-    if (imageFiles.length === 0) {
-        throw new Error('No valid image files provided');
-    }
-    
-    for (const model of models) {
+    for (const model of ['gemini-2.0-flash', 'gemini-1.5-flash']) {
         try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-            
-            const parts = [{ text: prompt }];
-            for (const file of imageFiles) {
-                // Ensure base64 data doesn't have data URL prefix
-                let base64Data = file.data;
-                if (base64Data.includes(',')) {
-                    base64Data = base64Data.split(',')[1];
-                }
-                parts.push({ 
-                    inline_data: { 
-                        mime_type: file.type, 
-                        data: base64Data 
-                    } 
-                });
-            }
-            
-            console.log(`[Agent] Trying vision model: ${model}`);
-            
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    contents: [{ parts }], 
-                    generationConfig: { temperature: 0.4, maxOutputTokens: 4096 } 
-                })
+            const parts = [{ text: prompt }, ...imgs.map(f => ({
+                inline_data: { mime_type: f.type, data: f.data.includes(',') ? f.data.split(',')[1] : f.data }
+            }))];
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts }], generationConfig: { temperature: 0.4, maxOutputTokens: 4096 } })
             });
-            
             const data = await res.json();
-            
-            if (data.error) {
-                console.log(`[Agent] Vision ${model} error:`, data.error.message);
-                continue;
-            }
-            
-            if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-                console.log(`[Agent] Vision success with ${model}`);
-                return data.candidates[0].content.parts[0].text;
-            }
-        } catch (e) { 
-            console.log(`[Agent] Vision ${model} failed:`, e.message); 
-        }
+            if (data.candidates?.[0]?.content?.parts?.[0]?.text) return data.candidates[0].content.parts[0].text;
+        } catch (e) { console.log(`[Agent] Vision ${model}:`, e.message); }
     }
-    
-    // If all vision models fail, return a fallback message
-    console.log('[Agent] All vision models failed, using fallback');
-    return 'Unable to process image. Please describe the assignment requirements in the text box.';
+    return 'Could not read image. Please describe your assignment.';
 }
 
-function cleanSiteName(site) {
-    if (!site) return 'Unknown';
-    let name = site.replace(/^(www\.|https?:\/\/)/i, '').split(/[\/\?#\.]/)[0];
-    const fixes = { pmc: 'NIH', ncbi: 'NIH', arxiv: 'arXiv', noaa: 'NOAA', nasa: 'NASA', epa: 'EPA', ipcc: 'IPCC', pubmed: 'PubMed' };
-    if (fixes[name.toLowerCase()]) return fixes[name.toLowerCase()];
-    return name.charAt(0).toUpperCase() + name.slice(1);
-}
+const cleanSite = s => {
+    if (!s) return 'Unknown';
+    const n = s.replace(/^(www\.|https?:\/\/)/i, '').split(/[\/\?#\.]/)[0].toLowerCase();
+    return { pmc: 'NIH', ncbi: 'NIH', arxiv: 'arXiv', noaa: 'NOAA', nasa: 'NASA', pubmed: 'PubMed' }[n] || n.charAt(0).toUpperCase() + n.slice(1);
+};
 
-function getAuthorForCitation(source) {
-    if (source.author && source.author.length > 2) return source.author;
-    return source.displayName || cleanSiteName(source.site) || 'Unknown';
-}
+const getAuthor = src => (src.author?.length > 2 ? src.author : src.displayName || cleanSite(src.site));
 
-// ==========================================================================
-// MAIN HANDLER
-// ==========================================================================
+const stripRefs = text => [/\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources)\*?\*?[\s\S]*$/i, /\n\n#{1,3}\s*(?:References|Works Cited)[\s\S]*$/i]
+    .reduce((t, p) => t.replace(p, ''), text).trim();
+
+const extractTopic = text => {
+    for (const p of [/(?:topic|about|write about|essay on)[:\s]+["']?([^"'\n.!?]{10,80})["']?/i, /(?:designer babies|gene editing|CRISPR|climate change)/i, /(?:ethics of|effects of)\s+([^.!?\n]{5,50})/i]) {
+        const m = text.match(p); if (m) return m[1] || m[0];
+    }
+    const skip = new Set(['write','essay','paragraph','summary','discuss','explain','citations','please','about','using']);
+    return (text.toLowerCase().match(/\b[a-z]{4,}\b/g) || []).filter(w => !skip.has(w)).slice(0, 5).join(' ') || text.substring(0, 80);
+};
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -95,356 +54,110 @@ export default async function handler(req, res) {
 
     try {
         const { action, task, options = {} } = req.body;
-        const GEMINI_KEY = process.env.GEMINI_API_KEY;
-        const GROQ_KEY = process.env.GROQ_API_KEY;
+        const GEMINI = process.env.GEMINI_API_KEY, GROQ = process.env.GROQ_API_KEY;
 
-        // ==========================================================================
-        // PLAN
-        // ==========================================================================
         if (action === 'plan') {
-            const steps = [{ tool: 'RESEARCH', action: 'Search and gather factual information', dependsOn: null }];
-            
-            if (options.enableQuotes) {
-                steps.push({ tool: 'QUOTES', action: 'Extract key quotes from sources', dependsOn: 0 });
-            }
-            if (options.enableWrite !== false) {
-                steps.push({ tool: 'WRITE', action: 'Generate content following instructions', dependsOn: steps.length - 1 });
-            }
-            if (options.enableHumanize) {
-                steps.push({ tool: 'HUMANIZE', action: 'Make text sound natural', dependsOn: steps.length - 1 });
-            }
-            if (options.enableCite && (options.citationType === 'in-text' || options.citationType === 'footnotes')) {
-                steps.push({ tool: 'INSERT_CITATIONS', action: 'Insert in-text citations', dependsOn: steps.length - 1 });
-            }
-            if (options.enableGrade) {
-                steps.push({ tool: 'GRADE', action: 'Check quality and criteria', dependsOn: steps.length - 1 });
-            }
-            if (options.enableCite) {
-                const styles = { mla9: 'MLA 9th', apa7: 'APA 7th', chicago: 'Chicago' };
-                const types = { bibliography: 'bibliography', 'in-text': 'in-text citations', footnotes: 'footnotes' };
-                steps.push({ 
-                    tool: 'CITE', 
-                    action: `Format ${styles[options.citationStyle] || 'MLA 9th'} ${types[options.citationType] || 'bibliography'}`,
-                    dependsOn: 0 
-                });
-            }
-
+            const steps = [{ tool: 'RESEARCH', action: 'Search and gather information' }];
+            if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Extract quotes' });
+            if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Generate content' });
+            if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Make natural' });
+            if (options.enableCite && options.citationType !== 'bibliography') steps.push({ tool: 'INSERT_CITATIONS', action: 'Insert citations' });
+            if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Check quality' });
+            if (options.enableCite) steps.push({ tool: 'CITE', action: `Format ${{ mla9: 'MLA', apa7: 'APA', chicago: 'Chicago' }[options.citationStyle] || 'MLA'} ${options.citationType || 'bibliography'}` });
             return res.status(200).json({ success: true, plan: { understanding: task.substring(0, 150), steps } });
         }
 
-        // ==========================================================================
-        // EXECUTE STEP
-        // ==========================================================================
         if (action === 'execute_step') {
             const { step, context = {}, options = {} } = req.body;
             let result = { success: true, output: '', type: 'text' };
 
             switch (step.tool.toUpperCase()) {
                 case 'RESEARCH': {
-                    let query = context.task || '';
-                    let userInstructions = '';
+                    let instructions = '';
+                    if (options.files?.some(f => f.type?.startsWith('image/')))
+                        instructions = await vision('Extract: 1) Main TOPIC 2) Required FORMAT/sections 3) Citation needs. TOPIC on first line.', options.files, GEMINI);
+                    const query = extractTopic(instructions + ' ' + (context.task || ''));
+                    console.log('[Agent] Query:', query);
                     
-                    // Handle images
-                    if (options.files?.some(f => f.type?.startsWith('image/'))) {
-                        userInstructions = await geminiVision(
-                            `Analyze this assignment image. Extract:
-1. The main TOPIC to research
-2. Required SECTIONS/FORMAT (e.g., "Arguments For", "Arguments Against", "Decision", "Justification")
-3. Any citation requirements
-4. Word count or other requirements
-
-Be specific about the structure the student needs to follow.`,
-                            options.files, 
-                            GEMINI_KEY
-                        );
-                        
-                        // Extract topic for search
-                        const topicMatch = userInstructions.match(/(?:topic|about|research|write about|issue)[:\s]+([^.!?\n]+)/i);
-                        query = topicMatch ? topicMatch[1] : query || userInstructions.substring(0, 150);
-                    }
+                    const results = await GoogleSearchAPI.search(query, null, null, GROQ);
+                    if (!results?.length) { result.output = { text: '', sources: [], instructions }; result.type = 'research'; break; }
                     
-                    console.log('[Agent] Research query:', query.substring(0, 100));
-                    
-                    // Use GoogleSearchAPI - it handles all the filtering
-                    let results = await GoogleSearchAPI.search(query, null, null, GROQ_KEY);
-                    
-                    if (!results?.length) {
-                        result.output = { text: '', sources: [], userInstructions };
-                        result.type = 'research';
-                        break;
-                    }
-                    
-                    // Use ScraperAPI - it handles content extraction
                     const scraped = await ScraperAPI.scrape(results.slice(0, 10));
-                    const sources = [];
-                    let researchText = '';
-                    
+                    const sources = [], texts = [];
                     for (const s of scraped) {
-                        const text = s.text || s.content || s.snippet || '';
-                        if (text.length > 100) {
-                            const author = s.meta?.author || null;
-                            const site = cleanSiteName(s.meta?.siteName || s.link);
-                            const displayName = author || site;
-                            const year = s.meta?.year || 'n.d.';
-                            
-                            researchText += `\n\n[${displayName}, ${year}]\n${text.substring(0, 2000)}`;
-                            sources.push({
-                                id: sources.length + 1,
-                                title: s.title,
-                                url: s.link,
-                                site,
-                                author,
-                                year,
-                                displayName,
-                                text: text.substring(0, 2000)
-                            });
+                        const txt = s.text || s.content || s.snippet || '';
+                        if (txt.length > 100) {
+                            const site = cleanSite(s.meta?.siteName || s.link), name = s.meta?.author || site;
+                            texts.push(`[${name}, ${s.meta?.year || 'n.d.'}]\n${txt.substring(0, 2000)}`);
+                            sources.push({ id: sources.length + 1, title: s.title, url: s.link, site, author: s.meta?.author, year: s.meta?.year || 'n.d.', displayName: name, text: txt.substring(0, 2000) });
                         }
                     }
-                    
-                    result.output = { text: researchText, sources, userInstructions };
-                    result.type = 'research';
-                    break;
+                    result.output = { text: texts.join('\n\n'), sources, instructions }; result.type = 'research'; break;
                 }
 
                 case 'QUOTES': {
-                    const sources = context.researchSources || [];
-                    if (!sources.length) { result.output = []; result.type = 'quotes'; break; }
-                    
-                    const prompt = `Extract 3-5 important factual quotes from these sources.
-FORMAT (one per line): SourceName: "exact quote"
-
-${sources.slice(0, 6).map(s => `--- ${s.displayName} (${s.year}) ---\n${s.text?.substring(0, 1500) || ''}`).join('\n\n')}
-
-Extract 3-5 quotes:`;
-                    
-                    const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    const quotes = [];
-                    
-                    for (const line of response.split('\n')) {
-                        const match = line.match(/^([^:]+):\s*"([^"]+)"/);
-                        if (match) quotes.push({ source: match[1].trim(), quote: match[2].trim() });
-                    }
-                    
-                    result.output = quotes;
-                    result.type = 'quotes';
-                    break;
+                    const src = context.researchSources || [];
+                    if (!src.length) { result.output = []; result.type = 'quotes'; break; }
+                    const resp = await GeminiAPI.chat(`Extract 3-5 quotes.\nFORMAT: Source: "quote"\n\n${src.slice(0,5).map(s => `--- ${s.displayName} ---\n${s.text?.substring(0,1200)}`).join('\n\n')}`, GEMINI);
+                    result.output = resp.split('\n').map(l => l.match(/^([^:]+):\s*"([^"]+)"/)).filter(Boolean).map(m => ({ source: m[1].trim(), quote: m[2].trim() }));
+                    result.type = 'quotes'; break;
                 }
 
                 case 'WRITE': {
-                    const { researchData = {}, extractedQuotes = [], task: userTask } = context;
-                    const userInstructions = researchData.userInstructions || '';
-                    
-                    let prompt = `You are an expert academic writer.
-
-CRITICAL: Follow the user's required format/structure exactly.
-Use HEADINGS for sections (not tables - they're hard to type).
-
-USER'S TASK:
-${userTask}
-
-${userInstructions ? `INSTRUCTIONS FROM UPLOADED FILE:\n${userInstructions}\n` : ''}
-
-RESEARCH:
-${researchData.text?.substring(0, 8000) || ''}
-
-${extractedQuotes.length > 0 ? `QUOTES TO INCLUDE:\n${extractedQuotes.map((q, i) => `${i + 1}. ${q.source}: "${q.quote}"`).join('\n')}\n` : ''}
-
-RULES:
-1. Follow the user's required sections/structure
-2. Use headings for organization
-3. Formal academic tone
-4. NO bibliography section (added separately)
-5. Include quotes with attribution
-
-Write the content now:`;
-                    
-                    let output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    
-                    // Strip any references/bibliography section the AI might add
-                    const refPatterns = [
-                        /\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources|APA References|MLA References|Citations)\*?\*?\s*(?:\(.*?\))?\s*:?\s*\n[\s\S]*$/i,
-                        /\n\n---+\s*\n\s*\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i,
-                        /\n\n#{1,3}\s*(?:References|Works Cited|Bibliography)[\s\S]*$/i
-                    ];
-                    
-                    for (const pattern of refPatterns) {
-                        output = output.replace(pattern, '');
-                    }
-                    
-                    result.output = output.trim();
-                    result.type = 'text';
-                    break;
+                    const { researchData = {}, extractedQuotes = [], task } = context;
+                    const prompt = `Expert writer. Follow format exactly. Use HEADINGS not tables.\n\nTASK: ${task}${researchData.instructions ? `\nINSTRUCTIONS:\n${researchData.instructions}` : ''}\nRESEARCH:\n${researchData.text?.substring(0, 8000) || ''}${extractedQuotes.length ? `\nQUOTES:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}\n\nRULES: Follow structure, formal tone, NO bibliography, include quotes.`;
+                    result.output = stripRefs(await GeminiAPI.chat(prompt, GEMINI)); result.type = 'text'; break;
                 }
 
                 case 'HUMANIZE': {
                     const text = context.previousOutput || '';
-                    if (text.length < 50) throw new Error('No text to humanize');
-                    
-                    const prompt = `Rewrite this to sound more natural and human-like.
-
-RULES:
-- Vary sentence structure
-- Use natural transitions  
-- Keep SAME structure/format
-- Preserve all quotes exactly
-- Do NOT add any References, Works Cited, or Bibliography section
-
-TEXT:
-${text}`;
-                    let output = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    
-                    // Strip any references section
-                    const refPatterns = [
-                        /\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources)\*?\*?\s*(?:\(.*?\))?\s*:?\s*\n[\s\S]*$/i,
-                        /\n\n---+\s*\n\s*\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i
-                    ];
-                    for (const pattern of refPatterns) {
-                        output = output.replace(pattern, '');
-                    }
-                    
-                    result.output = output.trim();
-                    result.type = 'text';
-                    break;
+                    if (text.length < 50) throw new Error('No text');
+                    result.output = stripRefs(await GeminiAPI.chat(`Rewrite naturally. Keep structure, preserve quotes, NO references section.\n\n${text}`, GEMINI));
+                    result.type = 'text'; break;
                 }
 
                 case 'INSERT_CITATIONS': {
-                    const text = context.previousOutput || '';
-                    const sources = context.researchSources || [];
-                    const style = options.citationStyle || 'apa7';
-                    const citationType = options.citationType || 'in-text';
+                    const text = context.previousOutput || '', sources = context.researchSources || [];
+                    const style = options.citationStyle || 'apa7', type = options.citationType || 'in-text';
+                    if (!text || !sources.length) { result.output = text; result.type = 'text'; break; }
                     
-                    if (!text || sources.length === 0) {
-                        result.output = text;
-                        result.type = 'text';
-                        break;
-                    }
-                    
-                    const srcList = sources.map(s => `[${s.id}] ${getAuthorForCitation(s)} (${s.year}) - ${s.title.substring(0, 60)}`).join('\n');
-                    
-                    const insertPrompt = `Find where to insert citations in this text.
-
-SOURCES:
-${srcList}
-
-TEXT:
-"${text.substring(0, 6000)}"
-
-Return JSON only:
-{"insertions":[{"anchor":"3-6 exact words from text","source_id":1}]}
-
-Rules:
-- anchor = exact consecutive words from text
-- Insert after factual claims
-- Use 5-8 insertions spread across text
-- Match source topics to claims`;
-
                     try {
-                        const response = await GroqAPI.chat([{ role: 'user', content: insertPrompt }], GROQ_KEY, false);
-                        const jsonMatch = response.match(/\{[\s\S]*\}/);
-                        
-                        if (jsonMatch) {
-                            const data = JSON.parse(jsonMatch[0]);
-                            let citedText = text;
-                            const insertions = data.insertions || [];
-                            const positions = [];
+                        const resp = await GroqAPI.chat([{ role: 'user', content: `Insert citations.\nSOURCES:\n${sources.map(s => `[${s.id}] ${getAuthor(s)} (${s.year})`).join('\n')}\n\nTEXT:\n"${text.substring(0,5000)}"\n\nJSON: {"insertions":[{"anchor":"3-5 words","source_id":1}]}` }], GROQ, false);
+                        const json = resp.match(/\{[\s\S]*\}/);
+                        if (json) {
+                            const ins = JSON.parse(json[0]).insertions || [];
+                            let cited = text;
                             const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-                            let fnNum = 1;
-                            
-                            for (const ins of insertions) {
-                                if (!ins.anchor || !ins.source_id) continue;
-                                const pos = citedText.toLowerCase().indexOf(ins.anchor.toLowerCase());
-                                if (pos !== -1) {
-                                    const src = sources.find(s => s.id === ins.source_id);
-                                    if (src) {
-                                        const author = getAuthorForCitation(src);
-                                        let citation;
-                                        if (citationType === 'footnotes') {
-                                            citation = toSuper(fnNum++);
-                                        } else if (style.includes('apa')) {
-                                            citation = ` (${author}, ${src.year})`;
-                                        } else if (style.includes('mla')) {
-                                            citation = ` (${author})`;
-                                        } else {
-                                            citation = ` (${author} ${src.year})`;
-                                        }
-                                        positions.push({ pos: pos + ins.anchor.length, citation, source: src });
-                                    }
-                                }
+                            const pos = [];
+                            let fn = 1;
+                            for (const i of ins) {
+                                if (!i.anchor) continue;
+                                const p = cited.toLowerCase().indexOf(i.anchor.toLowerCase());
+                                if (p === -1) continue;
+                                const s = sources.find(x => x.id === i.source_id);
+                                if (!s) continue;
+                                const a = getAuthor(s);
+                                const cit = type === 'footnotes' ? toSuper(fn++) : style.includes('apa') ? ` (${a}, ${s.year})` : style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
+                                pos.push({ p: p + i.anchor.length, cit, src: s });
                             }
-                            
-                            positions.sort((a, b) => b.pos - a.pos);
-                            for (const p of positions) {
-                                citedText = citedText.slice(0, p.pos) + p.citation + citedText.slice(p.pos);
-                            }
-                            
-                            result.output = citedText;
-                            result.citedSources = positions.map(p => p.source);
-                        } else {
-                            result.output = text;
-                        }
-                    } catch (e) {
-                        console.log('[Agent] Citation insertion failed:', e.message);
-                        result.output = text;
-                    }
-                    
-                    result.type = 'text';
-                    break;
+                            pos.sort((a, b) => b.p - a.p).forEach(x => cited = cited.slice(0, x.p) + x.cit + cited.slice(x.p));
+                            result.output = cited; result.citedSources = pos.map(x => x.src);
+                        } else result.output = text;
+                    } catch { result.output = text; }
+                    result.type = 'text'; break;
                 }
 
                 case 'GRADE': {
-                    const text = context.previousOutput || '';
-                    const userInstructions = context.researchData?.userInstructions || context.task || '';
-                    
-                    if (text.length < 50) {
-                        result.output = { grade: 'N/A', feedback: 'No content to grade' };
-                        result.type = 'grade';
-                        break;
-                    }
-                    
-                    const prompt = `You are grading a student's work against the assignment requirements.
-
-ASSIGNMENT REQUIREMENTS:
-${userInstructions}
-
-STUDENT'S WORK:
-${text.substring(0, 6000)}
-
-Evaluate:
-1. Does it follow the required FORMAT/STRUCTURE?
-2. Are all required SECTIONS present?
-3. Is the CONTENT accurate and well-supported?
-4. Are CITATIONS present where needed?
-5. Is the QUALITY of writing appropriate?
-
-Respond with:
-GRADE: A/B/C/D/F
-STRENGTHS: (2-3 bullet points)
-IMPROVEMENTS: (2-3 specific suggestions)`;
-
-                    const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
-                    
-                    const gradeMatch = response.match(/GRADE:\s*([A-F][+-]?)/i);
-                    result.output = {
-                        grade: gradeMatch ? gradeMatch[1] : 'B',
-                        feedback: response
-                    };
-                    result.type = 'grade';
-                    break;
+                    const text = context.previousOutput || '', inst = context.researchData?.instructions || context.task || '';
+                    if (text.length < 50) { result.output = { grade: 'N/A', feedback: 'No content' }; result.type = 'grade'; break; }
+                    const resp = await GeminiAPI.chat(`Grade:\n\nREQUIREMENTS:\n${inst}\n\nWORK:\n${text.substring(0,5000)}\n\nGRADE: A-F\nSTRENGTHS:\nIMPROVEMENTS:`, GEMINI);
+                    result.output = { grade: resp.match(/GRADE:\s*([A-F][+-]?)/i)?.[1] || 'B', feedback: resp }; result.type = 'grade'; break;
                 }
 
-                case 'CITE': {
-                    result.output = context.researchSources || [];
-                    result.type = 'citations';
-                    break;
-                }
+                case 'CITE': { result.output = context.researchSources || []; result.type = 'citations'; break; }
             }
-
             return res.status(200).json(result);
         }
-
         throw new Error(`Unknown action: ${action}`);
-    } catch (error) {
-        console.error("[Agent] Error:", error);
-        return res.status(500).json({ success: false, error: error.message });
-    }
+    } catch (e) { console.error('[Agent]', e); return res.status(500).json({ success: false, error: e.message }); }
 }
