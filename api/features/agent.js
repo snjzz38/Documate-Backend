@@ -260,10 +260,18 @@ Write the content now:`;
                     
                     let output = await GeminiAPI.chat(prompt, GEMINI_KEY);
                     
-                    // Strip any references section
-                    output = output.replace(/\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources)\*?\*?:?\n[\s\S]*$/i, '').trim();
+                    // Strip any references/bibliography section the AI might add
+                    const refPatterns = [
+                        /\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources|APA References|MLA References|Citations)\*?\*?\s*(?:\(.*?\))?\s*:?\s*\n[\s\S]*$/i,
+                        /\n\n---+\s*\n\s*\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i,
+                        /\n\n#{1,3}\s*(?:References|Works Cited|Bibliography)[\s\S]*$/i
+                    ];
                     
-                    result.output = output;
+                    for (const pattern of refPatterns) {
+                        output = output.replace(pattern, '');
+                    }
+                    
+                    result.output = output.trim();
                     result.type = 'text';
                     break;
                 }
@@ -279,10 +287,22 @@ RULES:
 - Use natural transitions  
 - Keep SAME structure/format
 - Preserve all quotes exactly
+- Do NOT add any References, Works Cited, or Bibliography section
 
 TEXT:
 ${text}`;
-                    result.output = await GeminiAPI.chat(prompt, GEMINI_KEY);
+                    let output = await GeminiAPI.chat(prompt, GEMINI_KEY);
+                    
+                    // Strip any references section
+                    const refPatterns = [
+                        /\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources)\*?\*?\s*(?:\(.*?\))?\s*:?\s*\n[\s\S]*$/i,
+                        /\n\n---+\s*\n\s*\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i
+                    ];
+                    for (const pattern of refPatterns) {
+                        output = output.replace(pattern, '');
+                    }
+                    
+                    result.output = output.trim();
                     result.type = 'text';
                     break;
                 }
