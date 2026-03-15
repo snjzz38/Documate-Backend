@@ -1,4 +1,5 @@
 // api/utils/googleSearch.js
+// SearXNG-based search with academic source prioritization
 import { GroqAPI } from './groqAPI.js';
 
 const INSTANCES = [
@@ -7,32 +8,45 @@ const INSTANCES = [
     'https://search.bus-hit.me',
     'https://searx.be',
     'https://search.ononoki.org',
-    'https://priv.au'
+    'https://priv.au',
+    'https://searx.work',
+    'https://search.mdosch.de'
 ];
 
+// Sites that are never useful for academic research
 const BANNED_DOMAINS = [
     'reddit', 'quora', 'stackoverflow', 'stackexchange',
     'youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest',
-    'amazon', 'ebay', 'etsy', 'alibaba'
+    'amazon', 'ebay', 'etsy', 'alibaba', 'aliexpress',
+    'macrumors', 'forums', 'discord', 'telegram',
+    'commerzbank', 'investopedia' // financial sites unless relevant
 ];
 
-const BANNED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.mp3', '.pdf.jpg'];
+const BANNED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.mp3', '.pdf.jpg', '.zip', '.exe'];
 
+// Academic and authoritative sources get priority
 const PREFERRED_DOMAINS = [
-    'edu', 'gov', 'pubmed', 'ncbi.nlm.nih.gov', 'jstor',
-    'scholar.google', 'arxiv', 'nature.com', 'science.org',
-    'springer', 'wiley', 'tandfonline', 'sagepub', 'oup.com',
-    'cambridge.org', 'pnas.org', 'cell.com', 'bmj.com', 'thelancet.com'
+    // Academic databases
+    'edu', 'gov', 'pubmed', 'ncbi.nlm.nih.gov', 'nih.gov', 'jstor', 'doi.org',
+    'scholar.google', 'arxiv', 'researchgate', 'academia.edu',
+    // Major publishers
+    'nature.com', 'science.org', 'sciencedirect', 'springer', 'wiley', 
+    'tandfonline', 'sagepub', 'oup.com', 'cambridge.org', 'pnas.org', 
+    'cell.com', 'bmj.com', 'thelancet.com', 'nejm.org', 'jama',
+    // Trusted organizations  
+    'who.int', 'cdc.gov', 'nasa.gov', 'noaa.gov', 'epa.gov',
+    'nationalacademies', 'genome.gov', 'niehs.nih.gov'
 ];
 
 export const GoogleSearchAPI = {
 
     async search(query, apiKey, cx, groqKey = null) {
+        // Generate focused search queries
         const queries = groqKey
-            ? await this._extractClaimQueries(query, groqKey)
-            : [this._buildFallbackQuery(query)];
+            ? await this._extractTopicQueries(query, groqKey)
+            : [this._buildSimpleQuery(query)];
 
-        console.log('[Search] Claim queries:', queries);
+        console.log('[Search] Queries:', queries);
 
         // Run all queries in parallel
         const allResultArrays = await Promise.all(
@@ -42,108 +56,65 @@ export const GoogleSearchAPI = {
         const allResults = allResultArrays.flat();
         console.log('[Search] Total raw results:', allResults.length);
 
-        const filtered = this._filterAndScore(allResults);
-        console.log('[Search] After scoring:', filtered.length);
+        // Filter and score results
+        const filtered = this._filterAndScore(allResults, query);
+        console.log('[Search] After filtering:', filtered.length);
 
-        // Groq relevance pass to remove off-topic sources
-        const relevant = await this._filterByRelevance(filtered, query, groqKey);
-        console.log('[Search] After relevance filter:', relevant.length);
-
-        return relevant;
+        return filtered;
     },
 
-    async _extractClaimQueries(text, groqKey) {
+    async _extractTopicQueries(text, groqKey) {
         try {
-            const prompt = `You are helping find academic sources for a student essay.
+            const prompt = `Generate 3-5 specific search queries for academic research on this topic.
 
-ESSAY TEXT:
-"${text.substring(0, 1500)}"
+TEXT:
+"${text.substring(0, 800)}"
 
-TASK: Return a JSON array of 4-6 search queries covering the FULL range of topics in the text. Make sure to cover EACH distinct section or argument separately.
+RULES:
+- Each query should be 3-6 words
+- Focus on the MAIN TOPIC and key concepts
+- Include specific terms, names, or theories mentioned
+- Make queries specific enough to find relevant academic sources
+- Avoid generic words like "research", "study", "analysis"
 
-STRICT RULES:
-- If a researcher is named (e.g. "Peter Turchin"), include their name
-- If a specific study or event is described (e.g. "Pompeii DNA victims"), search for THAT
-- If a named theory, philosopher, or concept is mentioned (e.g. "Hume impressions ideas", "Berkeley esse est percipi", "Descartes clear distinct ideas"), include it
-- Every query must be 4-8 words
-- Do NOT write generic queries like "history research study" or "scientific method"
-- Do NOT repeat the same topic twice
-- Cover BOTH/ALL sections of the essay, not just the first one
-
-EXAMPLES OF GOOD QUERIES:
-- "Peter Turchin cliodynamics secular cycles Seshat"
-- "Pompeii victims DNA analysis misidentification 2024"
-- "Hume impressions ideas empiricism epistemology"
-- "Berkeley esse est percipi perception philosophy"
-- "Descartes rationalism clear distinct ideas"
-- "Plato innate ideas rationalism a priori knowledge"
-
-Return ONLY a raw JSON array, no explanation, no markdown:
-["query one here", "query two here", "query three here"]`;
-
-            const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-            console.log('[Search] Groq raw response:', response);
-
-            const jsonMatch = response.match(/\[[\s\S]*?\]/);
-            if (!jsonMatch) throw new Error('No JSON array in response');
-
-            const queries = JSON.parse(jsonMatch[0]);
-
-            if (!Array.isArray(queries) || queries.length === 0) throw new Error('Empty array');
-
-            const cleaned = queries
-                .filter(q => typeof q === 'string' && q.trim().split(/\s+/).length >= 3)
-                .map(q => q.trim().substring(0, 120));
-
-            if (cleaned.length === 0) throw new Error('No valid queries after cleaning');
-
-            console.log('[Search] Extracted queries:', cleaned);
-            return cleaned;
-
-        } catch (e) {
-            console.error('[Search] _extractClaimQueries failed:', e.message);
-            return [this._buildFallbackQuery(text)];
-        }
-    },
-
-    async _filterByRelevance(results, originalText, groqKey) {
-        if (!groqKey || results.length === 0) return results;
-
-        try {
-            const summaries = results.map((r, i) =>
-                `${i}: "${r.title}" - ${r.snippet || '(no snippet)'}`
-            ).join('\n');
-
-            const prompt = `You are filtering search results for relevance to a student essay.
-
-ESSAY TOPIC SUMMARY (first 600 chars):
-"${originalText.substring(0, 600)}"
-
-SEARCH RESULTS:
-${summaries}
-
-TASK: Return ONLY the index numbers of results that are directly relevant to the specific philosophical claims, named philosophers, named theories, named researchers, or named events in this essay. Be strict — exclude anything that is tangentially related or only shares a keyword without being about the same topic.
-
-Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
+Return ONLY a JSON array:
+["specific query one", "specific query two", "specific query three"]`;
 
             const response = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
             const jsonMatch = response.match(/\[[\s\S]*?\]/);
+            
             if (!jsonMatch) throw new Error('No JSON array');
-
-            const indices = JSON.parse(jsonMatch[0]);
-            if (!Array.isArray(indices)) throw new Error('Not an array');
-
-            const filtered = indices
-                .filter(i => typeof i === 'number' && i >= 0 && i < results.length)
-                .map(i => results[i]);
-
-            // Safety: if Groq filtered everything out, return originals
-            return filtered.length > 0 ? filtered : results;
-
+            
+            const queries = JSON.parse(jsonMatch[0]);
+            const cleaned = queries
+                .filter(q => typeof q === 'string' && q.trim().length >= 8)
+                .map(q => q.trim().substring(0, 100));
+            
+            if (cleaned.length === 0) throw new Error('No valid queries');
+            
+            console.log('[Search] Generated queries:', cleaned);
+            return cleaned;
+            
         } catch (e) {
-            console.error('[Search] Relevance filter failed:', e.message);
-            return results;
+            console.error('[Search] Query generation failed:', e.message);
+            return [this._buildSimpleQuery(text)];
         }
+    },
+
+    _buildSimpleQuery(text) {
+        // Extract key terms from the text
+        const words = text.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+        const stopWords = new Set([
+            'the','this','that','these','those','they','their','what','which','where',
+            'when','why','how','have','has','had','will','would','could','should',
+            'about','write','essay','paragraph','summary','discuss','explain','describe'
+        ]);
+        
+        const meaningful = [...new Set(words)]
+            .filter(w => !stopWords.has(w))
+            .slice(0, 5);
+        
+        return meaningful.join(' ') || text.substring(0, 50);
     },
 
     async _searchWithFallback(query) {
@@ -151,10 +122,10 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
 
         for (const instance of shuffled.slice(0, 4)) {
             try {
-                console.log('[Search] Trying instance:', instance, 'for:', query);
+                console.log('[Search] Trying:', instance);
                 const results = await this._fetch(instance, query);
                 if (results.length > 0) {
-                    console.log('[Search] Got', results.length, 'results from', instance);
+                    console.log('[Search] Got', results.length, 'results');
                     return results;
                 }
             } catch (e) {
@@ -162,86 +133,111 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
             }
         }
 
-        console.warn('[Search] All instances failed for query:', query);
+        console.warn('[Search] All instances failed for:', query);
         return [];
     },
 
-    _filterAndScore(results) {
+    _filterAndScore(results, originalQuery) {
         const seen = new Set();
+        const queryLower = originalQuery.toLowerCase();
+        const queryWords = queryLower.match(/\b[a-z]{4,}\b/g) || [];
 
         return results
             .filter(r => {
                 if (!r.title || !r.link) return false;
 
                 const lowerUrl = r.link.toLowerCase();
+                const lowerTitle = r.title.toLowerCase();
+                
+                // Skip banned file types
                 if (BANNED_EXTENSIONS.some(ext => lowerUrl.includes(ext))) return false;
 
                 try {
                     const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
+                    
+                    // Skip banned domains
                     if (BANNED_DOMAINS.some(b => domain.includes(b))) return false;
+                    
+                    // Skip duplicate domains
                     if (seen.has(domain)) return false;
                     seen.add(domain);
+                    
                     return true;
                 } catch { return false; }
             })
             .map(r => {
                 let score = 0;
+                const lowerTitle = r.title.toLowerCase();
+                const lowerSnippet = (r.snippet || '').toLowerCase();
+                
                 try {
                     const domain = new URL(r.link).hostname.replace('www.', '').toLowerCase();
-                    if (PREFERRED_DOMAINS.some(p => domain.includes(p))) score += 3;
-                    if (domain.endsWith('.edu')) score += 2;
-                    if (domain.endsWith('.gov')) score += 2;
-                    if (domain.includes('blog')) score -= 1;
-                    if (r.title.length < 10) score -= 2;
+                    
+                    // Boost academic/authoritative sources
+                    if (PREFERRED_DOMAINS.some(p => domain.includes(p))) score += 5;
+                    if (domain.endsWith('.edu')) score += 4;
+                    if (domain.endsWith('.gov')) score += 4;
+                    if (domain.includes('.org')) score += 2;
+                    
+                    // Penalize low-quality indicators
+                    if (domain.includes('blog')) score -= 2;
+                    if (domain.includes('forum')) score -= 3;
+                    if (r.title.length < 15) score -= 2;
+                    
+                    // Boost relevance to query
+                    let relevance = 0;
+                    for (const word of queryWords) {
+                        if (lowerTitle.includes(word)) relevance += 2;
+                        if (lowerSnippet.includes(word)) relevance += 1;
+                    }
+                    score += Math.min(relevance, 6); // Cap relevance boost
+                    
                 } catch {}
+                
                 return { ...r, _score: score };
             })
             .sort((a, b) => b._score - a._score)
-            .slice(0, 15);
-    },
-
-    _buildFallbackQuery(text) {
-        const namedThings = text.match(/\b[A-Z][a-z]{3,}\b/g) || [];
-        const uniqueNamed = [...new Set(namedThings)]
-            .filter(w => !['The', 'This', 'That', 'These', 'Those', 'However', 'Furthermore', 'In', 'By', 'It'].includes(w))
-            .slice(0, 4);
-
-        if (uniqueNamed.length >= 2) {
-            return uniqueNamed.join(' ') + ' research';
-        }
-
-        const stopWords = new Set([
-            'the','a','an','is','are','was','were','be','been','being','have','has','had',
-            'do','does','did','will','would','could','should','may','might','must','can',
-            'this','that','these','those','they','their','what','which','who','where',
-            'when','why','how','all','each','every','both','few','more','most','other',
-            'some','such','no','nor','not','only','own','same','so','than','too','very',
-            'just','also','now','people','things','many','much','often','even','well',
-            'make','made','take','get','put','use','used','using','instead','through'
-        ]);
-        const words = text.toLowerCase().match(/\b[a-z]{6,}\b/g) || [];
-        const meaningful = [...new Set(words)].filter(w => !stopWords.has(w)).slice(0, 4);
-        return (meaningful.join(' ') || text.substring(0, 40)) + ' academic research';
+            .slice(0, 12);
     },
 
     async _fetch(instance, query) {
-        const url = `${instance}/search?q=${encodeURIComponent(query)}&categories=general,science&language=en`;
+        // Add academic focus to search
+        const searchQuery = query + ' scholarly';
+        const url = `${instance}/search?q=${encodeURIComponent(searchQuery)}&categories=general,science&language=en&format=json`;
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
+        const timeout = setTimeout(() => controller.abort(), 10000);
 
         try {
-            const res = await fetch(url, {
+            // Try JSON format first (cleaner)
+            let res = await fetch(url, {
                 signal: controller.signal,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'text/html'
+                    'Accept': 'application/json, text/html'
                 }
             });
             clearTimeout(timeout);
+            
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            
+            const contentType = res.headers.get('content-type') || '';
+            
+            if (contentType.includes('json')) {
+                const data = await res.json();
+                if (data.results && Array.isArray(data.results)) {
+                    return data.results.map(r => ({
+                        title: r.title || '',
+                        link: r.url || r.link || '',
+                        snippet: r.content || r.snippet || ''
+                    })).filter(r => r.title && r.link);
+                }
+            }
+            
+            // Fallback to HTML parsing
             const html = await res.text();
             return this._parseResults(html);
+            
         } catch (e) {
             clearTimeout(timeout);
             throw e;
@@ -251,6 +247,7 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
     _parseResults(html) {
         const results = [];
 
+        // Try article tags first (most SearX instances)
         const articleRegex = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
         let match;
 
@@ -271,6 +268,7 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
             }
         }
 
+        // Fallback: try div-based results
         if (results.length < 3) {
             const divRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
             while ((match = divRegex.exec(html)) !== null) {
@@ -287,7 +285,7 @@ Return ONLY a raw JSON array of index numbers, e.g.: [0, 1, 3, 5]`;
             }
         }
 
-        return results.slice(0, 30);
+        return results.slice(0, 25);
     },
 
     _clean(html) {
