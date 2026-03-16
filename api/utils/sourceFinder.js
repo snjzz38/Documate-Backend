@@ -1,5 +1,6 @@
 // api/utils/sourceFinder.js
-// Academic source discovery using OpenAlex (no API key required)
+// Academic source discovery using OpenAlex
+// Filters: open access + has abstract
 
 export default async function handler(req, res) {
 
@@ -17,6 +18,7 @@ export default async function handler(req, res) {
     const url =
       `https://api.openalex.org/works?` +
       `search=${encodeURIComponent(query)}` +
+      `&filter=is_oa:true,has_abstract:true` +
       `&per-page=10`;
 
     const response = await fetch(url, {
@@ -40,11 +42,18 @@ export default async function handler(req, res) {
         year: work.publication_year || "n.d.",
         venue: work.host_venue?.display_name || "Unknown Journal",
         citationCount: work.cited_by_count || 0,
+
+        // Prefer free PDF / OA link
         url: work.best_oa_location?.url || work.doi || work.id,
-        doi: work.doi ? work.doi.replace("https://doi.org/", "") : null,
+
+        doi: work.doi
+          ? work.doi.replace("https://doi.org/", "")
+          : null,
+
         abstract: abstract,
-        authors: (work.authorships || []).map(a => a.author.display_name),
-        isOpenAccess: true
+
+        authors: (work.authorships || [])
+          .map(a => a.author.display_name)
       };
 
     });
@@ -68,7 +77,7 @@ export default async function handler(req, res) {
 }
 
 
-// Reconstruct OpenAlex abstract text
+// Convert OpenAlex inverted abstract index → readable text
 function reconstructAbstract(index) {
 
   if (!index) return null;
