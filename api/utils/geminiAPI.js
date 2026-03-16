@@ -1,11 +1,21 @@
 // api/features/agent.js - Agent Mode
 // FLOW: RESEARCH → QUOTES → WRITE → HUMANIZE → INSERT_CITATIONS → GRADE → CITE
 
-// Named imports - must match your export statements exactly
-import { GeminiAPI } from '../utils/geminiAPI.js';
-import { GroqAPI } from '../utils/groqAPI.js';
-import { GoogleSearchAPI } from '../utils/googleSearch.js';
-import { ScraperAPI } from '../utils/scraper.js';
+// Import with fallback for different module systems
+import * as geminiModule from '../utils/geminiAPI.js';
+import * as groqModule from '../utils/groqAPI.js';
+import * as searchModule from '../utils/googleSearch.js';
+import * as scraperModule from '../utils/scraper.js';
+
+// Extract the actual exports (handles both named exports and default exports)
+const GeminiAPI = geminiModule.GeminiAPI || geminiModule.default?.GeminiAPI || geminiModule.default || geminiModule;
+const GroqAPI = groqModule.GroqAPI || groqModule.default?.GroqAPI || groqModule.default || groqModule;
+const GoogleSearchAPI = searchModule.GoogleSearchAPI || searchModule.default?.GoogleSearchAPI || searchModule.default || searchModule;
+const ScraperAPI = scraperModule.ScraperAPI || scraperModule.default?.ScraperAPI || scraperModule.default || scraperModule;
+
+// Verify imports
+if (!GeminiAPI?.chat) console.error('[Agent] WARNING: GeminiAPI.chat not found. Module:', geminiModule);
+if (!GroqAPI?.chat) console.error('[Agent] WARNING: GroqAPI.chat not found. Module:', groqModule);
 
 // Helpers
 const cleanSite = s => {
