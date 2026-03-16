@@ -40,10 +40,11 @@ export default async function handler(req, res) {
         year: work.publication_year || "n.d.",
         venue: work.host_venue?.display_name || "Unknown Journal",
         citationCount: work.cited_by_count || 0,
-        url: work.doi || work.id,
+        url: work.best_oa_location?.url || work.doi || work.id,
         doi: work.doi ? work.doi.replace("https://doi.org/", "") : null,
         abstract: abstract,
-        authors: (work.authorships || []).map(a => a.author.display_name)
+        authors: (work.authorships || []).map(a => a.author.display_name),
+        isOpenAccess: true
       };
 
     });
