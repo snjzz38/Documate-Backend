@@ -1,6 +1,7 @@
 // api/features/agent.js - Agent Mode
 // FLOW: RESEARCH → QUOTES → WRITE → HUMANIZE → INSERT_CITATIONS → GRADE → CITE
 
+// Named imports - must match your export statements exactly
 import { GeminiAPI } from '../utils/geminiAPI.js';
 import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
@@ -39,7 +40,8 @@ export default async function handler(req, res) {
 
     try {
         const { action, task, options = {} } = req.body;
-        const GEMINI = process.env.GEMINI_API_KEY, GROQ = process.env.GROQ_API_KEY;
+        const GEMINI = process.env.GEMINI_API_KEY;
+        const GROQ = process.env.GROQ_API_KEY;
 
         if (action === 'plan') {
             const steps = [{ tool: 'RESEARCH', action: 'Search and gather information' }];
@@ -58,78 +60,130 @@ export default async function handler(req, res) {
 
             switch (step.tool.toUpperCase()) {
                 case 'RESEARCH': {
-                    let instructions = '';
-                    // Note: Image handling would need separate vision endpoint
-                    const query = extractTopic(instructions + ' ' + (context.task || ''));
-                    console.log('[Agent] Query:', query);
-                    
-                    if (!GoogleSearchAPI?.search) throw new Error('GoogleSearchAPI not available');
+                    const query = extractTopic(context.task || '');
+                    console.log('[Agent] Research query:', query);
                     
                     const results = await GoogleSearchAPI.search(query, null, null, GROQ);
-                    if (!results?.length) { result.output = { text: '', sources: [], instructions }; result.type = 'research'; break; }
+                    if (!results?.length) { 
+                        result.output = { text: '', sources: [] }; 
+                        result.type = 'research'; 
+                        break; 
+                    }
                     
                     const scraped = await ScraperAPI.scrape(results.slice(0, 10));
                     const sources = [], texts = [];
+                    
                     for (const s of scraped) {
                         const txt = s.text || s.content || s.snippet || '';
                         if (txt.length > 100) {
-                            const site = cleanSite(s.meta?.siteName || s.link), name = s.meta?.author || site;
+                            const site = cleanSite(s.meta?.siteName || s.link);
+                            const name = s.meta?.author || site;
                             texts.push(`[${name}, ${s.meta?.year || 'n.d.'}]\n${txt.substring(0, 2000)}`);
-                            sources.push({ id: sources.length + 1, title: s.title, url: s.link, site, author: s.meta?.author, year: s.meta?.year || 'n.d.', displayName: name, text: txt.substring(0, 2000) });
+                            sources.push({ 
+                                id: sources.length + 1, 
+                                title: s.title, 
+                                url: s.link, 
+                                site, 
+                                author: s.meta?.author, 
+                                year: s.meta?.year || 'n.d.', 
+                                displayName: name, 
+                                text: txt.substring(0, 2000) 
+                            });
                         }
                     }
-                    result.output = { text: texts.join('\n\n'), sources, instructions }; result.type = 'research'; break;
+                    
+                    result.output = { text: texts.join('\n\n'), sources }; 
+                    result.type = 'research'; 
+                    break;
                 }
 
                 case 'QUOTES': {
                     const src = context.researchSources || [];
                     if (!src.length) { result.output = []; result.type = 'quotes'; break; }
-                    const resp = await GeminiAPI.chat(`Extract 3-5 quotes.\nFORMAT: Source: "quote"\n\n${src.slice(0,5).map(s => `--- ${s.displayName} ---\n${s.text?.substring(0,1200)}`).join('\n\n')}`, GEMINI);
-                    result.output = resp.split('\n').map(l => l.match(/^([^:]+):\s*"([^"]+)"/)).filter(Boolean).map(m => ({ source: m[1].trim(), quote: m[2].trim() }));
-                    result.type = 'quotes'; break;
+                    
+                    const prompt = `Extract 3-5 direct quotes from these sources.\nFORMAT each as: SourceName: "exact quote"\n\n${src.slice(0,5).map(s => `--- ${s.displayName} ---\n${s.text?.substring(0,1200)}`).join('\n\n')}`;
+                    const resp = await GeminiAPI.chat(prompt, GEMINI);
+                    
+                    result.output = resp.split('\n')
+                        .map(l => l.match(/^([^:]+):\s*"([^"]+)"/))
+                        .filter(Boolean)
+                        .map(m => ({ source: m[1].trim(), quote: m[2].trim() }));
+                    result.type = 'quotes'; 
+                    break;
                 }
 
                 case 'WRITE': {
-                    const { researchData = {}, extractedQuotes = [], task } = context;
-                    const prompt = `Expert writer. Follow format exactly. Use HEADINGS not tables.
+                    const { researchData = {}, extractedQuotes = [], task: userTask } = context;
+                    const prompt = `You are an expert academic writer.
 
-TASK: ${task}${researchData.instructions ? `\nINSTRUCTIONS:\n${researchData.instructions}` : ''}
-RESEARCH:\n${researchData.text?.substring(0, 8000) || ''}${extractedQuotes.length ? `\nQUOTES:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}
+TASK: ${userTask}
+${researchData.text ? `\nRESEARCH:\n${researchData.text.substring(0, 8000)}` : ''}
+${extractedQuotes.length ? `\nQUOTES TO INCLUDE:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}
 
 RULES:
-1. Follow structure, formal tone, NO bibliography
-2. Include quotes with attribution
-3. OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold, no italics
-4. Use simple headings like "Arguments For" not "**Arguments For**"`;
-                    result.output = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI))); 
-                    result.type = 'text'; break;
+1. Write in formal academic tone
+2. Include the quotes with proper attribution
+3. NO bibliography or references section at the end
+4. OUTPUT PLAIN TEXT ONLY - no markdown formatting, no asterisks, no bold, no italics
+5. Use simple text headings without any special formatting`;
+
+                    const resp = await GeminiAPI.chat(prompt, GEMINI);
+                    result.output = stripMarkdown(stripRefs(resp)); 
+                    result.type = 'text'; 
+                    break;
                 }
 
                 case 'HUMANIZE': {
                     const text = context.previousOutput || '';
-                    if (text.length < 50) throw new Error('No text');
-                    const prompt = `Rewrite naturally. Keep structure, preserve quotes, NO references section.
-OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold, no italics.
+                    if (text.length < 50) throw new Error('No text to humanize');
+                    
+                    const prompt = `Rewrite this text to sound more natural and human-written while keeping the same structure and content.
+Preserve any quotes exactly as they are.
+Do NOT add a references or bibliography section.
+OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no formatting.
 
 TEXT:\n${text}`;
-                    result.output = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
-                    result.type = 'text'; break;
+
+                    const resp = await GeminiAPI.chat(prompt, GEMINI);
+                    result.output = stripMarkdown(stripRefs(resp));
+                    result.type = 'text'; 
+                    break;
                 }
 
                 case 'INSERT_CITATIONS': {
-                    const text = context.previousOutput || '', sources = context.researchSources || [];
-                    const style = options.citationStyle || 'apa7', type = options.citationType || 'in-text';
-                    if (!text || !sources.length) { result.output = text; result.type = 'text'; break; }
+                    const text = context.previousOutput || '';
+                    const sources = context.researchSources || [];
+                    const style = options.citationStyle || 'apa7';
+                    const type = options.citationType || 'in-text';
+                    
+                    if (!text || !sources.length) { 
+                        result.output = text; 
+                        result.type = 'text'; 
+                        break; 
+                    }
                     
                     try {
-                        const resp = await GroqAPI.chat([{ role: 'user', content: `Insert citations.\nSOURCES:\n${sources.map(s => `[${s.id}] ${getAuthor(s)} (${s.year})`).join('\n')}\n\nTEXT:\n"${text.substring(0,5000)}"\n\nJSON: {"insertions":[{"anchor":"3-5 words","source_id":1}]}` }], GROQ, false);
+                        const srcList = sources.map(s => `[${s.id}] ${getAuthor(s)} (${s.year})`).join('\n');
+                        const prompt = `Add in-text citations to this text.
+
+SOURCES:
+${srcList}
+
+TEXT:
+"${text.substring(0, 5000)}"
+
+Return JSON only: {"insertions":[{"anchor":"3-5 word phrase from text","source_id":1}]}`;
+                        
+                        const resp = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
                         const json = resp.match(/\{[\s\S]*\}/);
+                        
                         if (json) {
                             const ins = JSON.parse(json[0]).insertions || [];
                             let cited = text;
                             const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
                             const pos = [];
                             let fn = 1;
+                            
                             for (const i of ins) {
                                 if (!i.anchor) continue;
                                 const p = cited.toLowerCase().indexOf(i.anchor.toLowerCase());
@@ -137,27 +191,72 @@ TEXT:\n${text}`;
                                 const s = sources.find(x => x.id === i.source_id);
                                 if (!s) continue;
                                 const a = getAuthor(s);
-                                const cit = type === 'footnotes' ? toSuper(fn++) : style.includes('apa') ? ` (${a}, ${s.year})` : style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
+                                const cit = type === 'footnotes' ? toSuper(fn++) : 
+                                           style.includes('apa') ? ` (${a}, ${s.year})` : 
+                                           style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
                                 pos.push({ p: p + i.anchor.length, cit, src: s });
                             }
+                            
                             pos.sort((a, b) => b.p - a.p).forEach(x => cited = cited.slice(0, x.p) + x.cit + cited.slice(x.p));
-                            result.output = cited; result.citedSources = pos.map(x => x.src);
-                        } else result.output = text;
-                    } catch { result.output = text; }
-                    result.type = 'text'; break;
+                            result.output = cited; 
+                            result.citedSources = pos.map(x => x.src);
+                        } else {
+                            result.output = text;
+                        }
+                    } catch (e) {
+                        console.error('[Agent] Citation insertion failed:', e.message);
+                        result.output = text;
+                    }
+                    result.type = 'text'; 
+                    break;
                 }
 
                 case 'GRADE': {
-                    const text = context.previousOutput || '', inst = context.researchData?.instructions || context.task || '';
-                    if (text.length < 50) { result.output = { grade: 'N/A', feedback: 'No content' }; result.type = 'grade'; break; }
-                    const resp = await GeminiAPI.chat(`Grade:\n\nREQUIREMENTS:\n${inst}\n\nWORK:\n${text.substring(0,5000)}\n\nGRADE: A-F\nSTRENGTHS:\nIMPROVEMENTS:`, GEMINI);
-                    result.output = { grade: resp.match(/GRADE:\s*([A-F][+-]?)/i)?.[1] || 'B', feedback: resp }; result.type = 'grade'; break;
+                    const text = context.previousOutput || '';
+                    const inst = context.task || '';
+                    
+                    if (text.length < 50) { 
+                        result.output = { grade: 'N/A', feedback: 'No content to grade' }; 
+                        result.type = 'grade'; 
+                        break; 
+                    }
+                    
+                    const prompt = `Grade this academic work.
+
+ASSIGNMENT: ${inst}
+
+STUDENT WORK:
+${text.substring(0, 5000)}
+
+Provide:
+GRADE: (A/B/C/D/F with +/- if applicable)
+STRENGTHS: (2-3 bullet points)
+AREAS FOR IMPROVEMENT: (2-3 bullet points)`;
+                    
+                    const resp = await GeminiAPI.chat(prompt, GEMINI);
+                    const gradeMatch = resp.match(/GRADE:\s*([A-F][+-]?)/i);
+                    
+                    result.output = { 
+                        grade: gradeMatch?.[1] || 'B', 
+                        feedback: resp 
+                    }; 
+                    result.type = 'grade'; 
+                    break;
                 }
 
-                case 'CITE': { result.output = context.researchSources || []; result.type = 'citations'; break; }
+                case 'CITE': { 
+                    result.output = context.researchSources || []; 
+                    result.type = 'citations'; 
+                    break; 
+                }
             }
+            
             return res.status(200).json(result);
         }
+        
         throw new Error(`Unknown action: ${action}`);
-    } catch (e) { console.error('[Agent]', e); return res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) { 
+        console.error('[Agent] Error:', e); 
+        return res.status(500).json({ success: false, error: e.message }); 
+    }
 }
