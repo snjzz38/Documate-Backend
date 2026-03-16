@@ -1,27 +1,85 @@
 // api/utils/sourceFinder.js
+// Academic source discovery using OpenAlex (no API key required)
+
 export default async function handler(req, res) {
+
   try {
+
     const query = req.query.q;
+
     if (!query) {
-      return res.status(400).json({ error: "Missing query parameter ?q=" });
+      return res.status(400).json({
+        success: false,
+        error: "Missing query parameter ?q="
+      });
     }
 
-    const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=10`;
+    const url =
+      `https://api.openalex.org/works?` +
+      `search=${encodeURIComponent(query)}` +
+      `&per-page=10`;
 
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Documate Academic Research Tool"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAlex error ${response.status}`);
+    }
+
     const data = await response.json();
 
-    const papers = (data.message.items || []).map(p => ({
-      title: p.title?.[0] || "No title",
-      year: p.published?.["date-parts"]?.[0]?.[0] || "n.d.",
-      venue: p["container-title"]?.[0] || "Unknown journal",
-      url: p.URL,
-      authors: (p.author || []).map(a => `${a.given || ""} ${a.family || ""}`.trim())
-    }));
+    const papers = (data.results || []).map(work => {
 
-    res.status(200).json({ success: true, results: papers });
+      const abstract = reconstructAbstract(work.abstract_inverted_index);
+
+      return {
+        title: work.title || "Untitled",
+        year: work.publication_year || "n.d.",
+        venue: work.host_venue?.display_name || "Unknown Journal",
+        citationCount: work.cited_by_count || 0,
+        url: work.doi || work.id,
+        doi: work.doi ? work.doi.replace("https://doi.org/", "") : null,
+        abstract: abstract,
+        authors: (work.authorships || []).map(a => a.author.display_name)
+      };
+
+    });
+
+    res.status(200).json({
+      success: true,
+      results: papers
+    });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: "Failed to fetch papers" });
+
+    console.error("[sourceFinder] Error:", err.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch papers"
+    });
+
   }
+
+}
+
+
+// Reconstruct OpenAlex abstract text
+function reconstructAbstract(index) {
+
+  if (!index) return null;
+
+  const words = [];
+
+  Object.entries(index).forEach(([word, positions]) => {
+    positions.forEach(pos => {
+      words[pos] = word;
+    });
+  });
+
+  return words.join(" ");
+
 }
