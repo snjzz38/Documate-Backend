@@ -6,6 +6,7 @@ import { GroqAPI } from '../utils/groqAPI.js';
 import { GoogleSearchAPI } from '../utils/googleSearch.js';
 import { ScraperAPI } from '../utils/scraper.js';
 
+
 // Helpers
 async function vision(prompt, files, key) {
     const imgs = files.filter(f => f.type?.startsWith('image/') && f.data);
@@ -37,6 +38,15 @@ const getAuthor = src => (src.author?.length > 2 ? src.author : src.displayName 
 
 const stripRefs = text => [/\n\n\*?\*?(?:References|Works Cited|Bibliography|Sources)\*?\*?[\s\S]*$/i, /\n\n#{1,3}\s*(?:References|Works Cited)[\s\S]*$/i]
     .reduce((t, p) => t.replace(p, ''), text).trim();
+
+const stripMarkdown = text => text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')  // **bold**
+    .replace(/\*([^*]+)\*/g, '$1')       // *italic*
+    .replace(/__([^_]+)__/g, '$1')       // __bold__
+    .replace(/_([^_]+)_/g, '$1')         // _italic_
+    .replace(/^#{1,6}\s*/gm, '')         // # headings
+    .replace(/`([^`]+)`/g, '$1')         // `code`
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // [link](url)
 
 const extractTopic = text => {
     for (const p of [/(?:topic|about|write about|essay on)[:\s]+["']?([^"'\n.!?]{10,80})["']?/i, /(?:designer babies|gene editing|CRISPR|climate change)/i, /(?:ethics of|effects of)\s+([^.!?\n]{5,50})/i]) {
@@ -79,6 +89,10 @@ export default async function handler(req, res) {
                     const query = extractTopic(instructions + ' ' + (context.task || ''));
                     console.log('[Agent] Query:', query);
                     
+                    if (!GoogleSearchAPI || typeof GoogleSearchAPI.search !== 'function') {
+                        throw new Error('GoogleSearchAPI not available. Check googleSearch.js import.');
+                    }
+                    
                     const results = await GoogleSearchAPI.search(query, null, null, GROQ);
                     if (!results?.length) { result.output = { text: '', sources: [], instructions }; result.type = 'research'; break; }
                     
@@ -105,14 +119,28 @@ export default async function handler(req, res) {
 
                 case 'WRITE': {
                     const { researchData = {}, extractedQuotes = [], task } = context;
-                    const prompt = `Expert writer. Follow format exactly. Use HEADINGS not tables.\n\nTASK: ${task}${researchData.instructions ? `\nINSTRUCTIONS:\n${researchData.instructions}` : ''}\nRESEARCH:\n${researchData.text?.substring(0, 8000) || ''}${extractedQuotes.length ? `\nQUOTES:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}\n\nRULES: Follow structure, formal tone, NO bibliography, include quotes.`;
-                    result.output = stripRefs(await GeminiAPI.chat(prompt, GEMINI)); result.type = 'text'; break;
+                    const prompt = `Expert writer. Follow format exactly. Use HEADINGS not tables.
+
+TASK: ${task}${researchData.instructions ? `\nINSTRUCTIONS:\n${researchData.instructions}` : ''}
+RESEARCH:\n${researchData.text?.substring(0, 8000) || ''}${extractedQuotes.length ? `\nQUOTES:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}
+
+RULES:
+1. Follow structure, formal tone, NO bibliography
+2. Include quotes with attribution
+3. OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold, no italics, no special formatting
+4. Use simple headings like "Arguments For" not "**Arguments For**" or "### Arguments For"`;
+                    result.output = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI))); result.type = 'text'; break;
                 }
 
                 case 'HUMANIZE': {
                     const text = context.previousOutput || '';
                     if (text.length < 50) throw new Error('No text');
-                    result.output = stripRefs(await GeminiAPI.chat(`Rewrite naturally. Keep structure, preserve quotes, NO references section.\n\n${text}`, GEMINI));
+                    let output = await GeminiAPI.chat(`Rewrite naturally. Keep structure, preserve quotes, NO references section.
+
+OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold, no italics, no special characters like * or #.
+
+TEXT:\n${text}`, GEMINI);
+                    result.output = stripMarkdown(stripRefs(output));
                     result.type = 'text'; break;
                 }
 
