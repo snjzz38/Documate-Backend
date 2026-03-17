@@ -1,6 +1,6 @@
 // api/utils/sourceFinder.js
 // Academic source discovery using OpenAlex API
-// Returns open access papers with abstracts for citation
+// Only returns papers WITH DOIs for accurate citations
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
@@ -8,22 +8,23 @@ export const SourceFinderAPI = {
     
     /**
      * Search for academic papers on a topic
-     * @param {string} query - Search query
-     * @param {number} limit - Max results (default 10)
-     * @returns {Array} Array of paper objects with title, authors, abstract, url, etc.
+     * Only returns papers with DOIs for proper citation
      */
-    async search(query, limit = 10) {
+    async search(query, limit = 12) {
         if (!query || query.trim().length < 3) {
             console.log('[SourceFinder] Query too short:', query);
             return [];
         }
 
         try {
-            // Build OpenAlex query with filters
+            // Clean and enhance query
+            const cleanQuery = query.trim().toLowerCase();
+            
+            // Build OpenAlex query - REQUIRE DOI
             const params = new URLSearchParams({
-                search: query.trim(),
-                filter: 'is_oa:true,has_abstract:true',
-                'per-page': Math.min(limit, 25).toString(),
+                search: cleanQuery,
+                filter: 'is_oa:true,has_abstract:true,has_doi:true',
+                'per-page': '25', // Get more to filter
                 sort: 'relevance_score:desc'
             });
 
@@ -31,28 +32,35 @@ export const SourceFinderAPI = {
             console.log('[SourceFinder] Searching:', url);
 
             const response = await fetch(url, {
-                headers: {
-                    'User-Agent': 'DocuMate Academic Research Tool (mailto:contact@documate.app)'
-                }
+                headers: { 'User-Agent': 'DocuMate Academic Tool (mailto:contact@documate.app)' }
             });
 
-            if (!response.ok) {
-                throw new Error(`OpenAlex returned ${response.status}`);
-            }
+            if (!response.ok) throw new Error(`OpenAlex returned ${response.status}`);
 
             const data = await response.json();
-            
-            if (!data.results || !Array.isArray(data.results)) {
-                console.log('[SourceFinder] No results found');
-                return [];
-            }
+            if (!data.results?.length) return [];
 
-            // Transform results into our format
+            // Transform and filter results
             const papers = data.results
                 .map(work => this._transformWork(work))
-                .filter(p => p.abstract && p.abstract.length > 100); // Only keep papers with substantial abstracts
+                .filter(p => {
+                    // Must have DOI
+                    if (!p.doi) return false;
+                    // Must have substantial abstract
+                    if (!p.abstract || p.abstract.length < 150) return false;
+                    // Check relevance - title or abstract should contain query terms
+                    const queryWords = cleanQuery.split(/\s+/).filter(w => w.length > 3);
+                    const titleLower = p.title.toLowerCase();
+                    const abstractLower = p.abstract.toLowerCase();
+                    const matchCount = queryWords.filter(w => 
+                        titleLower.includes(w) || abstractLower.includes(w)
+                    ).length;
+                    // At least half the query words should match
+                    return matchCount >= Math.ceil(queryWords.length / 2);
+                })
+                .slice(0, limit);
 
-            console.log('[SourceFinder] Found', papers.length, 'papers with abstracts');
+            console.log('[SourceFinder] Found', papers.length, 'relevant papers with DOIs');
             return papers;
 
         } catch (e) {
@@ -62,176 +70,153 @@ export const SourceFinderAPI = {
     },
 
     /**
-     * Search with multiple queries and deduplicate
-     * @param {Array<string>} queries - Array of search queries
-     * @param {number} limitPerQuery - Max results per query
-     * @returns {Array} Deduplicated array of papers
+     * Search with multiple specific queries for better coverage
      */
-    async searchMultiple(queries, limitPerQuery = 5) {
+    async searchTopic(topic, limit = 12) {
+        // Generate specific search queries based on topic
+        const queries = this._generateQueries(topic);
+        console.log('[SourceFinder] Generated queries:', queries);
+        
         const allResults = await Promise.all(
-            queries.map(q => this.search(q, limitPerQuery))
+            queries.map(q => this.search(q, 8))
         );
 
-        // Flatten and deduplicate by DOI or title
+        // Deduplicate by DOI
         const seen = new Set();
         const deduplicated = [];
 
         for (const results of allResults) {
             for (const paper of results) {
-                const key = paper.doi || paper.title.toLowerCase().substring(0, 50);
-                if (!seen.has(key)) {
-                    seen.add(key);
+                if (paper.doi && !seen.has(paper.doi)) {
+                    seen.add(paper.doi);
                     deduplicated.push(paper);
                 }
             }
         }
 
-        // Sort by citation count (more cited = more authoritative)
+        // Sort by citation count and return top results
         return deduplicated
             .sort((a, b) => (b.citationCount || 0) - (a.citationCount || 0))
-            .slice(0, 15);
+            .slice(0, limit);
     },
 
     /**
-     * Transform OpenAlex work object to our format
+     * Generate multiple search queries for better coverage
+     */
+    _generateQueries(topic) {
+        const lower = topic.toLowerCase();
+        const queries = [topic]; // Original query
+        
+        // Add specific variations based on topic keywords
+        if (lower.includes('designer bab') || lower.includes('gene edit') || lower.includes('crispr')) {
+            queries.push(
+                'designer babies ethics genetic engineering',
+                'CRISPR human embryo editing ethics',
+                'germline editing ethical implications',
+                'preimplantation genetic diagnosis ethics',
+                'human genome editing policy regulation'
+            );
+        } else if (lower.includes('climate') || lower.includes('global warming')) {
+            queries.push(
+                'climate change mitigation policy',
+                'global warming environmental impact',
+                'carbon emissions reduction strategies'
+            );
+        } else if (lower.includes('artificial intelligence') || lower.includes(' ai ')) {
+            queries.push(
+                'artificial intelligence ethics society',
+                'machine learning bias fairness',
+                'AI regulation governance policy'
+            );
+        }
+        
+        return queries.slice(0, 4); // Max 4 queries
+    },
+
+    /**
+     * Transform OpenAlex work to our format
      */
     _transformWork(work) {
         const abstract = this._reconstructAbstract(work.abstract_inverted_index);
         
-        // Get authors (limit to first 3 for citation)
+        // Get authors with structured names for proper citation
         const authors = (work.authorships || [])
             .slice(0, 5)
-            .map(a => a.author?.display_name)
-            .filter(Boolean);
+            .map(a => {
+                const name = a.author?.display_name || '';
+                const parts = name.split(' ');
+                if (parts.length >= 2) {
+                    return {
+                        given: parts.slice(0, -1).join(' '),
+                        family: parts[parts.length - 1]
+                    };
+                }
+                return { given: '', family: name };
+            })
+            .filter(a => a.family);
 
-        // Get the best URL (prefer open access PDF)
-        const bestUrl = work.best_oa_location?.pdf_url || 
-                       work.best_oa_location?.landing_page_url ||
-                       work.primary_location?.landing_page_url ||
-                       work.doi ||
-                       work.id;
+        // Format display author
+        let displayAuthor = 'Unknown';
+        if (authors.length > 0) {
+            displayAuthor = authors.length > 2 
+                ? `${authors[0].family} et al.`
+                : authors.map(a => a.family).join(' & ');
+        }
 
-        // Extract publication info
         const venue = work.primary_location?.source?.display_name ||
                      work.host_venue?.display_name ||
-                     'Academic Publication';
+                     'Academic Journal';
+
+        const doi = work.doi ? work.doi.replace('https://doi.org/', '') : null;
 
         return {
             id: work.id,
             title: work.title || 'Untitled',
             authors: authors,
-            // Format first author for citations
-            author: authors.length > 0 
-                ? (authors.length > 2 ? `${authors[0]} et al.` : authors.join(' & '))
-                : 'Unknown',
+            author: displayAuthor,
+            displayName: displayAuthor,
             year: work.publication_year || 'n.d.',
             venue: venue,
-            site: this._extractSiteName(venue),
             citationCount: work.cited_by_count || 0,
-            url: bestUrl,
-            doi: work.doi ? work.doi.replace('https://doi.org/', '') : null,
+            url: doi ? `https://doi.org/${doi}` : work.id,
+            doi: doi,
             abstract: abstract,
-            // For compatibility with existing citation system
-            text: abstract,
-            displayName: authors[0] || venue
+            text: abstract
         };
     },
 
     /**
-     * Reconstruct abstract from OpenAlex inverted index format
+     * Reconstruct abstract from inverted index
      */
     _reconstructAbstract(invertedIndex) {
-        if (!invertedIndex || typeof invertedIndex !== 'object') {
-            return null;
-        }
-
+        if (!invertedIndex || typeof invertedIndex !== 'object') return null;
         try {
             const words = [];
             for (const [word, positions] of Object.entries(invertedIndex)) {
-                for (const pos of positions) {
-                    words[pos] = word;
-                }
+                for (const pos of positions) words[pos] = word;
             }
             return words.filter(Boolean).join(' ');
         } catch (e) {
-            console.error('[SourceFinder] Abstract reconstruction failed:', e.message);
             return null;
         }
-    },
-
-    /**
-     * Extract short site name from venue
-     */
-    _extractSiteName(venue) {
-        if (!venue) return 'Academic Journal';
-        
-        // Common abbreviations
-        const abbrevs = {
-            'nature': 'Nature',
-            'science': 'Science',
-            'plos': 'PLOS',
-            'bmc': 'BMC',
-            'frontiers': 'Frontiers',
-            'mdpi': 'MDPI',
-            'elsevier': 'Elsevier',
-            'springer': 'Springer',
-            'wiley': 'Wiley',
-            'taylor': 'Taylor & Francis',
-            'oxford': 'Oxford Academic',
-            'cambridge': 'Cambridge',
-            'ieee': 'IEEE',
-            'acm': 'ACM',
-            'cell': 'Cell Press',
-            'lancet': 'The Lancet',
-            'bmj': 'BMJ',
-            'jama': 'JAMA',
-            'nejm': 'NEJM'
-        };
-
-        const lower = venue.toLowerCase();
-        for (const [key, name] of Object.entries(abbrevs)) {
-            if (lower.includes(key)) return name;
-        }
-
-        // Return first 2-3 words
-        return venue.split(/[\s,]+/).slice(0, 3).join(' ');
     }
 };
 
-// Also export as default for direct API endpoint usage
 export default async function handler(req, res) {
-    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
         const query = req.query.q;
-        
-        if (!query) {
-            return res.status(400).json({
-                success: false,
-                error: 'Missing query parameter ?q='
-            });
-        }
+        if (!query) return res.status(400).json({ success: false, error: 'Missing ?q=' });
 
-        const results = await SourceFinderAPI.search(query, 10);
-
-        return res.status(200).json({
-            success: true,
-            count: results.length,
-            results: results
-        });
-
+        // Use topic search for better results
+        const results = await SourceFinderAPI.searchTopic(query, 12);
+        return res.status(200).json({ success: true, count: results.length, results });
     } catch (err) {
-        console.error('[SourceFinder] Handler error:', err.message);
-        return res.status(500).json({
-            success: false,
-            error: 'Failed to fetch papers'
-        });
+        console.error('[SourceFinder]', err);
+        return res.status(500).json({ success: false, error: 'Search failed' });
     }
 }
