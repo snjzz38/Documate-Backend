@@ -245,22 +245,39 @@ IMPORTANT:
                             let cited = text;
                             const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
                             const pos = [];
-                            let fn = 1;
-                            const usedSources = new Set();
+                            
+                            // For footnotes: track which sources have been cited and their footnote number
+                            const sourceToFootnote = new Map();
+                            let nextFootnote = 1;
+                            
+                            // For bibliography: track all cited sources (deduplicated)
+                            const citedSourcesMap = new Map();
                             
                             for (const i of ins) {
                                 if (!i.anchor || i.anchor.length < 10) continue;
-                                const p = cited.toLowerCase().indexOf(i.anchor.toLowerCase());
+                                const anchorLower = i.anchor.toLowerCase();
+                                const p = cited.toLowerCase().indexOf(anchorLower);
                                 if (p === -1) continue;
                                 const s = sources.find(x => x.id === i.source_id);
                                 if (!s) continue;
                                 
                                 const a = getAuthor(s);
-                                const cit = type === 'footnotes' ? toSuper(fn++) : 
-                                           style.includes('apa') ? ` (${a}, ${s.year})` : 
-                                           style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
+                                let cit;
+                                
+                                if (type === 'footnotes') {
+                                    // For footnotes: reuse same number if source already cited
+                                    if (!sourceToFootnote.has(s.id)) {
+                                        sourceToFootnote.set(s.id, nextFootnote++);
+                                    }
+                                    cit = toSuper(sourceToFootnote.get(s.id));
+                                } else {
+                                    // For in-text citations
+                                    cit = style.includes('apa') ? ` (${a}, ${s.year})` : 
+                                          style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
+                                }
+                                
                                 pos.push({ p: p + i.anchor.length, cit, src: s });
-                                usedSources.add(s.id);
+                                citedSourcesMap.set(s.id, s);
                             }
                             
                             // Sort by position (descending) and insert
@@ -268,9 +285,19 @@ IMPORTANT:
                                 cited = cited.slice(0, x.p) + x.cit + cited.slice(x.p);
                             });
                             
-                            console.log('[Agent] Inserted', pos.length, 'citations from', usedSources.size, 'sources');
+                            // For footnotes, order sources by their footnote number
+                            let orderedSources;
+                            if (type === 'footnotes') {
+                                orderedSources = [...sourceToFootnote.entries()]
+                                    .sort((a, b) => a[1] - b[1])
+                                    .map(([id]) => citedSourcesMap.get(id));
+                            } else {
+                                orderedSources = [...citedSourcesMap.values()];
+                            }
+                            
+                            console.log('[Agent] Inserted', pos.length, 'citations,', orderedSources.length, 'unique sources');
                             result.output = cited; 
-                            result.citedSources = [...new Map(pos.map(x => [x.src.id, x.src])).values()];
+                            result.citedSources = orderedSources;
                         } else {
                             result.output = text;
                         }
