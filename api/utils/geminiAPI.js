@@ -11,78 +11,74 @@ const GEMINI_MODELS = [
   'gemma-3-1b-it'
 ];
 
-async function makeRequest(model, parts, apiKey) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-    const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            contents: [{ parts }]
-        })
-    });
-
-    if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error?.message || `Status ${res.status}`);
-    }
-
-    const data = await res.json();
-
-    if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        throw new Error("Invalid response structure from Gemini");
-    }
-
-    return data.candidates[0].content.parts[0].text;
-}
-
 export const GeminiAPI = {
-
-    /**
-     * Universal method: handles BOTH text + images
-     * @param {string} promptText
-     * @param {string} apiKey
-     * @param {Array} files (optional) [{ mime_type, data }]
-     */
-    async generate(promptText, apiKey, files = []) {
+    async chat(promptText, apiKey) {
         if (!apiKey) throw new Error("Missing Gemini API Key");
-
         let lastError = null;
-
-        // Build parts dynamically
-        const parts = [];
-
-        // Add files first (important for Gemini)
-        if (files.length > 0) {
-            files.forEach(f => {
-                parts.push({
-                    inline_data: {
-                        mime_type: f.mime_type || f.type,
-                        data: f.data
-                    }
-                });
-            });
-        }
-
-        // Add prompt last
-        parts.push({ text: promptText });
-
-        for (let i = 0; i < GEMINI_MODELS.length; i++) {
-            const model = GEMINI_MODELS[0];
-
+        for (let attempt = 0; attempt < GEMINI_MODELS.length; attempt++) {
+            const currentModel = GEMINI_MODELS[0];
             try {
-                const result = await makeRequest(model, parts, apiKey);
-                return result;
-
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
+                const res = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: promptText }] }]
+                    })
+                });
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.error?.message || `Status ${res.status}`);
+                }
+                const data = await res.json();
+                if (!data.candidates?.[0]?.content) {
+                    throw new Error("Invalid response structure from Gemini");
+                }
+                return data.candidates[0].content.parts[0].text;
             } catch (e) {
                 lastError = e;
-
-                // rotate model
-                const failed = GEMINI_MODELS.shift();
-                GEMINI_MODELS.push(failed);
+                const failedModel = GEMINI_MODELS.shift();
+                GEMINI_MODELS.push(failedModel);
             }
         }
-
         throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
+    },
+
+    // Vision method for image inputs
+    async vision(promptText, apiKey, files = []) {
+        if (!apiKey) throw new Error("Missing Gemini API Key");
+        // Only use vision-capable models
+        const visionModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro'];
+        let lastError = null;
+
+        const parts = [
+            ...files.map(f => ({
+                inline_data: { mime_type: f.type, data: f.data }
+            })),
+            { text: promptText }
+        ];
+
+        for (const model of visionModels) {
+            try {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                const res = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        contents: [{ parts }]
+                    })
+                });
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.error?.message || `Status ${res.status}`);
+                }
+                const data = await res.json();
+                if (!data.candidates?.[0]?.content) throw new Error("Invalid response structure");
+                return data.candidates[0].content.parts[0].text;
+            } catch (e) {
+                lastError = e;
+            }
+        }
+        throw new Error(`Vision failed: ${lastError?.message}`);
     }
 };
