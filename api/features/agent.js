@@ -5,11 +5,13 @@
 import * as geminiModule from '../utils/geminiAPI.js';
 import * as groqModule from '../utils/groqAPI.js';
 import * as sourceModule from '../utils/sourceFinder.js';
+import * as doiModule from '../utils/doiAPI.js';
 
 // Extract the actual exports
 const GeminiAPI = geminiModule.GeminiAPI || geminiModule.default?.GeminiAPI || geminiModule.default || geminiModule;
 const GroqAPI = groqModule.GroqAPI || groqModule.default?.GroqAPI || groqModule.default || groqModule;
 const SourceFinderAPI = sourceModule.SourceFinderAPI || sourceModule.default?.SourceFinderAPI || sourceModule.default || sourceModule;
+const DoiAPI = doiModule.DoiAPI || doiModule.default?.DoiAPI || doiModule.default || doiModule;
 
 // Verify imports
 if (!GeminiAPI?.chat) console.error('[Agent] WARNING: GeminiAPI.chat not found');
@@ -80,29 +82,56 @@ export default async function handler(req, res) {
                         break; 
                     }
                     
-                    // Transform papers into sources format
-                    const sources = papers.map((p, i) => ({
-                        id: i + 1,
-                        title: p.title,
-                        url: p.url,
-                        doi: p.doi,
-                        site: p.site || p.venue,
-                        author: p.author,
-                        authors: p.authors,
-                        year: p.year,
-                        displayName: p.author || p.displayName,
-                        text: p.abstract,
-                        citationCount: p.citationCount
+                    // Enrich papers with DOI metadata for proper citations
+                    const enrichedSources = await Promise.all(papers.map(async (p, i) => {
+                        let enriched = {
+                            id: i + 1,
+                            title: p.title,
+                            url: p.url,
+                            doi: p.doi,
+                            site: p.site || p.venue,
+                            venue: p.venue,
+                            author: p.author,
+                            authors: p.authors || [],
+                            year: p.year,
+                            displayName: p.author || p.displayName,
+                            text: p.abstract,
+                            citationCount: p.citationCount
+                        };
+                        
+                        // Try to get richer metadata from Crossref if DOI available
+                        if (p.doi && DoiAPI?.fetchFromCrossref) {
+                            try {
+                                const doiMeta = await DoiAPI.fetchFromCrossref(p.doi);
+                                if (doiMeta) {
+                                    enriched.authors = doiMeta.authors || enriched.authors;
+                                    enriched.venue = doiMeta.journal || enriched.venue;
+                                    enriched.year = doiMeta.year || enriched.year;
+                                    // Format author properly for citation
+                                    if (doiMeta.authors?.length > 0) {
+                                        const firstAuthor = doiMeta.authors[0];
+                                        enriched.author = doiMeta.authors.length > 2 
+                                            ? `${firstAuthor.family} et al.`
+                                            : doiMeta.authors.map(a => a.family).join(' & ');
+                                        enriched.displayName = enriched.author;
+                                    }
+                                }
+                            } catch (e) {
+                                console.log('[Agent] DOI enrichment failed for:', p.doi);
+                            }
+                        }
+                        
+                        return enriched;
                     }));
                     
                     // Build research text from abstracts
-                    const texts = sources.map(s => 
+                    const texts = enrichedSources.map(s => 
                         `[${s.displayName}, ${s.year}] ${s.title}\n${s.text}`
                     );
                     
-                    console.log('[Agent] Found', sources.length, 'academic sources');
+                    console.log('[Agent] Found', enrichedSources.length, 'academic sources');
                     
-                    result.output = { text: texts.join('\n\n'), sources }; 
+                    result.output = { text: texts.join('\n\n'), sources: enrichedSources }; 
                     result.type = 'research'; 
                     break;
                 }
@@ -156,21 +185,42 @@ Jones (2022): "Ethical considerations must be balanced with potential benefits"`
 
                 case 'WRITE': {
                     const { researchData = {}, extractedQuotes = [], task: userTask } = context;
-                    const prompt = `You are an expert academic writer.
+                    const prompt = `You are an expert academic writer following strict academic writing standards.
 
 TASK: ${userTask}
 ${researchData.text ? `\nRESEARCH:\n${researchData.text.substring(0, 8000)}` : ''}
 ${extractedQuotes.length ? `\nQUOTES TO INCLUDE:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}
 
-CRITICAL RULES:
-1. Write in formal academic tone
-2. DO NOT include any citations, parenthetical references, or author attributions like "(Author, Year)" or "(Smith et al., 2020)"
-3. DO NOT add superscript numbers or footnote markers
-4. Simply present the information and quotes WITHOUT any citation formatting - citations will be added in a separate step
-5. When using quotes, just write them naturally without author names, e.g., "research shows that..." not "(Smith, 2020) states..."
-6. NO bibliography or references section at the end
-7. OUTPUT PLAIN TEXT ONLY - no markdown formatting, no asterisks, no bold, no italics
-8. Use simple text headings without any special formatting`;
+CRITICAL ACADEMIC WRITING RULES:
+
+1. ACRONYMS & ABBREVIATIONS:
+   - Define ALL acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)"
+   - After defining, use the acronym: "PGD allows screening..."
+   - Common acronyms to define: PGD, PGT, CRISPR, IVF, DNA, RNA, IVG, etc.
+
+2. FORMAL ACADEMIC TONE:
+   - Use third person (avoid "I", "we", "you")
+   - Use formal vocabulary and complex sentence structures
+   - Present balanced arguments with evidence
+
+3. NO CITATIONS IN TEXT:
+   - DO NOT include any parenthetical references like "(Author, Year)"
+   - DO NOT add superscript numbers or footnote markers
+   - Citations will be added automatically in a separate step
+   - Just present information naturally without attribution
+
+4. STRUCTURE:
+   - Clear introduction with thesis
+   - Well-organized body paragraphs with topic sentences
+   - Logical transitions between ideas
+   - Strong conclusion
+
+5. FORMATTING:
+   - OUTPUT PLAIN TEXT ONLY - no markdown, no asterisks, no bold
+   - Use simple text headings (just the heading text, no special formatting)
+   - NO bibliography or references section
+
+Write a well-structured, academically rigorous response:`;
 
                     const resp = await GeminiAPI.chat(prompt, GEMINI);
                     result.output = stripMarkdown(stripRefs(resp)); 
