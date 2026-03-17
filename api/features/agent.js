@@ -47,7 +47,11 @@ export default async function handler(req, res) {
 
             switch (step.tool.toUpperCase()) {
                 case 'RESEARCH': {
-                    const papers = await SourceFinderAPI.search(extractTopic(context.task||''), 12);
+                    const topic = extractTopic(context.task||'');
+                    console.log('[Agent] Research topic:', topic);
+                    
+                    // Use searchTopic for better, relevant results
+                    const papers = await SourceFinderAPI.searchTopic(topic, 12);
                     if (!papers?.length) { result.output = { text: '', sources: [] }; result.type = 'research'; break; }
                     
                     const sources = papers.map((p, i) => ({
@@ -116,23 +120,30 @@ ${text}`;
                     if (type === 'bibliography' || !text || !sources.length) {
                         result.output = text;
                         result.citedSources = sources;
-                        result.type = 'cited'; // Special type to trigger bibliography display
+                        result.type = 'cited';
                         break;
                     }
                     
                     // For in-text/footnotes - insert citations into text
                     try {
-                        const srcList = sources.slice(0,10).map(s => `[${s.id}] ${fmtAuthor(s)} (${s.year})`).join('\n');
-                        const prompt = `Add citations to this text. Return JSON only.
+                        const srcList = sources.slice(0,10).map(s => `[${s.id}] ${fmtAuthor(s)} (${s.year}): "${s.title.substring(0,60)}"`).join('\n');
+                        const prompt = `Add in-text citations throughout this academic text.
 
-SOURCES:
+AVAILABLE SOURCES:
 ${srcList}
 
 TEXT:
 "${text.substring(0, 5000)}"
 
-Return: {"insertions":[{"anchor":"exact 5-8 word phrase","source_id":1}]}
-Add 8-12 citations spread across paragraphs.`;
+RULES:
+1. Add 10-15 citations total
+2. Each paragraph should have 2-3 citations
+3. You MAY cite the same source multiple times in DIFFERENT paragraphs if relevant
+4. Place citations after claims, facts, or arguments
+5. Use diverse sources - don't only use 1-2 sources
+
+Return ONLY JSON:
+{"insertions":[{"anchor":"exact 5-8 word phrase from text","source_id":1}]}`;
                         
                         const resp = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
                         const json = resp.match(/\{[\s\S]*\}/);
