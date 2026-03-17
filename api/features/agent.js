@@ -109,7 +109,7 @@ Jones & Lee (2022): "Ethical considerations must guide the development of germli
                 }
 
                 case 'WRITE': {
-                    const { researchData = {}, researchSources = [], extractedQuotes = [], task: userTask } = context;
+                    const { researchSources = [], extractedQuotes = [], task: userTask, uploadedFile } = context;
                     
                     // Build source info
                     const sourceInfo = researchSources.slice(0, 10).map((s, i) => {
@@ -118,16 +118,24 @@ Title: "${s.title}"
 Abstract: ${s.text?.substring(0, 600) || 'No abstract'}`;
                     }).join('\n\n');
 
-                    // Build quotes section if quotes were extracted
+                    // Build quotes section if available
                     let quotesSection = '';
                     if (extractedQuotes?.length) {
                         quotesSection = `\n\nPRE-EXTRACTED QUOTES TO USE (include these in your essay):
 ${extractedQuotes.map((q, i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}`;
                     }
 
+                    // Handle uploaded file context
+                    let fileContext = '';
+                    if (uploadedFile?.data) {
+                        fileContext = `\n\nUSER UPLOADED FILE: ${uploadedFile.name}
+The user has uploaded a file for context. Consider it when writing.`;
+                    }
+
                     const prompt = `You are an expert academic writer. Write a well-researched essay with DIRECT QUOTES from sources.
 
 TASK: ${userTask}
+${fileContext}
 
 SOURCES:
 ${sourceInfo}
@@ -166,147 +174,90 @@ Write the essay with embedded quotes now:`;
                 }
 
                 case 'HUMANIZE': {
-                    const text = context.previousOutput || '';
-                    if (text.length < 50) throw new Error('No text to humanize');
+                    const input = context.previousOutput || '';
+                    if (!input) { result.output = ''; break; }
                     
-                    const prompt = `Rewrite to sound natural and human-written. 
-
-IMPORTANT:
-- Keep ALL direct quotes exactly as they are (text inside quotation marks)
-- Keep the quote attributions like "According to Smith (2020)"
-- Make the surrounding text more natural and conversational
-- Keep structure and facts
-- Plain text only, no formatting
+                    const prompt = `Rewrite this text to sound more natural and human-written while preserving ALL direct quotes and academic quality.
 
 TEXT:
-${text}`;
+${input}
 
-                    result.output = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+RULES:
+1. Keep ALL direct quotes exactly as they are (text inside quotation marks)
+2. Keep all author attributions (According to X, As Y argues, etc.)
+3. Make surrounding text more conversational and natural
+4. Vary sentence structure and length
+5. Add subtle transitions between ideas
+6. Maintain academic tone but make it engaging
+7. DO NOT add any new citations or references
+8. Plain text only - no markdown
+
+Rewrite now:`;
+
+                    result.output = stripMarkdown(await GeminiAPI.chat(prompt, GEMINI));
                     result.type = 'text';
                     break;
                 }
 
                 case 'CITE': {
-                    const text = context.previousOutput || '';
-                    const sources = context.researchSources || [];
-                    const style = options.citationStyle || 'apa7';
-                    const type = options.citationType || 'bibliography';
-                    
-                    // For bibliography only - no text modification needed
-                    if (type === 'bibliography' || !text || !sources.length) {
-                        result.output = text;
-                        result.citedSources = sources;
-                        result.type = 'cited';
-                        break;
-                    }
-                    
-                    // For in-text/footnotes - add additional citations
-                    try {
-                        const srcList = sources.slice(0,10).map(s => `[${s.id}] ${fmtAuthor(s)} (${s.year}): "${s.title.substring(0,50)}"`).join('\n');
-                        const prompt = `Add MORE in-text citations to support claims in this text.
-
-Note: Some citations already exist (with quotes). Add citations to OTHER claims that need support.
-
-AVAILABLE SOURCES:
-${srcList}
-
-TEXT:
-"${text.substring(0, 5000)}"
-
-RULES:
-1. Add 6-10 MORE citations to unsupported claims
-2. Don't add citations right next to existing ones
-3. Place citations after facts, statistics, or arguments
-4. You MAY cite same source multiple times in different spots
-
-Return ONLY JSON:
-{"insertions":[{"anchor":"exact 5-8 word phrase","source_id":1}]}`;
-                        
-                        const resp = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
-                        const json = resp.match(/\{[\s\S]*\}/);
-                        
-                        if (json) {
-                            const ins = JSON.parse(json[0]).insertions || [];
-                            let cited = text;
-                            const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-                            const srcToFn = new Map();
-                            let fnNum = 1;
-                            const usedSrcs = new Map();
-                            const positions = [];
-                            
-                            for (const i of ins) {
-                                if (!i.anchor || i.anchor.length < 8) continue;
-                                const pos = cited.toLowerCase().indexOf(i.anchor.toLowerCase());
-                                if (pos === -1) continue;
-                                const src = sources.find(x => x.id === i.source_id);
-                                if (!src) continue;
-                                
-                                let cit;
-                                if (type === 'footnotes') {
-                                    if (!srcToFn.has(src.id)) srcToFn.set(src.id, fnNum++);
-                                    cit = toSuper(srcToFn.get(src.id));
-                                } else {
-                                    const a = fmtAuthor(src);
-                                    cit = style.includes('apa') ? ` (${a}, ${src.year})` : ` (${a})`;
-                                }
-                                
-                                positions.push({ p: pos + i.anchor.length, cit, src });
-                                usedSrcs.set(src.id, src);
-                            }
-                            
-                            positions.sort((a,b) => b.p - a.p).forEach(x => cited = cited.slice(0,x.p) + x.cit + cited.slice(x.p));
-                            
-                            result.output = cited;
-                            result.citedSources = type === 'footnotes' 
-                                ? [...srcToFn.entries()].sort((a,b)=>a[1]-b[1]).map(([id])=>usedSrcs.get(id))
-                                : [...usedSrcs.values()];
-                        } else {
-                            result.output = text;
-                            result.citedSources = sources;
-                        }
-                    } catch (e) {
-                        console.error('[Agent] Citation error:', e.message);
-                        result.output = text;
-                        result.citedSources = sources;
-                    }
+                    // Return sources for bibliography - don't modify text
+                    result.output = context.previousOutput || '';
+                    result.citedSources = context.researchSources || [];
                     result.type = 'cited';
                     break;
                 }
 
                 case 'GRADE': {
                     const text = context.previousOutput || '';
-                    if (text.length < 50) { result.output = { grade: 'N/A', feedback: 'No content' }; result.type = 'grade'; break; }
+                    if (!text) { result.output = { grade: 'N/A', feedback: 'No text to grade.' }; result.type = 'grade'; break; }
                     
-                    const resp = await GeminiAPI.chat(`Grade this academic work.
+                    const prompt = `Grade this academic essay and provide detailed feedback.
 
-ASSIGNMENT: ${context.task}
+ESSAY:
+${text}
 
-STUDENT WORK:
-${text.substring(0,5000)}
+Evaluate on:
+1. Thesis clarity and argumentation (25%)
+2. Evidence and source integration (25%)
+3. Organization and flow (20%)
+4. Writing quality and academic tone (20%)
+5. Grammar and mechanics (10%)
 
-Evaluate based on:
-1. Use of direct quotes from sources
-2. Proper citation format
-3. Argument structure and clarity
-4. Academic writing quality
+Format your response as:
+GRADE: [A+ to F]
 
-Provide:
-GRADE: (A+/A/A-/B+/B/B-/C+/C/D/F)
-STRENGTHS: (bullet points)
-IMPROVEMENTS: (bullet points)`, GEMINI);
-                    
-                    result.output = { grade: resp.match(/GRADE:\s*([A-F][+-]?)/i)?.[1] || 'B', feedback: resp };
+STRENGTHS:
+- [strength 1]
+- [strength 2]
+
+AREAS FOR IMPROVEMENT:
+- [area 1]
+- [area 2]
+
+DETAILED FEEDBACK:
+[1-2 paragraphs of specific feedback]`;
+
+                    const feedback = await GeminiAPI.chat(prompt, GEMINI);
+                    const gradeMatch = feedback.match(/GRADE:\s*([A-F][+-]?)/i);
+                    result.output = {
+                        grade: gradeMatch ? gradeMatch[1].toUpperCase() : 'B',
+                        feedback: feedback
+                    };
                     result.type = 'grade';
                     break;
                 }
+
+                default:
+                    result.output = 'Unknown step';
             }
-            
+
             return res.status(200).json(result);
         }
-        
-        throw new Error(`Unknown action: ${action}`);
-    } catch (e) { 
-        console.error('[Agent]', e); 
-        return res.status(500).json({ success: false, error: e.message }); 
+
+        return res.status(400).json({ success: false, error: 'Invalid action' });
+
+    } catch (e) {
+        console.error('[Agent] Error:', e);
+        return res.status(500).json({ success: false, error: e.message });
     }
 }
