@@ -94,15 +94,13 @@ export default async function handler(req, res) {
                         `SOURCE ${i+1}:\nTitle: "${s.title}"\nKey info: ${s.text?.substring(0, 500) || 'N/A'}`
                     ).join('\n\n');
                 
-                    // FIX 2: Build vision-aware prompt with all uploaded files
                     const allFiles = uploadedFiles.length > 0 ? uploadedFiles : (uploadedFile ? [uploadedFile] : []);
                     const imageFiles = allFiles.filter(f => f.type?.startsWith('image/'));
                     const otherFiles = allFiles.filter(f => !f.type?.startsWith('image/'));
                 
-                    let fileContext = '';
-                    if (otherFiles.length > 0) {
-                        fileContext = `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n`;
-                    }
+                    let fileContext = otherFiles.length > 0
+                        ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n`
+                        : '';
                 
                     const prompt = `Write a well-researched academic essay.
                 TASK: ${userTask}
@@ -111,29 +109,16 @@ export default async function handler(req, res) {
                 ${sourceInfo}
                 REQUIREMENTS:
                 1. Write naturally WITHOUT any citations or author references
-                   - Do NOT write "(Author, 2020)" or "According to Author"  
-                   - Do NOT mention any author names or years
-                   - Citations will be added in a later step
                 2. Use the research content but express ideas in your own words
-                3. Define acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)"
+                3. Define acronyms on first use
                 4. Structure: Introduction with thesis → Body paragraphs → Conclusion
                 5. Plain text only - no markdown, no bold, no headers
                 6. Do NOT include a bibliography
-                ${imageFiles.length > 0 ? '7. Carefully analyze and describe the uploaded image(s) in detail as part of the essay.' : ''}
+                ${imageFiles.length > 0 ? '7. Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
                 Write the essay now:`;
                 
-                    let text;
-                
-                    // FIX 2: Use vision API if images are attached
-                    if (imageFiles.length > 0) {
-                        const imageParts = imageFiles.map(f => ({
-                            inlineData: { mimeType: f.type, data: f.data }
-                        }));
-                        text = await GeminiAPI.vision(prompt, imageParts, GEMINI);
-                    } else {
-                        text = await GeminiAPI.chat(prompt, GEMINI);
-                    }
-                
+                    // Use unified generate() - passes images automatically if present
+                    const text = await GeminiAPI.generate(prompt, GEMINI, imageFiles);
                     result.output = stripMarkdown(stripRefs(text));
                     result.type = 'text';
                     break;
