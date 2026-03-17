@@ -1,4 +1,4 @@
-// api/features/agent.js - Agent Mode (Optimized)
+// api/features/agent.js - Agent Mode
 import { GeminiAPI } from '../utils/geminiAPI.js';
 import { GroqAPI } from '../utils/groqAPI.js';
 import { SourceFinderAPI } from '../utils/sourceFinder.js';
@@ -6,7 +6,7 @@ import { SourceFinderAPI } from '../utils/sourceFinder.js';
 // Helpers
 const stripMarkdown = t => t.replace(/\*\*?([^*]+)\*\*?/g,'$1').replace(/__?([^_]+)__?/g,'$1').replace(/^#{1,6}\s*/gm,'').replace(/`([^`]+)`/g,'$1');
 const stripRefs = t => t.replace(/\n\n\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i,'').trim();
-const stripCitations = t => t.replace(/\s*\([^)]*\d{4}[^)]*\)/g,'').replace(/\s*\[[^\]]*\d{4}[^\]]*\]/g,''); // Remove (Author, 2020) patterns
+const stripCitations = t => t.replace(/\s*\([^)]*\d{4}[^)]*\)/g,'').replace(/\s*\[[^\]]*\d{4}[^\]]*\]/g,'');
 
 const extractTopic = text => {
     const m = text.match(/(?:about|essay on|write about)[:\s]+["']?([^"'\n.!?]{10,80})/i);
@@ -15,7 +15,6 @@ const extractTopic = text => {
     return (text.toLowerCase().match(/\b[a-z]{4,}\b/g)||[]).filter(w=>!skip.has(w)).slice(0,5).join(' ') || text.substring(0,80);
 };
 
-// Format author for in-text citation
 const fmtAuthor = s => {
     if (s.authors?.length && s.authors[0].family) {
         return s.authors.length > 2 ? `${s.authors[0].family} et al.` : s.authors.map(a=>a.family).join(' & ');
@@ -37,7 +36,7 @@ export default async function handler(req, res) {
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
             if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Write content' });
             if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
-            if (options.enableCite) steps.push({ tool: 'CITE', action: 'Add citations' });
+            if (options.enableCite) steps.push({ tool: 'CITE', action: 'Format citations' });
             if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Grade work' });
             return res.status(200).json({ success: true, plan: { understanding: task.substring(0,150), steps } });
         }
@@ -86,8 +85,7 @@ STRICT RULES:
 Write the essay now:`;
 
                     let text = await GeminiAPI.chat(prompt, GEMINI);
-                    text = stripMarkdown(stripRefs(stripCitations(text)));
-                    result.output = text;
+                    result.output = stripMarkdown(stripRefs(stripCitations(text)));
                     result.type = 'text';
                     break;
                 }
@@ -103,8 +101,7 @@ Plain text only, no formatting.
 TEXT:
 ${text}`;
 
-                    let humanized = await GeminiAPI.chat(prompt, GEMINI);
-                    result.output = stripMarkdown(stripRefs(stripCitations(humanized)));
+                    result.output = stripMarkdown(stripRefs(stripCitations(await GeminiAPI.chat(prompt, GEMINI))));
                     result.type = 'text';
                     break;
                 }
@@ -115,17 +112,15 @@ ${text}`;
                     const style = options.citationStyle || 'apa7';
                     const type = options.citationType || 'bibliography';
                     
-                    if (!text || !sources.length) { result.output = text; result.citedSources = []; result.type = 'text'; break; }
-                    
-                    // For bibliography only, just return text + sources for frontend to format
-                    if (type === 'bibliography') {
+                    // For bibliography only - no text modification needed
+                    if (type === 'bibliography' || !text || !sources.length) {
                         result.output = text;
                         result.citedSources = sources;
-                        result.type = 'text';
+                        result.type = 'cited'; // Special type to trigger bibliography display
                         break;
                     }
                     
-                    // For in-text/footnotes, ask LLM where to insert
+                    // For in-text/footnotes - insert citations into text
                     try {
                         const srcList = sources.slice(0,10).map(s => `[${s.id}] ${fmtAuthor(s)} (${s.year})`).join('\n');
                         const prompt = `Add citations to this text. Return JSON only.
@@ -164,8 +159,7 @@ Add 8-12 citations spread across paragraphs.`;
                                     cit = toSuper(srcToFn.get(src.id));
                                 } else {
                                     const a = fmtAuthor(src);
-                                    cit = style.includes('apa') ? ` (${a}, ${src.year})` : 
-                                          style.includes('mla') ? ` (${a})` : ` (${a} ${src.year})`;
+                                    cit = style.includes('apa') ? ` (${a}, ${src.year})` : ` (${a})`;
                                 }
                                 
                                 positions.push({ p: pos + i.anchor.length, cit, src });
@@ -187,7 +181,7 @@ Add 8-12 citations spread across paragraphs.`;
                         result.output = text;
                         result.citedSources = sources;
                     }
-                    result.type = 'text';
+                    result.type = 'cited';
                     break;
                 }
 
