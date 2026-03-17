@@ -107,42 +107,25 @@ export default async function handler(req, res) {
                 ${fileContext}
                 RESEARCH SOURCES:
                 ${sourceInfo}
+                
                 REQUIREMENTS:
                 1. Write naturally WITHOUT any citations or author references
+                   - Do NOT write "(Author, 2020)" or "According to Author"  
+                   - Do NOT mention any author names or years
+                   - Citations will be added in a later step
                 2. Use the research content but express ideas in your own words
-                3. Define acronyms on first use
+                3. Define acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)"
                 4. Structure: Introduction with thesis → Body paragraphs → Conclusion
                 5. Plain text only - no markdown, no bold, no headers
                 6. Do NOT include a bibliography
                 ${imageFiles.length > 0 ? '7. Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
+                
                 Write the essay now:`;
                 
-                    // Use unified generate() - passes images automatically if present
-                    const text = await GeminiAPI.generate(prompt, GEMINI, imageFiles);
-                    result.output = stripMarkdown(stripRefs(text));
-                    result.type = 'text';
-                    break;
-                }
-
-TASK: ${userTask}
-${fileContext}
-RESEARCH SOURCES:
-${sourceInfo}
-
-REQUIREMENTS:
-1. Write naturally WITHOUT any citations or author references
-   - Do NOT write "(Author, 2020)" or "According to Author"  
-   - Do NOT mention any author names or years
-   - Citations will be added in a later step
-2. Use the research content but express ideas in your own words
-3. Define acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)"
-4. Structure: Introduction with thesis → Body paragraphs → Conclusion
-5. Plain text only - no markdown, no bold, no headers
-6. Do NOT include a bibliography
-
-Write the essay now:`;
-
-                    let text = await GeminiAPI.chat(prompt, GEMINI);
+                    const text = imageFiles.length > 0
+                        ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
+                        : await GeminiAPI.chat(prompt, GEMINI);
+                
                     result.output = stripMarkdown(stripRefs(text));
                     result.type = 'text';
                     break;
