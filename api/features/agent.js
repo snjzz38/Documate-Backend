@@ -111,13 +111,45 @@ export default async function handler(req, res) {
                     const src = context.researchSources || [];
                     if (!src.length) { result.output = []; result.type = 'quotes'; break; }
                     
-                    const prompt = `Extract 3-5 direct quotes from these sources.\nFORMAT each as: SourceName: "exact quote"\n\n${src.slice(0,5).map(s => `--- ${s.displayName} ---\n${s.text?.substring(0,1200)}`).join('\n\n')}`;
+                    const prompt = `Extract 8-12 important quotes from these academic paper abstracts.
+
+SOURCES:
+${src.slice(0, 10).map((s, i) => `--- SOURCE ${i + 1}: ${s.displayName} (${s.year}) ---\n${s.text?.substring(0, 1500)}`).join('\n\n')}
+
+RULES:
+1. Extract EXACT phrases from the abstracts (do not paraphrase)
+2. Each quote should be a complete, meaningful sentence or key finding
+3. Include quotes from AS MANY different sources as possible
+4. Focus on: key findings, statistics, conclusions, and important claims
+5. Aim for at least 1-2 quotes per source
+
+FORMAT each quote on its own line as:
+SourceName (Year): "exact quote from the abstract"
+
+Example:
+Smith et al. (2023): "Gene editing has shown a 95% success rate in preventing hereditary diseases"
+Jones (2022): "Ethical considerations must be balanced with potential benefits"`;
+
                     const resp = await GeminiAPI.chat(prompt, GEMINI);
                     
-                    result.output = resp.split('\n')
-                        .map(l => l.match(/^([^:]+):\s*"([^"]+)"/))
-                        .filter(Boolean)
-                        .map(m => ({ source: m[1].trim(), quote: m[2].trim() }));
+                    // Parse quotes more flexibly
+                    const quotes = [];
+                    const lines = resp.split('\n').filter(l => l.trim());
+                    
+                    for (const line of lines) {
+                        // Match various formats: "Source (Year): "quote"" or "Source: "quote""
+                        const match = line.match(/^([^:]+(?:\(\d{4}\))?)\s*:\s*[""]([^""]+)[""]/) ||
+                                     line.match(/^([^:]+)\s*:\s*[""]([^""]+)[""]/);
+                        if (match) {
+                            quotes.push({ 
+                                source: match[1].trim(), 
+                                quote: match[2].trim() 
+                            });
+                        }
+                    }
+                    
+                    console.log('[Agent] Extracted', quotes.length, 'quotes');
+                    result.output = quotes;
                     result.type = 'quotes'; 
                     break;
                 }
@@ -130,12 +162,15 @@ TASK: ${userTask}
 ${researchData.text ? `\nRESEARCH:\n${researchData.text.substring(0, 8000)}` : ''}
 ${extractedQuotes.length ? `\nQUOTES TO INCLUDE:\n${extractedQuotes.map((q,i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}` : ''}
 
-RULES:
+CRITICAL RULES:
 1. Write in formal academic tone
-2. Include the quotes with proper attribution
-3. NO bibliography or references section at the end
-4. OUTPUT PLAIN TEXT ONLY - no markdown formatting, no asterisks, no bold, no italics
-5. Use simple text headings without any special formatting`;
+2. DO NOT include any citations, parenthetical references, or author attributions like "(Author, Year)" or "(Smith et al., 2020)"
+3. DO NOT add superscript numbers or footnote markers
+4. Simply present the information and quotes WITHOUT any citation formatting - citations will be added in a separate step
+5. When using quotes, just write them naturally without author names, e.g., "research shows that..." not "(Smith, 2020) states..."
+6. NO bibliography or references section at the end
+7. OUTPUT PLAIN TEXT ONLY - no markdown formatting, no asterisks, no bold, no italics
+8. Use simple text headings without any special formatting`;
 
                     const resp = await GeminiAPI.chat(prompt, GEMINI);
                     result.output = stripMarkdown(stripRefs(resp)); 
@@ -173,16 +208,34 @@ TEXT:\n${text}`;
                     }
                     
                     try {
-                        const srcList = sources.map(s => `[${s.id}] ${getAuthor(s)} (${s.year})`).join('\n');
-                        const prompt = `Add in-text citations to this text.
+                        const srcList = sources.map(s => `[${s.id}] ${getAuthor(s)} (${s.year}): "${s.title}"`).join('\n');
+                        const prompt = `Add in-text citations throughout this academic text.
 
-SOURCES:
+AVAILABLE SOURCES:
 ${srcList}
 
-TEXT:
-"${text.substring(0, 5000)}"
+TEXT TO CITE:
+"${text.substring(0, 6000)}"
 
-Return JSON only: {"insertions":[{"anchor":"3-5 word phrase from text","source_id":1}]}`;
+RULES:
+1. Add 8-15 citations throughout the text
+2. Place citations after claims, facts, statistics, or arguments that need support
+3. Each paragraph should have at least 1-2 citations
+4. Use different sources - don't over-rely on just one or two
+5. Match the citation to relevant content (e.g., cite genetics papers for genetics claims)
+
+Return ONLY a JSON object:
+{
+  "insertions": [
+    {"anchor": "exact 4-6 word phrase from the text", "source_id": 1},
+    {"anchor": "another exact phrase", "source_id": 3}
+  ]
+}
+
+IMPORTANT: 
+- "anchor" must be an EXACT phrase that appears in the text
+- Include at least 8 insertions
+- Spread citations across different paragraphs`;
                         
                         const resp = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
                         const json = resp.match(/\{[\s\S]*\}/);
@@ -193,23 +246,31 @@ Return JSON only: {"insertions":[{"anchor":"3-5 word phrase from text","source_i
                             const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
                             const pos = [];
                             let fn = 1;
+                            const usedSources = new Set();
                             
                             for (const i of ins) {
-                                if (!i.anchor) continue;
+                                if (!i.anchor || i.anchor.length < 10) continue;
                                 const p = cited.toLowerCase().indexOf(i.anchor.toLowerCase());
                                 if (p === -1) continue;
                                 const s = sources.find(x => x.id === i.source_id);
                                 if (!s) continue;
+                                
                                 const a = getAuthor(s);
                                 const cit = type === 'footnotes' ? toSuper(fn++) : 
                                            style.includes('apa') ? ` (${a}, ${s.year})` : 
                                            style.includes('mla') ? ` (${a})` : ` (${a} ${s.year})`;
                                 pos.push({ p: p + i.anchor.length, cit, src: s });
+                                usedSources.add(s.id);
                             }
                             
-                            pos.sort((a, b) => b.p - a.p).forEach(x => cited = cited.slice(0, x.p) + x.cit + cited.slice(x.p));
+                            // Sort by position (descending) and insert
+                            pos.sort((a, b) => b.p - a.p).forEach(x => {
+                                cited = cited.slice(0, x.p) + x.cit + cited.slice(x.p);
+                            });
+                            
+                            console.log('[Agent] Inserted', pos.length, 'citations from', usedSources.size, 'sources');
                             result.output = cited; 
-                            result.citedSources = pos.map(x => x.src);
+                            result.citedSources = [...new Map(pos.map(x => [x.src.id, x.src])).values()];
                         } else {
                             result.output = text;
                         }
