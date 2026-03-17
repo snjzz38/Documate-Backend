@@ -48,7 +48,16 @@ export const GeminiAPI = {
     async vision(promptText, apiKey, files = []) {
         if (!apiKey) throw new Error("Missing Gemini API Key");
         // Only use vision-capable models
-        const visionModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro'];
+        const visionModels =
+          'gemma-3-27b-it',
+          'gemini-3-flash-preview',
+          'gemini-2.5-pro',
+          'gemini-2.5-flash-lite',
+          'gemini-2.5-flash',
+          'gemma-3-12b-it',
+          'gemma-3-4b-it',
+          'gemma-3-1b-it'
+        ];
         let lastError = null;
 
         const parts = [
