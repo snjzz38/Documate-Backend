@@ -34,6 +34,7 @@ export default async function handler(req, res) {
 
         if (action === 'plan') {
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
+            if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Extract quotes' });
             if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Write with quotes' });
             if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
             if (options.enableCite) steps.push({ tool: 'CITE', action: 'Format citations' });
@@ -67,40 +68,86 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                case 'WRITE': {
-                    const { researchData = {}, researchSources = [], task: userTask } = context;
+                case 'QUOTES': {
+                    const sources = context.researchSources || [];
+                    if (!sources.length) { result.output = []; result.type = 'quotes'; break; }
                     
-                    // Build source info with quotes for the LLM to use
+                    const prompt = `Extract 6-10 important direct quotes from these academic paper abstracts.
+
+SOURCES:
+${sources.slice(0, 10).map((s, i) => `--- SOURCE ${i + 1}: ${fmtAuthor(s)} (${s.year}) ---\n"${s.title}"\n${s.text?.substring(0, 1200)}`).join('\n\n')}
+
+RULES:
+1. Extract EXACT phrases from the abstracts (do not paraphrase)
+2. Each quote should be a meaningful sentence or key finding
+3. Get quotes from AS MANY different sources as possible (at least 5-6 sources)
+4. Focus on: key findings, conclusions, important claims
+5. Include the author name and year with each quote
+
+FORMAT each quote on its own line as:
+AuthorLastName et al. (Year): "exact quote from the abstract"
+
+Example:
+Smith et al. (2023): "CRISPR technology has revolutionized genome editing capabilities"
+Jones & Lee (2022): "Ethical considerations must guide the development of germline therapies"`;
+
+                    const resp = await GeminiAPI.chat(prompt, GEMINI);
+                    
+                    // Parse quotes
+                    const quotes = [];
+                    for (const line of resp.split('\n')) {
+                        const match = line.match(/^([^:]+\(\d{4}\))\s*:\s*[""]([^""]+)[""]/);
+                        if (match) {
+                            quotes.push({ source: match[1].trim(), quote: match[2].trim() });
+                        }
+                    }
+                    
+                    console.log('[Agent] Extracted', quotes.length, 'quotes');
+                    result.output = quotes;
+                    result.type = 'quotes';
+                    break;
+                }
+
+                case 'WRITE': {
+                    const { researchData = {}, researchSources = [], extractedQuotes = [], task: userTask } = context;
+                    
+                    // Build source info
                     const sourceInfo = researchSources.slice(0, 10).map((s, i) => {
-                        const authorCite = fmtAuthor(s);
-                        return `SOURCE ${i+1}: ${authorCite} (${s.year})
+                        return `SOURCE ${i+1}: ${fmtAuthor(s)} (${s.year})
 Title: "${s.title}"
-Abstract: ${s.text?.substring(0, 800) || 'No abstract'}
----`;
+Abstract: ${s.text?.substring(0, 600) || 'No abstract'}`;
                     }).join('\n\n');
+
+                    // Build quotes section if quotes were extracted
+                    let quotesSection = '';
+                    if (extractedQuotes?.length) {
+                        quotesSection = `\n\nPRE-EXTRACTED QUOTES TO USE (include these in your essay):
+${extractedQuotes.map((q, i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}`;
+                    }
 
                     const prompt = `You are an expert academic writer. Write a well-researched essay with DIRECT QUOTES from sources.
 
 TASK: ${userTask}
 
-SOURCES TO USE (extract quotes from these abstracts):
+SOURCES:
 ${sourceInfo}
+${quotesSection}
 
 CRITICAL REQUIREMENTS:
 
-1. INCLUDE 4-6 DIRECT QUOTES from the source abstracts
-   Use varied transitions like:
+1. INCLUDE 4-6 DIRECT QUOTES using varied transitions:
    - According to [Author] ([Year]), "[quote]"
    - As [Author] ([Year]) argues, "[quote]"
    - [Author] ([Year]) found that "[quote]"
    - Research suggests that "[quote]" ([Author], [Year])
    - "[Quote]," notes [Author] ([Year])
+${extractedQuotes?.length ? '\n   USE THE PRE-EXTRACTED QUOTES ABOVE - they are already formatted correctly.' : ''}
 
 2. DEFINE ACRONYMS on first use:
    "Preimplantation Genetic Diagnosis (PGD)" then use "PGD"
 
-3. DO NOT add in-text citations like (Author, 2020) EXCEPT when introducing quotes
-   The citation system will add other citations later
+3. DO NOT add extra in-text citations like (Author, 2020) EXCEPT when introducing quotes
+   The citation system will add additional citations later
 
 4. STRUCTURE:
    - Clear introduction with thesis
