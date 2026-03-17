@@ -6,7 +6,7 @@ import { SourceFinderAPI } from '../utils/sourceFinder.js';
 // Helpers
 const stripMarkdown = t => t.replace(/\*\*?([^*]+)\*\*?/g,'$1').replace(/__?([^_]+)__?/g,'$1').replace(/^#{1,6}\s*/gm,'').replace(/`([^`]+)`/g,'$1');
 const stripRefs = t => t.replace(/\n\n\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i,'').trim();
-const stripCitations = t => t.replace(/\s*\([^)]*\d{4}[^)]*\)/g,'').replace(/\s*\[[^\]]*\d{4}[^\]]*\]/g,'');
+const stripInlineCitations = t => t.replace(/\s*\([^)]*\d{4}[^)]*\)/g,'');
 
 const extractTopic = text => {
     const m = text.match(/(?:about|essay on|write about)[:\s]+["']?([^"'\n.!?]{10,80})/i);
@@ -34,7 +34,7 @@ export default async function handler(req, res) {
 
         if (action === 'plan') {
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
-            if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Write content' });
+            if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Write with quotes' });
             if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
             if (options.enableCite) steps.push({ tool: 'CITE', action: 'Format citations' });
             if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Grade work' });
@@ -50,7 +50,6 @@ export default async function handler(req, res) {
                     const topic = extractTopic(context.task||'');
                     console.log('[Agent] Research topic:', topic);
                     
-                    // Use searchTopic for better, relevant results
                     const papers = await SourceFinderAPI.searchTopic(topic, 12);
                     if (!papers?.length) { result.output = { text: '', sources: [] }; result.type = 'research'; break; }
                     
@@ -69,27 +68,52 @@ export default async function handler(req, res) {
                 }
 
                 case 'WRITE': {
-                    const { researchData = {}, task: userTask } = context;
-                    const prompt = `You are an academic writer. Write a well-structured essay.
+                    const { researchData = {}, researchSources = [], task: userTask } = context;
+                    
+                    // Build source info with quotes for the LLM to use
+                    const sourceInfo = researchSources.slice(0, 10).map((s, i) => {
+                        const authorCite = fmtAuthor(s);
+                        return `SOURCE ${i+1}: ${authorCite} (${s.year})
+Title: "${s.title}"
+Abstract: ${s.text?.substring(0, 800) || 'No abstract'}
+---`;
+                    }).join('\n\n');
+
+                    const prompt = `You are an expert academic writer. Write a well-researched essay with DIRECT QUOTES from sources.
 
 TASK: ${userTask}
 
-RESEARCH (use this information):
-${researchData.text?.substring(0, 10000) || 'No research provided'}
+SOURCES TO USE (extract quotes from these abstracts):
+${sourceInfo}
 
-STRICT RULES:
-1. Define acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)" then use "PGD"
-2. DO NOT include ANY citations or references like "(Author, 2020)" or "[1]" - these will be added later
-3. DO NOT mention author names with years - just present facts naturally
-4. Write in third person, formal academic tone
-5. Clear structure: Introduction → Body paragraphs → Conclusion
-6. NO bibliography/references section
-7. Plain text only - no markdown, bold, or special formatting
+CRITICAL REQUIREMENTS:
 
-Write the essay now:`;
+1. INCLUDE 4-6 DIRECT QUOTES from the source abstracts
+   Use varied transitions like:
+   - According to [Author] ([Year]), "[quote]"
+   - As [Author] ([Year]) argues, "[quote]"
+   - [Author] ([Year]) found that "[quote]"
+   - Research suggests that "[quote]" ([Author], [Year])
+   - "[Quote]," notes [Author] ([Year])
+
+2. DEFINE ACRONYMS on first use:
+   "Preimplantation Genetic Diagnosis (PGD)" then use "PGD"
+
+3. DO NOT add in-text citations like (Author, 2020) EXCEPT when introducing quotes
+   The citation system will add other citations later
+
+4. STRUCTURE:
+   - Clear introduction with thesis
+   - Body paragraphs with evidence and quotes
+   - Strong conclusion
+
+5. Plain text only - no markdown, bold, asterisks
+6. NO bibliography section at the end
+
+Write the essay with embedded quotes now:`;
 
                     let text = await GeminiAPI.chat(prompt, GEMINI);
-                    result.output = stripMarkdown(stripRefs(stripCitations(text)));
+                    result.output = stripMarkdown(stripRefs(text));
                     result.type = 'text';
                     break;
                 }
@@ -98,14 +122,19 @@ Write the essay now:`;
                     const text = context.previousOutput || '';
                     if (text.length < 50) throw new Error('No text to humanize');
                     
-                    const prompt = `Rewrite to sound natural and human-written. Keep structure and facts.
-DO NOT add any citations, author names, or references.
-Plain text only, no formatting.
+                    const prompt = `Rewrite to sound natural and human-written. 
+
+IMPORTANT:
+- Keep ALL direct quotes exactly as they are (text inside quotation marks)
+- Keep the quote attributions like "According to Smith (2020)"
+- Make the surrounding text more natural and conversational
+- Keep structure and facts
+- Plain text only, no formatting
 
 TEXT:
 ${text}`;
 
-                    result.output = stripMarkdown(stripRefs(stripCitations(await GeminiAPI.chat(prompt, GEMINI))));
+                    result.output = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
                     result.type = 'text';
                     break;
                 }
@@ -124,10 +153,12 @@ ${text}`;
                         break;
                     }
                     
-                    // For in-text/footnotes - insert citations into text
+                    // For in-text/footnotes - add additional citations
                     try {
-                        const srcList = sources.slice(0,10).map(s => `[${s.id}] ${fmtAuthor(s)} (${s.year}): "${s.title.substring(0,60)}"`).join('\n');
-                        const prompt = `Add in-text citations throughout this academic text.
+                        const srcList = sources.slice(0,10).map(s => `[${s.id}] ${fmtAuthor(s)} (${s.year}): "${s.title.substring(0,50)}"`).join('\n');
+                        const prompt = `Add MORE in-text citations to support claims in this text.
+
+Note: Some citations already exist (with quotes). Add citations to OTHER claims that need support.
 
 AVAILABLE SOURCES:
 ${srcList}
@@ -136,14 +167,13 @@ TEXT:
 "${text.substring(0, 5000)}"
 
 RULES:
-1. Add 10-15 citations total
-2. Each paragraph should have 2-3 citations
-3. You MAY cite the same source multiple times in DIFFERENT paragraphs if relevant
-4. Place citations after claims, facts, or arguments
-5. Use diverse sources - don't only use 1-2 sources
+1. Add 6-10 MORE citations to unsupported claims
+2. Don't add citations right next to existing ones
+3. Place citations after facts, statistics, or arguments
+4. You MAY cite same source multiple times in different spots
 
 Return ONLY JSON:
-{"insertions":[{"anchor":"exact 5-8 word phrase from text","source_id":1}]}`;
+{"insertions":[{"anchor":"exact 5-8 word phrase","source_id":1}]}`;
                         
                         const resp = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
                         const json = resp.match(/\{[\s\S]*\}/);
@@ -200,7 +230,24 @@ Return ONLY JSON:
                     const text = context.previousOutput || '';
                     if (text.length < 50) { result.output = { grade: 'N/A', feedback: 'No content' }; result.type = 'grade'; break; }
                     
-                    const resp = await GeminiAPI.chat(`Grade this work.\n\nASSIGNMENT: ${context.task}\n\nWORK:\n${text.substring(0,5000)}\n\nProvide:\nGRADE: A/B/C/D/F\nSTRENGTHS:\nIMPROVEMENTS:`, GEMINI);
+                    const resp = await GeminiAPI.chat(`Grade this academic work.
+
+ASSIGNMENT: ${context.task}
+
+STUDENT WORK:
+${text.substring(0,5000)}
+
+Evaluate based on:
+1. Use of direct quotes from sources
+2. Proper citation format
+3. Argument structure and clarity
+4. Academic writing quality
+
+Provide:
+GRADE: (A+/A/A-/B+/B/B-/C+/C/D/F)
+STRENGTHS: (bullet points)
+IMPROVEMENTS: (bullet points)`, GEMINI);
+                    
                     result.output = { grade: resp.match(/GRADE:\s*([A-F][+-]?)/i)?.[1] || 'B', feedback: resp };
                     result.type = 'grade';
                     break;
