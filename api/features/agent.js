@@ -121,8 +121,8 @@ Abstract: ${s.text?.substring(0, 600) || 'No abstract'}`;
                     // Build quotes section if available
                     let quotesSection = '';
                     if (extractedQuotes?.length) {
-                        quotesSection = `\n\nPRE-EXTRACTED QUOTES TO USE (include these in your essay):
-${extractedQuotes.map((q, i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}`;
+                        quotesSection = `\n\nPRE-EXTRACTED QUOTES TO USE:
+${extractedQuotes.map((q, i) => `${i+1}. "${q.quote}"`).join('\n')}`;
                     }
 
                     // Handle uploaded file context
@@ -132,7 +132,7 @@ ${extractedQuotes.map((q, i) => `${i+1}. ${q.source}: "${q.quote}"`).join('\n')}
 The user has uploaded a file for context. Consider it when writing.`;
                     }
 
-                    const prompt = `You are an expert academic writer. Write a well-researched essay with DIRECT QUOTES from sources.
+                    const prompt = `You are an expert academic writer. Write a well-researched essay using information from the sources.
 
 TASK: ${userTask}
 ${fileContext}
@@ -143,32 +143,33 @@ ${quotesSection}
 
 CRITICAL REQUIREMENTS:
 
-1. INCLUDE 4-6 DIRECT QUOTES using varied transitions:
-   - According to [Author] ([Year]), "[quote]"
-   - As [Author] ([Year]) argues, "[quote]"
-   - [Author] ([Year]) found that "[quote]"
-   - Research suggests that "[quote]" ([Author], [Year])
-   - "[Quote]," notes [Author] ([Year])
-${extractedQuotes?.length ? '\n   USE THE PRE-EXTRACTED QUOTES ABOVE - they are already formatted correctly.' : ''}
+1. DO NOT INCLUDE ANY CITATIONS OR REFERENCES IN YOUR WRITING
+   - No parenthetical citations like (Author, 2020)
+   - No "According to Author" or "As Author argues"
+   - No author names or years in the text
+   - Just write the content naturally without attribution
+   - A separate citation step will add proper citations later
 
-2. DEFINE ACRONYMS on first use:
+2. USE the research content and quotes naturally in your writing
+   - Integrate the ideas and findings
+   - Include direct quotes when relevant (just the quote, no attribution)
+   - But do NOT mention who said what
+
+3. DEFINE ACRONYMS on first use:
    "Preimplantation Genetic Diagnosis (PGD)" then use "PGD"
-
-3. DO NOT add extra in-text citations like (Author, 2020) EXCEPT when introducing quotes
-   The citation system will add additional citations later
 
 4. STRUCTURE:
    - Clear introduction with thesis
-   - Body paragraphs with evidence and quotes
+   - Body paragraphs with evidence
    - Strong conclusion
 
-5. Plain text only - no markdown, bold, asterisks
-6. NO bibliography section at the end
+5. Plain text only - no markdown, bold, asterisks, headers
+6. NO bibliography or references section
 
-Write the essay with embedded quotes now:`;
+Write the essay now (remember: NO citations, NO author attributions):`;
 
                     let text = await GeminiAPI.chat(prompt, GEMINI);
-                    result.output = stripMarkdown(stripRefs(text));
+                    result.output = stripMarkdown(stripRefs(stripInlineCitations(text)));
                     result.type = 'text';
                     break;
                 }
