@@ -227,15 +227,27 @@ Write the essay now:`;
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'apa7';
                     const type = options.citationType || 'in-text';
-
-                    if (!input || !sources.length) {
+                
+                    // Even with no essay, still build bibliography if we have sources
+                    if (!sources.length) {
                         result.output = input;
                         result.outputHtml = buildEssayHTML(input);
-                        result.citedSources = sources;
+                        result.citedSources = [];
                         result.bibliographyHtml = '';
                         result.type = 'cited';
                         break;
                     }
+                
+                    // If no essay text, just return bibliography only
+                    if (!input) {
+                        const bib = buildBibliographyHTML(sources, style, type);
+                        result.output = '';
+                        result.outputHtml = '';
+                        result.citedSources = sources;
+                        result.bibliographyHtml = bib.html;
+                        result.bibliographyPlain = bib.plain;
+                        result.type = 'cited';
+                       
 
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
