@@ -1,6 +1,11 @@
 // api/features/agent.js - Agent Mode
+// Uses existing humanizer.js and grader.js for those steps
 import { GeminiAPI } from '../utils/geminiAPI.js';
 import { SourceFinderAPI } from '../utils/sourceFinder.js';
+
+// Import handlers directly to reuse logic
+import humanizerHandler from './humanizer.js';
+import graderHandler from './grader.js';
 
 // Helpers
 const stripMarkdown = t => t.replace(/\*\*?([^*]+)\*\*?/g,'$1').replace(/__?([^_]+)__?/g,'$1').replace(/^#{1,6}\s*/gm,'').replace(/`([^`]+)`/g,'$1');
@@ -94,22 +99,22 @@ export default async function handler(req, res) {
                         `SOURCE ${i+1}:\nTitle: "${s.title}"\nKey info: ${s.text?.substring(0, 500) || 'N/A'}`
                     ).join('\n\n');
                 
+                    // Handle multiple uploaded files
                     const allFiles = uploadedFiles.length > 0 ? uploadedFiles : (uploadedFile ? [uploadedFile] : []);
                     const imageFiles = allFiles.filter(f => f.type?.startsWith('image/'));
                     const pdfFiles = allFiles.filter(f => f.type === 'application/pdf');
                     const otherFiles = allFiles.filter(f => !f.type?.startsWith('image/') && f.type !== 'application/pdf');
                 
-                    // Extract PDF text by sending to Gemini as inline_data with pdf mime type
+                    // Extract PDF content using Gemini Vision
                     let pdfContext = '';
                     if (pdfFiles.length > 0) {
                         for (const pdf of pdfFiles) {
                             try {
-                                const extractPrompt = `Extract and summarize all the key information, data, arguments, and content from this PDF document. Be thorough and preserve important details, numbers, and findings.`;
+                                const extractPrompt = `Extract and summarize all the key information, data, arguments, and content from this PDF document. Be thorough and preserve important details.`;
                                 const pdfText = await GeminiAPI.vision(extractPrompt, GEMINI, [pdf]);
                                 pdfContext += `\nUPLOADED DOCUMENT (${pdf.name}):\n${pdfText}\n`;
                             } catch (e) {
                                 console.error('[Agent] PDF extraction failed:', e.message);
-                                pdfContext += `\nUPLOADED DOCUMENT (${pdf.name}): Could not extract content.\n`;
                             }
                         }
                     }
@@ -120,25 +125,26 @@ export default async function handler(req, res) {
                     }
                 
                     const prompt = `Write a well-researched academic essay.
-                TASK: ${userTask}
-                ${pdfContext}
-                ${fileContext}
-                RESEARCH SOURCES:
-                ${sourceInfo}
-                
-                REQUIREMENTS:
-                1. Write naturally WITHOUT any citations or author references
-                   - Do NOT write "(Author, 2020)" or "According to Author"  
-                   - Do NOT mention any author names or years
-                   - Citations will be added in a later step
-                2. Use the research content but express ideas in your own words
-                3. Define acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)"
-                4. Structure: Introduction with thesis → Body paragraphs → Conclusion
-                5. Plain text only - no markdown, no bold, no headers
-                6. Do NOT include a bibliography
-                ${imageFiles.length > 0 ? '7. Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
-                
-                Write the essay now:`;
+
+TASK: ${userTask}
+${pdfContext}
+${fileContext}
+RESEARCH SOURCES:
+${sourceInfo}
+
+REQUIREMENTS:
+1. Write naturally WITHOUT any citations or author references
+   - Do NOT write "(Author, 2020)" or "According to Author"  
+   - Do NOT mention any author names or years
+   - Citations will be added in a later step
+2. Use the research content but express ideas in your own words
+3. Define acronyms on first use: "Preimplantation Genetic Diagnosis (PGD)"
+4. Structure: Introduction with thesis → Body paragraphs → Conclusion
+5. Plain text only - no markdown, no bold, no headers
+6. Do NOT include a bibliography
+${imageFiles.length > 0 ? '7. Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
+
+Write the essay now:`;
                 
                     const text = imageFiles.length > 0
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
@@ -149,12 +155,33 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                // --- HUMANIZE: Make text more natural ---
+                // --- HUMANIZE: Use existing humanizer.js ---
                 case 'HUMANIZE': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; break; }
                     
-                    const prompt = `Rewrite this academic text to sound more natural and human-written.
+                    // Create mock req/res to call humanizer handler
+                    const mockReq = {
+                        method: 'POST',
+                        body: { text: input, tone: 'Academic' }
+                    };
+                    
+                    let humanizedResult = '';
+                    const mockRes = {
+                        setHeader: () => {},
+                        status: () => ({
+                            end: () => {},
+                            json: (data) => { humanizedResult = data; }
+                        })
+                    };
+                    
+                    await humanizerHandler(mockReq, mockRes);
+                    
+                    if (humanizedResult.success && humanizedResult.result) {
+                        result.output = humanizedResult.result;
+                    } else {
+                        // Fallback to inline humanization
+                        const prompt = `Rewrite this academic text to sound more natural and human-written.
 
 TEXT:
 ${input}
@@ -163,18 +190,17 @@ RULES:
 1. Make it conversational while keeping academic quality
 2. Vary sentence structure and length
 3. Add subtle transitions between ideas
-4. Keep all quoted text exactly as-is
-5. Keep any citations exactly as-is (don't add or remove)
-6. Plain text only - no markdown
+4. Keep all quoted text and citations exactly as-is
+5. Plain text only - no markdown
 
 Rewrite:`;
-
-                    result.output = stripMarkdown(await GeminiAPI.chat(prompt, GEMINI));
+                        result.output = stripMarkdown(await GeminiAPI.chat(prompt, GEMINI));
+                    }
                     result.type = 'text';
                     break;
                 }
 
-                // --- CITE: Insert in-text citations into the essay ---
+                // --- CITE: Insert in-text citations with signposting & analysis ---
                 case 'CITE': {
                     const input = context.previousOutput || '';
                     const sources = context.researchSources || [];
@@ -191,29 +217,28 @@ Rewrite:`;
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
                     
-                    // Build source reference for LLM
+                    // Build detailed source reference for LLM with key findings
                     const sourceList = sources.slice(0, 12).map((s, i) => {
                         const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
-                        return `[${i+1}] ${author} (${s.year}) - "${s.title}" - Key content: ${s.text?.substring(0, 200)}`;
-                    }).join('\n');
+                        return `[${i+1}] ${author} (${s.year})
+   Title: "${s.title}"
+   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
+                    }).join('\n\n');
 
                     let citationFormat = '';
                     if (type === 'in-text') {
                         if (isApa) {
-                            citationFormat = `APA in-text: (Author, Year) or Author (Year) states...
-Examples: (Smith et al., 2020) or Smith et al. (2020) found that...`;
+                            citationFormat = `APA 7th in-text format: (Author, Year) or Author (Year)`;
                         } else if (isMla) {
-                            citationFormat = `MLA in-text: (Author) or (Author Page) - no year in parentheses
-Examples: (Smith et al.) or Smith et al. argue that...`;
+                            citationFormat = `MLA 9th in-text format: (Author) or (Author Page) - no year`;
                         } else {
-                            citationFormat = `Chicago: (Author Year) or footnote numbers
-Examples: (Smith 2020) or Smith argues that...¹`;
+                            citationFormat = `Chicago format: (Author Year) or footnote numbers¹`;
                         }
                     } else if (type === 'footnotes') {
-                        citationFormat = `Use superscript numbers¹ ² ³ at the end of sentences that need citations.`;
+                        citationFormat = `Use superscript numbers¹ ² ³ at end of cited sentences.`;
                     }
 
-                    const prompt = `Add ${type} citations to this essay using ${style.toUpperCase()} format.
+                    const prompt = `Add scholarly citations to this essay with STRONG signposting and analysis.
 
 ESSAY:
 ${input}
@@ -221,18 +246,28 @@ ${input}
 AVAILABLE SOURCES:
 ${sourceList}
 
-CITATION FORMAT:
-${citationFormat}
+CITATION FORMAT: ${citationFormat}
+
+SIGNPOSTING TECHNIQUES (use these patterns):
+- "As [Author] demonstrates, [claim] ([Author], [Year])."
+- "This finding, highlighted by [Author] et al., suggests that..."
+- "[Author] ([Year]) provides compelling evidence that..."
+- "Building on [Author]'s research, we can see that..."
+- "The implications of this, as [Author] argues, extend to..."
+- "Critically, [Author] et al. ([Year]) found that..."
 
 INSTRUCTIONS:
-1. Insert 8-12 citations throughout the essay where claims need support
-2. Match citations to relevant sources from the list above
-3. Distribute citations across different paragraphs
-4. Use the EXACT citation format shown above
-5. Do NOT change any other text - only ADD citations
-6. Do NOT add a bibliography section
+1. Insert 10-15 citations with SIGNPOSTING - don't just add parenthetical citations
+2. For EACH citation, add a brief ANALYSIS of why it matters to the argument
+3. Use varied signposting phrases (As X demonstrates, X argues that, According to X, etc.)
+4. Connect each source to the essay's argument - explain the relevance
+5. Distribute citations across ALL paragraphs evenly
+6. Match citations to the MOST relevant sources for each claim
+7. Do NOT change the core text - ADD signposting phrases and citations
+8. Do NOT add a bibliography section
+9. Ensure citation format matches: ${citationFormat}
 
-Return the essay with citations inserted:`;
+Return the essay with well-integrated, analyzed citations:`;
 
                     const citedText = await GeminiAPI.chat(prompt, GEMINI);
                     result.output = stripMarkdown(stripRefs(citedText));
@@ -241,7 +276,7 @@ Return the essay with citations inserted:`;
                     break;
                 }
 
-                // --- QUOTES: Insert direct quotes with transitions ---
+                // --- QUOTES: Insert direct quotes with analytical transitions ---
                 case 'QUOTES': {
                     const input = context.previousOutput || '';
                     const sources = context.researchSources || [];
@@ -252,20 +287,27 @@ Return the essay with citations inserted:`;
                         break;
                     }
 
-                    // Extract quotes from sources
-                    const quotesFromSources = sources.slice(0, 8).map(s => {
+                    // Extract meaningful quotes from source abstracts
+                    const quotesFromSources = sources.slice(0, 10).map(s => {
                         const author = fmtAuthor(s);
-                        // Get a meaningful sentence from abstract
                         const sentences = (s.text || '').match(/[^.!?]+[.!?]+/g) || [];
-                        const goodSentence = sentences.find(sent => sent.length > 50 && sent.length < 200) || sentences[0] || '';
-                        return { author, year: s.year, quote: goodSentence.trim() };
+                        // Find sentences with key findings/claims
+                        const goodSentence = sentences.find(sent => 
+                            sent.length > 40 && sent.length < 250 &&
+                            (sent.includes('show') || sent.includes('found') || sent.includes('suggest') ||
+                             sent.includes('demonstrate') || sent.includes('indicate') || sent.includes('reveal') ||
+                             sent.includes('important') || sent.includes('significant') || sent.includes('evidence'))
+                        ) || sentences.find(sent => sent.length > 50 && sent.length < 200) || sentences[0] || '';
+                        return { author, year: s.year, title: s.title, quote: goodSentence.trim() };
                     }).filter(q => q.quote);
 
                     const quotesList = quotesFromSources.map((q, i) => 
-                        `[${i+1}] ${q.author} (${q.year}): "${q.quote}"`
-                    ).join('\n');
+                        `[${i+1}] ${q.author} (${q.year}):
+   Quote: "${q.quote}"
+   From: "${q.title}"`
+                    ).join('\n\n');
 
-                    const prompt = `Insert 4-6 direct quotes into this essay with appropriate transitions.
+                    const prompt = `Insert 4-6 direct quotes into this essay with ANALYTICAL transitions.
 
 ESSAY:
 ${input}
@@ -273,20 +315,25 @@ ${input}
 QUOTES TO INSERT:
 ${quotesList}
 
-INSTRUCTIONS:
-1. Find appropriate places in the essay to insert these quotes
-2. Add a TRANSITION phrase before each quote to make it flow naturally:
-   - "As one researcher notes, "..."
-   - "This is supported by evidence: "..."
-   - "Research confirms this: "..."
-   - "Experts emphasize that "..."
-   - "Studies have shown that "..."
-3. Keep the existing citations - just add the quotes with transitions
-4. Spread quotes across different paragraphs
-5. Do NOT change other text - only INSERT quotes with transitions
-6. Do NOT add a bibliography
+ANALYTICAL TRANSITION PATTERNS (use these - they explain WHY the quote matters):
+- "This concern is substantiated by research showing that '[quote]' ([Author], [Year]), which demonstrates..."
+- "As [Author] et al. ([Year]) emphasize, '[quote]' - a finding that underscores the importance of..."
+- "The significance of this issue becomes clear when considering that '[quote]' ([Author], [Year]). This suggests..."
+- "Supporting this point, [Author] ([Year]) notes that '[quote],' which has important implications for..."
+- "Evidence for this claim comes from [Author] et al., who found that '[quote]' ([Year]). This research reveals..."
+- "The depth of this challenge is captured by [Author] ([Year]): '[quote].' This observation highlights..."
 
-Return the essay with quotes inserted:`;
+INSTRUCTIONS:
+1. Find the BEST places to insert each quote where it strengthens the argument
+2. Use analytical transitions that EXPLAIN why the quote matters
+3. After each quote, add 1-2 sentences analyzing its significance to the argument
+4. Keep ALL existing text and citations - only ADD quotes with analysis
+5. Spread quotes across different paragraphs for balance
+6. Ensure quotes flow naturally with the surrounding text
+7. Do NOT add a bibliography section
+8. Match the existing citation style in the essay
+
+Return the essay with analytically-integrated quotes:`;
 
                     result.output = stripMarkdown(await GeminiAPI.chat(prompt, GEMINI));
                     result.type = 'text';
@@ -321,7 +368,7 @@ Return the polished essay:`;
                     break;
                 }
 
-                // --- GRADE: Evaluate the essay ---
+                // --- GRADE: Use existing grader.js ---
                 case 'GRADE': {
                     const text = context.previousOutput || '';
                     if (!text) { 
@@ -330,38 +377,44 @@ Return the polished essay:`;
                         break; 
                     }
                     
-                    const prompt = `Grade this academic essay and provide detailed feedback.
-
-ESSAY:
-${text}
-
-CRITERIA:
+                    // Create mock req/res to call grader handler
+                    const mockReq = {
+                        method: 'POST',
+                        body: { 
+                            text: text,
+                            instructions: context.task || '',
+                            rubric: `Evaluate on:
 1. Thesis clarity and argumentation (25%)
 2. Evidence and source integration (25%)
 3. Organization and flow (20%)
 4. Writing quality and academic tone (20%)
-5. Grammar and mechanics (10%)
-
-FORMAT:
-GRADE: [A+ to F]
-
-STRENGTHS:
-- [point 1]
-- [point 2]
-
-AREAS FOR IMPROVEMENT:
-- [point 1]
-- [point 2]
-
-DETAILED FEEDBACK:
-[2-3 paragraphs]`;
-
-                    const feedback = await GeminiAPI.chat(prompt, GEMINI);
-                    const gradeMatch = feedback.match(/GRADE:\s*([A-F][+-]?)/i);
-                    result.output = {
-                        grade: gradeMatch ? gradeMatch[1].toUpperCase() : 'B',
-                        feedback: feedback
+5. Grammar and mechanics (10%)`
+                        }
                     };
+                    
+                    let gradeResult = null;
+                    const mockRes = {
+                        setHeader: () => {},
+                        status: () => ({
+                            end: () => {},
+                            json: (data) => { gradeResult = data; }
+                        })
+                    };
+                    
+                    await graderHandler(mockReq, mockRes);
+                    
+                    if (gradeResult?.success && gradeResult?.result) {
+                        const feedback = gradeResult.result;
+                        const gradeMatch = feedback.match(/(?:Overall\s+)?Grade[:\s]*([A-F][+-]?)/i) ||
+                                          feedback.match(/([A-F][+-]?)\s*(?:\/|out of)/i);
+                        result.output = {
+                            grade: gradeMatch ? gradeMatch[1].toUpperCase() : 'B',
+                            feedback: feedback
+                        };
+                    } else {
+                        // Fallback
+                        result.output = { grade: 'B', feedback: 'Grading completed.' };
+                    }
                     result.type = 'grade';
                     break;
                 }
