@@ -74,10 +74,9 @@ const buildBibliographyHTML = (sources, style, type) => {
             html += `<p style="${entryStyle}">${renderCitation(s.citation, doiUrl)}</p>`;
             plain += `${s.citation}\n\n`;
         } else {
-            // Fallback manual format
             const a = fmtAuthor(s, isMla ? 'mla' : 'apa');
-            const t = s.title || 'Untitled';
-            const v = s.venue || 'Journal';
+            const t = (s.title || 'Untitled').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const v = (s.venue || 'Journal').replace(/&/g,'&amp;');
             const y = s.year || 'n.d.';
             const link = doiUrl
                 ? `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>`
@@ -87,7 +86,8 @@ const buildBibliographyHTML = (sources, style, type) => {
                 : `${a}. &ldquo;${t}.&rdquo; <i>${v}</i>, ${y}, ${link}.`;
             const fmtP = isApa
                 ? `${a} (${y}). ${t}. ${v}. ${doiUrl}`
-                : `${a}. "${t}." ${v}, ${y}, ${doiUrl}.`;
+                : `${a}. "${s.title || 'Untitled'}." ${s.venue || 'Journal'}, ${y}, ${doiUrl}.`;
+            // Use fmtH directly — already has HTML, don't pass through renderCitation
             html += `<p style="${entryStyle}">${fmtH}</p>`;
             plain += `${fmtP}\n\n`;
         }
