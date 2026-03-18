@@ -41,61 +41,38 @@ const buildBibliographyHTML = (sources, style, type) => {
             return ka.localeCompare(kb);
         });
 
-    // Make only the trailing DOI URL a clickable link
-    const linkifyDoi = (text, doi) => {
-        if (!text || !doi) return text || '';
+    // Replace trailing DOI URL with a clickable link
+    // Citations now contain HTML so we match the URL as plain text at the end
+    const linkifyDoi = (html, doi) => {
+        if (!html || !doi) return html || '';
         const doiUrl = `https://doi.org/${doi}`;
-        // Escape for use in regex
         const escaped = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        return text.replace(
-            new RegExp(`(${escaped})([.\\s]*)$`),
-            `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>$2`
+        return html.replace(
+            new RegExp(`${escaped}(\\.?)\\s*$`),
+            `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>$1`
         );
     };
 
-    const wrapStyle = [
-        `font-family: 'Times New Roman', Times, serif`,
-        `font-size: 12pt`,
-        `line-height: 2`,
-        `color: #000`,
-        `background: #fff`,
-        `padding: 20px`
-    ].join('; ');
-
-    const titleStyle = [
-        `text-align: center`,
-        `margin-bottom: 24px`,
-        `font-weight: normal`,
-        `font-family: 'Times New Roman', Times, serif`,
-        `font-size: 12pt`
-    ].join('; ');
-
-    const entryStyle = [
-        `text-indent: -36px`,
-        `padding-left: 36px`,
-        `margin: 0 0 24px 0`,
-        `line-height: 2`,
-        `font-family: 'Times New Roman', Times, serif`,
-        `font-size: 12pt`,
-        `color: #000`
-    ].join('; ');
+    const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000; background: #fff; padding: 20px;`;
+    const titleStyle = `text-align: center; margin-bottom: 24px; font-weight: normal; font-family: 'Times New Roman', Times, serif; font-size: 12pt;`;
+    const entryStyle = `text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2; font-family: 'Times New Roman', Times, serif; font-size: 12pt; color: #000;`;
 
     let html = `<div class="bibliography" style="${wrapStyle}">`;
     html += `<p style="${titleStyle}">${title}</p>`;
     let plain = `${title}\n\n`;
 
     sorted.forEach((s, i) => {
-        const citationText = s.citation || '';
-        const plain_entry = citationText || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title}.`;
+        const citationHtml = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
+        const linked = linkifyDoi(citationHtml, s.doi);
+        // Plain text version strips HTML tags
+        const citationPlain = citationHtml.replace(/<[^>]+>/g, '').replace(/&ldquo;/g, '"').replace(/&rdquo;/g, '"');
 
         if (type === 'footnotes') {
-            const linked = linkifyDoi(plain_entry, s.doi);
             html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${linked}</p>`;
-            plain += `${i+1}. ${plain_entry}\n\n`;
+            plain += `${i+1}. ${citationPlain}\n\n`;
         } else {
-            const linked = linkifyDoi(plain_entry, s.doi);
             html += `<p style="${entryStyle}">${linked}</p>`;
-            plain += `${plain_entry}\n\n`;
+            plain += `${citationPlain}\n\n`;
         }
     });
 
