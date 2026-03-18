@@ -51,29 +51,35 @@ const buildBibliographyHTML = (sources, style, type) => {
         if (!plainCitation) return '';
         const doiUrl = source.doi ? `https://doi.org/${source.doi}` : '';
         const journal = source.venue || '';
-
-        // Start with plain text — escape HTML special chars
-        let html = plainCitation
+    
+        let text = plainCitation;
+    
+        // 1. Italicise journal FIRST (while still plain text, before any HTML escaping)
+        if (journal) {
+            const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            text = text.replace(new RegExp(`(${ej})`), `\x00ITALIC_START\x00$1\x00ITALIC_END\x00`);
+        }
+    
+        // 2. Replace DOI URL with placeholder BEFORE escaping
+        if (doiUrl) {
+            const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            text = text.replace(new RegExp(`(${eu})(\\.?)\\s*$`), `\x00LINK_START\x00$1\x00LINK_END\x00$2`);
+        }
+    
+        // 3. NOW escape HTML special characters
+        text = text
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
-
-        // Italicise journal name (exact plain-text match)
-        if (journal) {
-            const ej = journal.replace(/&/g,'&amp;').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            html = html.replace(new RegExp(`(${ej})`), '<i>$1</i>');
-        }
-
-        // Replace DOI URL at end of string with clickable link only
-        if (doiUrl) {
-            const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            html = html.replace(
-                new RegExp(`(${eu})(\\.?)\\s*$`),
-                `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">$1</a>$2`
-            );
-        }
-
-        return html;
+    
+        // 4. Restore placeholders as actual HTML tags
+        text = text
+            .replace(/\x00ITALIC_START\x00/g, '<i>')
+            .replace(/\x00ITALIC_END\x00/g, '</i>')
+            .replace(/\x00LINK_START\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">`)
+            .replace(/\x00LINK_END\x00/g, '</a>');
+    
+        return text;
     };
 
     const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000; background: #fff; padding: 20px;`;
