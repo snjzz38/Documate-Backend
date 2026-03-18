@@ -77,8 +77,8 @@ const buildBibliographyHTML = (sources, style, type) => {
         text = text
             .replace(/\x00I\x00/g, '<i>')
             .replace(/\x00\/I\x00/g, '</i>')
-            .replace(/\x00A\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">`)
-            .replace(/\x00\/A\x00/g, '</a>');
+            .replace(/\x00A\x00/g, `<span onclick="window.open('${doiUrl}','_blank')" style="color:#1a73e8; text-decoration:underline; cursor:pointer;">`)
+            .replace(/\x00\/A\x00/g, '</span>');
     
         return text;
     };
