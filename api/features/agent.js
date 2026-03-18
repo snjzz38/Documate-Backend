@@ -96,14 +96,32 @@ export default async function handler(req, res) {
                 
                     const allFiles = uploadedFiles.length > 0 ? uploadedFiles : (uploadedFile ? [uploadedFile] : []);
                     const imageFiles = allFiles.filter(f => f.type?.startsWith('image/'));
-                    const otherFiles = allFiles.filter(f => !f.type?.startsWith('image/'));
+                    const pdfFiles = allFiles.filter(f => f.type === 'application/pdf');
+                    const otherFiles = allFiles.filter(f => !f.type?.startsWith('image/') && f.type !== 'application/pdf');
                 
-                    let fileContext = otherFiles.length > 0
-                        ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n`
-                        : '';
+                    // Extract PDF text by sending to Gemini as inline_data with pdf mime type
+                    let pdfContext = '';
+                    if (pdfFiles.length > 0) {
+                        for (const pdf of pdfFiles) {
+                            try {
+                                const extractPrompt = `Extract and summarize all the key information, data, arguments, and content from this PDF document. Be thorough and preserve important details, numbers, and findings.`;
+                                const pdfText = await GeminiAPI.vision(extractPrompt, GEMINI, [pdf]);
+                                pdfContext += `\nUPLOADED DOCUMENT (${pdf.name}):\n${pdfText}\n`;
+                            } catch (e) {
+                                console.error('[Agent] PDF extraction failed:', e.message);
+                                pdfContext += `\nUPLOADED DOCUMENT (${pdf.name}): Could not extract content.\n`;
+                            }
+                        }
+                    }
+                
+                    let fileContext = '';
+                    if (otherFiles.length > 0) {
+                        fileContext = `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n`;
+                    }
                 
                     const prompt = `Write a well-researched academic essay.
                 TASK: ${userTask}
+                ${pdfContext}
                 ${fileContext}
                 RESEARCH SOURCES:
                 ${sourceInfo}
