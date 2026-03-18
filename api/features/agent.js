@@ -58,18 +58,21 @@ export default async function handler(req, res) {
 
             switch (step.tool.toUpperCase()) {
                 
-                // --- RESEARCH: Find academic sources ---
+                // --- RESEARCH: Find academic sources with official citations ---
                 case 'RESEARCH': {
                     const topic = extractTopic(context.task || '');
-                    console.log('[Agent] Research topic:', topic);
+                    const style = options.citationStyle || 'apa7';
+                    console.log('[Agent] Research topic:', topic, 'Style:', style);
                     
-                    const papers = await SourceFinderAPI.searchTopic(topic, 12);
+                    // searchTopic now fetches official citations from CrossRef
+                    const papers = await SourceFinderAPI.searchTopic(topic, 12, style);
                     if (!papers?.length) { 
                         result.output = { text: '', sources: [] }; 
                         result.type = 'research'; 
                         break; 
                     }
                     
+                    // Build source objects (papers already have citation field from CrossRef)
                     const sources = papers.map((p, i) => ({
                         id: i + 1, 
                         title: p.title, 
@@ -80,8 +83,13 @@ export default async function handler(req, res) {
                         authors: p.authors || [],
                         year: p.year, 
                         displayName: p.author || p.displayName, 
-                        text: p.abstract
+                        text: p.abstract,
+                        citation: p.citation,  // Official citation from CrossRef
+                        citationSource: p.citationSource  // 'crossref' or 'generated'
                     }));
+                    
+                    const crossrefCount = sources.filter(s => s.citationSource === 'crossref').length;
+                    console.log('[Agent] Sources with CrossRef citations:', crossrefCount, '/', sources.length);
                     
                     result.output = { 
                         text: sources.map(s => `[${s.displayName}, ${s.year}] ${s.title}\n${s.text}`).join('\n\n'), 
@@ -213,72 +221,65 @@ Rewrite:`;
                         result.type = 'cited';
                         break;
                     }
-                
+
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
-                
-                    // Fetch real formatted citations from DOI API
-                    const citationMap = await SourceFinderAPI.getCitations(sources, style);
-                    console.log('[Agent] Fetched', citationMap.size, 'real citations from DOI API');
-                
-                    // Build source list with real citations for the LLM
+                    
+                    // Build detailed source reference for LLM with key findings
                     const sourceList = sources.slice(0, 12).map((s, i) => {
                         const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
-                        const realCitation = s.doi ? citationMap.get(s.doi) : null;
                         return `[${i+1}] ${author} (${s.year})
-                   Title: "${s.title}"
-                   Key findings: ${s.text?.substring(0, 300) || 'N/A'}
-                   ${realCitation ? `Full citation: ${realCitation}` : ''}`;
+   Title: "${s.title}"
+   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
                     }).join('\n\n');
-                
-                    // Also attach real citations to sources for bibliography rendering
-                    const sourcesWithCitations = sources.map(s => ({
-                        ...s,
-                        formattedCitation: s.doi ? citationMap.get(s.doi) || null : null
-                    }));
-                
+
                     let citationFormat = '';
                     if (type === 'in-text') {
-                        if (isApa) citationFormat = `APA 7th in-text format: (Author, Year) or Author (Year)`;
-                        else if (isMla) citationFormat = `MLA 9th in-text format: (Author) or (Author Page) - no year`;
-                        else citationFormat = `Chicago format: (Author Year) or footnote numbers¹`;
+                        if (isApa) {
+                            citationFormat = `APA 7th in-text format: (Author, Year) or Author (Year)`;
+                        } else if (isMla) {
+                            citationFormat = `MLA 9th in-text format: (Author) or (Author Page) - no year`;
+                        } else {
+                            citationFormat = `Chicago format: (Author Year) or footnote numbers¹`;
+                        }
                     } else if (type === 'footnotes') {
                         citationFormat = `Use superscript numbers¹ ² ³ at end of cited sentences.`;
                     }
-                
+
                     const prompt = `Add scholarly citations to this essay with STRONG signposting and analysis.
-                
-                ESSAY:
-                ${input}
-                
-                AVAILABLE SOURCES:
-                ${sourceList}
-                
-                CITATION FORMAT: ${citationFormat}
-                
-                SIGNPOSTING TECHNIQUES (use these patterns):
-                - "As [Author] demonstrates, [claim] ([Author], [Year])."
-                - "This finding, highlighted by [Author] et al., suggests that..."
-                - "[Author] ([Year]) provides compelling evidence that..."
-                - "Building on [Author]'s research, we can see that..."
-                - "The implications of this, as [Author] argues, extend to..."
-                - "Critically, [Author] et al. ([Year]) found that..."
-                
-                INSTRUCTIONS:
-                1. Insert 10-15 citations with SIGNPOSTING
-                2. Use varied signposting phrases
-                3. Connect each source to the essay's argument
-                4. Distribute citations across ALL paragraphs evenly
-                5. Match citations to the MOST relevant sources for each claim
-                6. Do NOT add or remove core text
-                7. Do NOT add a bibliography section
-                8. Ensure citation format matches: ${citationFormat}
-                
-                Return the essay with well-integrated citations:`;
-                
+
+ESSAY:
+${input}
+
+AVAILABLE SOURCES:
+${sourceList}
+
+CITATION FORMAT: ${citationFormat}
+
+SIGNPOSTING TECHNIQUES (use these patterns):
+- "As [Author] demonstrates, [claim] ([Author], [Year])."
+- "This finding, highlighted by [Author] et al., suggests that..."
+- "[Author] ([Year]) provides compelling evidence that..."
+- "Building on [Author]'s research, we can see that..."
+- "The implications of this, as [Author] argues, extend to..."
+- "Critically, [Author] et al. ([Year]) found that..."
+
+INSTRUCTIONS:
+1. Insert 10-15 citations with SIGNPOSTING - don't just add parenthetical citations
+2. For EACH citation, add a brief ANALYSIS of why it matters to the argument
+3. Use varied signposting phrases (As X demonstrates, X argues that, According to X, etc.)
+4. Connect each source to the essay's argument - explain the relevance
+5. Distribute citations across ALL paragraphs evenly
+6. Match citations to the MOST relevant sources for each claim
+7. Do NOT change the core text - ADD signposting phrases and citations
+8. Do NOT add a bibliography section
+9. Ensure citation format matches: ${citationFormat}
+
+Return the essay with well-integrated, analyzed citations:`;
+
                     const citedText = await GeminiAPI.chat(prompt, GEMINI);
                     result.output = stripMarkdown(stripRefs(citedText));
-                    result.citedSources = sourcesWithCitations;
+                    result.citedSources = sources;
                     result.type = 'cited';
                     break;
                 }
