@@ -40,30 +40,45 @@ const buildBibliographyHTML = (sources, style, type) => {
             return ka.localeCompare(kb);
         });
 
+    // Only linkify the DOI/URL at the end — not the whole citation
+    const linkifyTrailingUrl = (text) => {
+        if (!text) return '';
+        // Match only a URL that appears at the very end of the string (after whitespace)
+        return text.replace(
+            /(\s)(https?:\/\/\S+)(\s*\.?\s*)$/,
+            (_, space, url, trail) =>
+                `${space}<a href="${url}" target="_blank" style="color:#000; text-decoration:underline;">${url}</a>${trail}`
+        );
+    };
+
     let html = `<div class="bibliography" style="${bibStyle}">`;
     html += `<p style="text-align:center; margin-bottom:24px; font-weight:normal;">${title}</p>`;
     let plain = `${title}\n\n`;
 
     sorted.forEach((s, i) => {
         const url = s.doi ? `https://doi.org/${s.doi}` : s.url || '';
-        const link = url ? `<a href="${url}" target="_blank" style="color:#1a73e8;">${url}</a>` : '';
 
         if (type === 'footnotes') {
-            const base = s.citation || `${fmtAuthor(s, 'mla')}, "${s.title}," ${s.year || 'n.d.'}.`;
-            const citHtml = base.replace(/(https?:\/\/\S+)/g, `<a href="$1" target="_blank" style="color:#1a73e8;">$1</a>`);
-            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${citHtml}</p>`;
+            const base = s.citation || `${fmtAuthor(s, 'mla')}, "${s.title}," ${s.year || 'n.d.'}. ${url}`;
+            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${linkifyTrailingUrl(base)}</p>`;
             plain += `${i+1}. ${base}\n\n`;
         } else if (s.citation) {
-            const citHtml = s.citation.replace(/(https?:\/\/\S+)/g, `<a href="$1" target="_blank" style="color:#1a73e8;">$1</a>`);
-            html += `<p style="${entryStyle}">${citHtml}</p>`;
+            // Crossref citation — only linkify the trailing URL
+            html += `<p style="${entryStyle}">${linkifyTrailingUrl(s.citation)}</p>`;
             plain += `${s.citation}\n\n`;
         } else {
+            // Fallback manual format
             const a = fmtAuthor(s, isMla ? 'mla' : 'apa');
             const t = s.title || 'Untitled';
             const v = s.venue || 'Journal';
             const y = s.year || 'n.d.';
-            const fmtH = isApa ? `${a} (${y}). ${t}. <i>${v}</i>. ${link}` : `${a}. "${t}." <i>${v}</i>, ${y}, ${link}.`;
-            const fmtP = isApa ? `${a} (${y}). ${t}. ${v}. ${url}` : `${a}. "${t}." ${v}, ${y}, ${url}.`;
+            const link = url ? `<a href="${url}" target="_blank" style="color:#000; text-decoration:underline;">${url}</a>` : '';
+            const fmtH = isApa
+                ? `${a} (${y}). ${t}. <i>${v}</i>. ${link}`
+                : `${a}. "${t}." <i>${v}</i>, ${y}, ${link}.`;
+            const fmtP = isApa
+                ? `${a} (${y}). ${t}. ${v}. ${url}`
+                : `${a}. "${t}." ${v}, ${y}, ${url}.`;
             html += `<p style="${entryStyle}">${fmtH}</p>`;
             plain += `${fmtP}\n\n`;
         }
