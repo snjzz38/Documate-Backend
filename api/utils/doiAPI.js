@@ -76,13 +76,15 @@ export const DoiAPI = {
             const journal = work['container-title']?.[0] || 
                            work.publisher || 
                            'Unknown Journal';
-            
             return {
                 doi: doi,
                 title: work.title?.[0] || 'Untitled',
                 authors: authors,
                 year: year,
-                journal: journal,
+                journal: work['container-title']?.[0] || work.publisher || 'Unknown Journal',
+                volume: work.volume || null,      // ADD
+                issue: work.issue || null,        // ADD
+                pages: work.page || null,         // ADD
                 type: work.type || 'article',
                 url: `https://doi.org/${doi}`,
                 abstract: work.abstract?.replace(/<[^>]+>/g, '').substring(0, 500) || null,
