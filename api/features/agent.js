@@ -49,26 +49,36 @@ const buildBibliographyHTML = (sources, style, type) => {
     // Render plain-text citation as HTML: italicise journal, linkify DOI
     const renderEntry = (plainCitation, source) => {
         if (!plainCitation) return '';
+        const doiUrl = source.doi ? `https://doi.org/${source.doi}` : '';
         const journal = source.venue || '';
     
         let text = plainCitation;
     
-        // 1. Mark journal for italics before escaping
+        // 1. Replace journal name with placeholder BEFORE escaping
         if (journal) {
             const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
         }
     
-        // 2. Escape HTML
+        // 2. Replace DOI URL with placeholder BEFORE escaping
+        // Match the URL anywhere it appears (not just at end) to be safe
+        if (doiUrl) {
+            const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
+        }
+    
+        // 3. Escape HTML
         text = text
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
     
-        // 3. Restore italic tags only — no links
+        // 4. Restore placeholders — these are safe because we placed them before escaping
         text = text
             .replace(/\x00I\x00/g, '<i>')
-            .replace(/\x00\/I\x00/g, '</i>');
+            .replace(/\x00\/I\x00/g, '</i>')
+            .replace(/\x00A\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">`)
+            .replace(/\x00\/A\x00/g, '</a>');
     
         return text;
     };
