@@ -54,30 +54,31 @@ const buildBibliographyHTML = (sources, style, type) => {
     
         let text = plainCitation;
     
-        // 1. Italicise journal FIRST (while still plain text, before any HTML escaping)
+        // 1. Replace journal name with placeholder BEFORE escaping
         if (journal) {
             const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            text = text.replace(new RegExp(`(${ej})`), `\x00ITALIC_START\x00$1\x00ITALIC_END\x00`);
+            text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
         }
     
         // 2. Replace DOI URL with placeholder BEFORE escaping
+        // Match the URL anywhere it appears (not just at end) to be safe
         if (doiUrl) {
             const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            text = text.replace(new RegExp(`(${eu})(\\.?)\\s*$`), `\x00LINK_START\x00$1\x00LINK_END\x00$2`);
+            text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
         }
     
-        // 3. NOW escape HTML special characters
+        // 3. Escape HTML
         text = text
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
     
-        // 4. Restore placeholders as actual HTML tags
+        // 4. Restore placeholders — these are safe because we placed them before escaping
         text = text
-            .replace(/\x00ITALIC_START\x00/g, '<i>')
-            .replace(/\x00ITALIC_END\x00/g, '</i>')
-            .replace(/\x00LINK_START\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">`)
-            .replace(/\x00LINK_END\x00/g, '</a>');
+            .replace(/\x00I\x00/g, '<i>')
+            .replace(/\x00\/I\x00/g, '</i>')
+            .replace(/\x00A\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">`)
+            .replace(/\x00\/A\x00/g, '</a>');
     
         return text;
     };
