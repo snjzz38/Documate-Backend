@@ -28,9 +28,10 @@ const buildBibliographyHTML = (sources, style, type) => {
 
     const isApa = style.includes('apa');
     const isMla = style.includes('mla');
-    const title = type === 'footnotes' ? 'Notes' : isMla ? 'Works Cited' : isApa ? 'References' : 'Bibliography';
-    const bibStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; background: #fff; color: #000;`;
-    const entryStyle = `text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2;`;
+    const title = type === 'footnotes' ? 'Notes'
+        : isMla ? 'Works Cited'
+        : isApa ? 'References'
+        : 'Bibliography';
 
     const sorted = type === 'footnotes'
         ? sources
@@ -40,62 +41,68 @@ const buildBibliographyHTML = (sources, style, type) => {
             return ka.localeCompare(kb);
         });
 
-    // Render citation as plain text but make ONLY the final DOI/URL clickable
-    const renderCitation = (citationText, doiUrl) => {
-        if (!citationText) return '';
-        // Escape HTML entities in the raw citation text
-        const escaped = citationText
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-        // Replace only the DOI URL at the end with a clickable link
-        if (doiUrl) {
-            const escapedUrl = doiUrl.replace(/&/g, '&amp;');
-            return escaped.replace(
-                new RegExp(escapedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$'),
-                `<a href="${escapedUrl}" target="_blank" style="color:#000; text-decoration:underline;">${escapedUrl}</a>`
-            );
-        }
-        return escaped;
+    // Make only the trailing DOI URL a clickable link
+    const linkifyDoi = (text, doi) => {
+        if (!text || !doi) return text || '';
+        const doiUrl = `https://doi.org/${doi}`;
+        // Escape for use in regex
+        const escaped = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return text.replace(
+            new RegExp(`(${escaped})([.\\s]*)$`),
+            `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>$2`
+        );
     };
 
-    let html = `<div class="bibliography" style="${bibStyle}">`;
-    html += `<p style="text-align:center; margin-bottom:24px; font-weight:normal;">${title}</p>`;
+    const wrapStyle = [
+        `font-family: 'Times New Roman', Times, serif`,
+        `font-size: 12pt`,
+        `line-height: 2`,
+        `color: #000`,
+        `background: #fff`,
+        `padding: 20px`
+    ].join('; ');
+
+    const titleStyle = [
+        `text-align: center`,
+        `margin-bottom: 24px`,
+        `font-weight: normal`,
+        `font-family: 'Times New Roman', Times, serif`,
+        `font-size: 12pt`
+    ].join('; ');
+
+    const entryStyle = [
+        `text-indent: -36px`,
+        `padding-left: 36px`,
+        `margin: 0 0 24px 0`,
+        `line-height: 2`,
+        `font-family: 'Times New Roman', Times, serif`,
+        `font-size: 12pt`,
+        `color: #000`
+    ].join('; ');
+
+    let html = `<div class="bibliography" style="${wrapStyle}">`;
+    html += `<p style="${titleStyle}">${title}</p>`;
     let plain = `${title}\n\n`;
 
     sorted.forEach((s, i) => {
-        const doiUrl = s.doi ? `https://doi.org/${s.doi}` : s.url || '';
+        const citationText = s.citation || '';
+        const plain_entry = citationText || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title}.`;
 
         if (type === 'footnotes') {
-            const base = s.citation || `${fmtAuthor(s, 'mla')}, "${s.title}," ${s.year || 'n.d.'}. ${doiUrl}`;
-            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${renderCitation(base, doiUrl)}</p>`;
-            plain += `${i+1}. ${base}\n\n`;
-        } else if (s.citation) {
-            html += `<p style="${entryStyle}">${renderCitation(s.citation, doiUrl)}</p>`;
-            plain += `${s.citation}\n\n`;
+            const linked = linkifyDoi(plain_entry, s.doi);
+            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${linked}</p>`;
+            plain += `${i+1}. ${plain_entry}\n\n`;
         } else {
-            const a = fmtAuthor(s, isMla ? 'mla' : 'apa');
-            const t = (s.title || 'Untitled').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-            const v = (s.venue || 'Journal').replace(/&/g,'&amp;');
-            const y = s.year || 'n.d.';
-            const link = doiUrl
-                ? `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>`
-                : '';
-            const fmtH = isApa
-                ? `${a} (${y}). ${t}. <i>${v}</i>. ${link}`
-                : `${a}. &ldquo;${t}.&rdquo; <i>${v}</i>, ${y}, ${link}.`;
-            const fmtP = isApa
-                ? `${a} (${y}). ${t}. ${v}. ${doiUrl}`
-                : `${a}. "${s.title || 'Untitled'}." ${s.venue || 'Journal'}, ${y}, ${doiUrl}.`;
-            // Use fmtH directly — already has HTML, don't pass through renderCitation
-            html += `<p style="${entryStyle}">${fmtH}</p>`;
-            plain += `${fmtP}\n\n`;
+            const linked = linkifyDoi(plain_entry, s.doi);
+            html += `<p style="${entryStyle}">${linked}</p>`;
+            plain += `${plain_entry}\n\n`;
         }
     });
 
     html += `</div>`;
     return { html, plain };
 };
+
 // Build formatted essay HTML on the backend
 const buildEssayHTML = text => {
     if (!text) return '<i>No output.</i>';
