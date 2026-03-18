@@ -237,7 +237,9 @@ Write the essay now:`;
                     const isMla = style.includes('mla');
 
                     // Fetch real Crossref citations for sources that don't already have them
-                    const sourcesNeedingCitations = sources.filter(s => s.doi && !s.citation);
+                    const sourcesNeedingCitations = sources.filter(
+                      s => s.doi && s.citationSource !== 'crossref'
+                    );
                     if (sourcesNeedingCitations.length > 0) {
                         const citationMap = await SourceFinderAPI.getCitations(sourcesNeedingCitations, style);
                         sources.forEach(s => {
