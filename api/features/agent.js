@@ -218,12 +218,12 @@ Write the essay now:`;
                     break;
                 }
 
-                case 'CITE': {
+               case 'CITE': {
                     const input = context.previousOutput || '';
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'apa7';
                     const type = options.citationType || 'in-text';
-
+                
                     if (!input || !sources.length) {
                         result.output = input;
                         result.outputHtml = buildEssayHTML(input);
@@ -232,38 +232,33 @@ Write the essay now:`;
                         result.type = 'cited';
                         break;
                     }
-
+                
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
-
-                    // Fetch real Crossref citations for sources that don't already have them
-                    const sourcesNeedingCitations = sources.filter(
-                        s => s.doi && s.citationSource !== 'crossref'
-                    );
-                    
+                
+                    // Fetch Crossref citations for any sources that don't have them yet
+                    const sourcesNeedingCitations = sources.filter(s => s.doi && s.citationSource !== 'crossref');
                     if (sourcesNeedingCitations.length > 0) {
-                        const updatedSources = await SourceFinderAPI.fetchAllCitations(
-                            sourcesNeedingCitations,
-                            style
-                        );
-                    
-                        // Merge updated citations back into original sources
+                        const updatedSources = await SourceFinderAPI.fetchAllCitations(sourcesNeedingCitations, style);
                         updatedSources.forEach(updated => {
+                            if (updated.citationSource !== 'crossref') return;
                             const original = sources.find(s => s.doi === updated.doi);
-                            if (!original) return;
-                        
-                            // ✅ Only use CrossRef results
-                            if (updated.citationSource === 'crossref') {
+                            if (original) {
                                 original.citation = updated.citation;
                                 original.citationSource = 'crossref';
                             }
                         });
-                        
+                    }
+                
+                    // Log how many real citations we have
+                    const crossrefCount = sources.filter(s => s.citationSource === 'crossref').length;
+                    console.log(`[Agent] CITE: ${crossrefCount}/${sources.length} Crossref citations`);
+                
                     const sourceList = sources.slice(0, 12).map((s, i) => {
                         const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
                         return `[${i+1}] ${author} (${s.year})\n   Title: "${s.title}"\n   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
                     }).join('\n\n');
-
+                
                     let citationFormat = '';
                     if (type === 'in-text') {
                         if (isApa) citationFormat = `APA 7th: (Author, Year) or Author (Year)`;
@@ -272,30 +267,30 @@ Write the essay now:`;
                     } else if (type === 'footnotes') {
                         citationFormat = `Superscript numbers¹ ² ³ at end of cited sentences.`;
                     }
-
+                
                     const prompt = `Add scholarly citations to this essay with strong signposting.
-
-ESSAY:
-${input}
-
-AVAILABLE SOURCES:
-${sourceList}
-
-CITATION FORMAT: ${citationFormat}
-
-INSTRUCTIONS:
-1. Insert 10-15 citations with signposting phrases
-2. Use varied phrases: "As X demonstrates,", "X argues that,", "According to X,"
-3. Distribute citations across ALL paragraphs evenly
-4. Match citations to the most relevant sources
-5. Do NOT add a bibliography section
-6. Ensure citation format matches: ${citationFormat}
-
-Return ONLY the essay with citations inserted:`;
-
+                
+                ESSAY:
+                ${input}
+                
+                AVAILABLE SOURCES:
+                ${sourceList}
+                
+                CITATION FORMAT: ${citationFormat}
+                
+                INSTRUCTIONS:
+                1. Insert 10-15 citations with signposting phrases
+                2. Use varied phrases: "As X demonstrates,", "X argues that,", "According to X,"
+                3. Distribute citations across ALL paragraphs evenly
+                4. Match citations to the most relevant sources
+                5. Do NOT add a bibliography section
+                6. Ensure citation format matches: ${citationFormat}
+                
+                Return ONLY the essay with citations inserted:`;
+                
                     const citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
                     const bib = buildBibliographyHTML(sources, style, type);
-
+                
                     result.output = citedText;
                     result.outputHtml = buildEssayHTML(citedText);
                     result.citedSources = sources;
