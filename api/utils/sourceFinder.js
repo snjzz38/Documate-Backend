@@ -1,11 +1,136 @@
 // api/utils/sourceFinder.js
 // Academic source discovery using OpenAlex API
-// Only returns papers WITH DOIs for accurate citations
+// Fetches official citations from CrossRef/doi.org
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
+// Map style names to CSL styles for CrossRef
+const CSL_STYLES = {
+    'apa': 'apa',
+    'apa7': 'apa',
+    'mla': 'modern-language-association',
+    'mla9': 'modern-language-association',
+    'chicago': 'chicago-author-date',
+    'harvard': 'harvard-cite-them-right',
+    'ieee': 'ieee'
+};
+
 export const SourceFinderAPI = {
     
+    /**
+     * Fetch official citation from doi.org using CrossRef
+     * @param {string} doi - The DOI
+     * @param {string} style - Citation style (apa7, mla9, chicago, etc.)
+     * @returns {Promise<string|null>} - Formatted citation or null
+     */
+    async fetchCitation(doi, style = 'apa7') {
+        if (!doi) return null;
+        
+        const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, '').trim();
+        if (!cleanDoi) return null;
+        
+        const cslStyle = CSL_STYLES[style.toLowerCase()] || 'apa';
+        
+        try {
+            const response = await fetch(`https://doi.org/${cleanDoi}`, {
+                headers: { 'Accept': `text/x-bibliography; style=${cslStyle}` },
+                redirect: 'follow'
+            });
+            
+            if (!response.ok) return null;
+            
+            const citation = await response.text();
+            return citation.trim();
+        } catch (e) {
+            console.log(`[SourceFinder] Citation fetch failed for ${cleanDoi}:`, e.message);
+            return null;
+        }
+    },
+
+    /**
+     * Fetch citations for all sources
+     * @param {Array} sources - Array of source objects with doi field
+     * @param {string} style - Citation style
+     * @returns {Promise<Array>} - Sources with citation field added
+     */
+    async fetchAllCitations(sources, style = 'apa7') {
+        if (!sources?.length) return sources;
+        
+        console.log(`[SourceFinder] Fetching ${sources.length} citations in ${style} format...`);
+        
+        const results = await Promise.all(
+            sources.map(async (source) => {
+                if (!source.doi) {
+                    return { ...source, citation: this._generateFallbackCitation(source, style) };
+                }
+                
+                const official = await this.fetchCitation(source.doi, style);
+                if (official) {
+                    return { ...source, citation: official, citationSource: 'crossref' };
+                }
+                
+                // Fallback if CrossRef fails
+                return { ...source, citation: this._generateFallbackCitation(source, style), citationSource: 'generated' };
+            })
+        );
+        
+        const crossrefCount = results.filter(s => s.citationSource === 'crossref').length;
+        console.log(`[SourceFinder] Got ${crossrefCount}/${results.length} citations from CrossRef`);
+        
+        return results;
+    },
+
+    /**
+     * Generate fallback citation when CrossRef is unavailable
+     */
+    _generateFallbackCitation(source, style) {
+        const isApa = style.includes('apa');
+        const isMla = style.includes('mla');
+        
+        const author = this._formatAuthorForCitation(source, isApa ? 'apa' : 'mla');
+        const title = source.title || 'Untitled';
+        const venue = source.venue || '';
+        const year = source.year || 'n.d.';
+        const url = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
+        
+        if (isApa) {
+            // APA 7th: Author, A. A. (Year). Title. Journal. URL
+            return `${author} (${year}). ${title}.${venue ? ` ${venue}.` : ''} ${url}`;
+        } else if (isMla) {
+            // MLA 9th: Author. "Title." Journal, Year, URL.
+            return `${author}. "${title}."${venue ? ` ${venue},` : ''} ${year}, ${url}.`;
+        } else {
+            // Chicago: Author. "Title." Journal. Year. URL.
+            return `${author}. "${title}."${venue ? ` ${venue}.` : ''} ${year}. ${url}.`;
+        }
+    },
+
+    /**
+     * Format author name for citations
+     */
+    _formatAuthorForCitation(source, style) {
+        if (source.authors?.length && source.authors[0].family) {
+            const auths = source.authors;
+            if (style === 'apa') {
+                // APA: Last, F. I., Last, F. I., & Last, F. I.
+                const formatted = auths.slice(0, 3).map(a => {
+                    const initials = a.given ? a.given.split(' ').map(n => n[0] + '.').join(' ') : '';
+                    return `${a.family}, ${initials}`;
+                });
+                if (auths.length > 3) return formatted[0] + ', et al.';
+                if (formatted.length > 1) return formatted.slice(0, -1).join(', ') + ', & ' + formatted[formatted.length - 1];
+                return formatted[0];
+            } else {
+                // MLA: Last, First, et al.
+                const first = auths[0];
+                if (auths.length > 2) return `${first.family}, ${first.given || ''}, et al.`;
+                if (auths.length === 2) return `${first.family}, ${first.given || ''}, and ${auths[1].given || ''} ${auths[1].family}`;
+                return `${first.family}, ${first.given || ''}`;
+            }
+        }
+        return source.author || source.displayName || 'Unknown';
+    },
+
     /**
      * Search for academic papers on a topic
      * Only returns papers with DOIs for proper citation
@@ -71,8 +196,11 @@ export const SourceFinderAPI = {
 
     /**
      * Search with multiple specific queries for better coverage
+     * @param {string} topic - Topic to search
+     * @param {number} limit - Max results
+     * @param {string} citationStyle - Style for citations (apa7, mla9, chicago)
      */
-    async searchTopic(topic, limit = 12) {
+    async searchTopic(topic, limit = 12, citationStyle = null) {
         // Generate specific search queries based on topic
         const queries = this._generateQueries(topic);
         console.log('[SourceFinder] Generated queries:', queries);
@@ -94,10 +222,17 @@ export const SourceFinderAPI = {
             }
         }
 
-        // Sort by citation count and return top results
-        return deduplicated
+        // Sort by citation count and get top results
+        const topResults = deduplicated
             .sort((a, b) => (b.citationCount || 0) - (a.citationCount || 0))
             .slice(0, limit);
+
+        // If citation style specified, fetch official citations
+        if (citationStyle) {
+            return await this.fetchAllCitations(topResults, citationStyle);
+        }
+
+        return topResults;
     },
 
     /**
@@ -134,60 +269,6 @@ export const SourceFinderAPI = {
     },
 
     /**
-     * Fetch a real formatted citation for a DOI using content negotiation
-     * @param {string} doi - e.g. "10.1038/s41586-020-2649-2"
-     * @param {string} style - 'apa7', 'mla9', 'chicago', etc.
-     * @returns {string} formatted citation text
-     */
-    async getCitation(doi, style = 'apa7') {
-        if (!doi) return null;
-        
-        // Map our style names to CSL style names
-        const styleMap = {
-            'apa7': 'apa',
-            'apa':  'apa',
-            'mla9': 'modern-language-association',
-            'mla':  'modern-language-association',
-            'chicago': 'chicago-author-date',
-            'ieee': 'ieee',
-            'harvard': 'harvard-cite-them-right'
-        };
-        
-        const cslStyle = styleMap[style.toLowerCase()] || 'apa';
-        const cleanDoi = doi.replace('https://doi.org/', '').trim();
-        
-        try {
-            const res = await fetch(`https://doi.org/${cleanDoi}`, {
-                headers: { 'Accept': `text/x-bibliography; style=${cslStyle}` }
-            });
-            if (!res.ok) throw new Error(`DOI lookup failed: ${res.status}`);
-            const text = await res.text();
-            return text.trim();
-        } catch (e) {
-            console.error('[SourceFinder] getCitation failed for', doi, e.message);
-            return null;
-        }
-    },
-    
-    /**
-     * Fetch citations for multiple sources in parallel
-     * @param {Array} sources - array of source objects with .doi
-     * @param {string} style - citation style
-     * @returns {Map} doi -> citation string
-     */
-    async getCitations(sources, style = 'apa7') {
-        const withDoi = sources.filter(s => s.doi);
-        const results = await Promise.all(
-            withDoi.map(async s => {
-                const citation = await this.getCitation(s.doi, style);
-                return [s.doi, citation];
-            })
-        );
-        return new Map(results.filter(([, c]) => c !== null));
-    },
-
-    
-    /**
      * Transform OpenAlex work to our format
      */
     _transformWork(work) {
@@ -219,7 +300,7 @@ export const SourceFinderAPI = {
 
         const venue = work.primary_location?.source?.display_name ||
                      work.host_venue?.display_name ||
-                     'Academic Journal';
+                     '';
 
         const doi = work.doi ? work.doi.replace('https://doi.org/', '') : null;
 
