@@ -35,6 +35,12 @@ export const SourceFinderAPI = {
                 };
                 enriched.citation = this._formatCitation(enriched, style);
                 enriched.citationSource = 'crossref';
+                // After merging authors, filter out clearly invalid single-letter family names
+                enriched.authors = (enriched.authors || []).filter(
+                    a => a.family && a.family.length > 1 && !/^\d+$/.test(a.family)
+                );
+                // If filtering left us with no authors, fall back to OpenAlex authors
+                if (enriched.authors.length === 0) enriched.authors = src.authors || [];
                 return enriched;
             }));
             results.push(...enriched);
