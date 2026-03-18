@@ -37,7 +37,10 @@ export const SourceFinderAPI = {
                 redirect: 'follow'
             });
             
-            if (!response.ok) return null;
+            if (!response.ok) {
+            console.log('[CrossRef FAILED]', cleanDoi, response.status);
+            return null;
+        }
             
             const citation = await response.text();
             return citation.trim();
