@@ -250,13 +250,15 @@ Write the essay now:`;
                         // Merge updated citations back into original sources
                         updatedSources.forEach(updated => {
                             const original = sources.find(s => s.doi === updated.doi);
-                            if (original) {
+                            if (!original) return;
+                        
+                            // ✅ Only use CrossRef results
+                            if (updated.citationSource === 'crossref') {
                                 original.citation = updated.citation;
-                                original.citationSource = updated.citationSource;
+                                original.citationSource = 'crossref';
                             }
                         });
-                    }
-
+                        
                     const sourceList = sources.slice(0, 12).map((s, i) => {
                         const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
                         return `[${i+1}] ${author} (${s.year})\n   Title: "${s.title}"\n   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
