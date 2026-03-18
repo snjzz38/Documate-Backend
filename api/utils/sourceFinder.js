@@ -56,58 +56,51 @@ export const SourceFinderAPI = {
 
     _formatApa(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-
         const formatAuthor = a => {
             const initials = a.given
                 ? a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')
                 : '';
             return initials ? `${a.family}, ${initials}` : a.family;
         };
-
         let authorStr = source.author || 'Unknown';
         if (authors.length === 1) authorStr = formatAuthor(authors[0]);
         else if (authors.length === 2) authorStr = `${formatAuthor(authors[0])} & ${formatAuthor(authors[1])}`;
         else if (authors.length === 3) authorStr = `${formatAuthor(authors[0])}, ${formatAuthor(authors[1])}, & ${formatAuthor(authors[2])}`;
         else if (authors.length > 3) authorStr = `${formatAuthor(authors[0])}, et al.`;
-
+    
         const year = source.year || 'n.d.';
         const title = source.title || 'Untitled';
-        const journal = source.venue ? `<i>${source.venue}</i>` : '';
-        const volume = source.volume ? `, <i>${source.volume}</i>` : '';
+        const journal = source.venue || '';
+        const volume = source.volume ? `, ${source.volume}` : '';
         const issue = source.issue ? `(${source.issue})` : '';
         const pages = source.pages ? `, ${source.pages}` : '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-
+    
         let citation = `${authorStr} (${year}). ${title}.`;
-        if (journal) {
-            citation += ` ${journal}`;
-            if (volume || issue || pages) citation += `${volume}${issue}${pages}`;
-            citation += '.';
-        }
+        if (journal) citation += ` ${journal}${volume}${issue}${pages}.`;
         if (doi) citation += ` ${doi}`;
         return citation.trim();
     },
-
+    
     _formatMla(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-
         const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
         const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
-
+    
         let authorStr = source.author || 'Unknown';
         if (authors.length === 1) authorStr = formatFirst(authors[0]);
         else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
         else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
-
+    
         const title = source.title || 'Untitled';
-        const journal = source.venue ? `<i>${source.venue}</i>` : '';
+        const journal = source.venue || '';
         const year = source.year || 'n.d.';
         const volume = source.volume ? `vol. ${source.volume}` : '';
         const issue = source.issue ? `no. ${source.issue}` : '';
         const pages = source.pages ? `pp. ${source.pages}` : '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-
-        let citation = `${authorStr}. &ldquo;${title}.&rdquo;`;
+    
+        let citation = `${authorStr}. "${title}."`;
         if (journal) citation += ` ${journal},`;
         const details = [volume, issue, year, pages].filter(Boolean).join(', ');
         if (details) citation += ` ${details}`;
@@ -115,27 +108,26 @@ export const SourceFinderAPI = {
         if (doi) citation += ` ${doi}.`;
         return citation.trim();
     },
-
+    
     _formatChicago(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-
         const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
         const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
-
+    
         let authorStr = source.author || 'Unknown';
         if (authors.length === 1) authorStr = formatFirst(authors[0]);
         else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
         else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
-
+    
         const title = source.title || 'Untitled';
-        const journal = source.venue ? `<i>${source.venue}</i>` : '';
+        const journal = source.venue || '';
         const year = source.year || 'n.d.';
         const volume = source.volume || '';
         const issue = source.issue ? `no. ${source.issue}` : '';
         const pages = source.pages || '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-
-        let citation = `${authorStr}. &ldquo;${title}.&rdquo;`;
+    
+        let citation = `${authorStr}. "${title}."`;
         if (journal) citation += ` ${journal}`;
         if (volume) citation += ` ${volume}`;
         if (issue) citation += `, ${issue}`;
