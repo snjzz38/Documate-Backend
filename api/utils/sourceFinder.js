@@ -99,78 +99,102 @@ export const SourceFinderAPI = {
         return this._formatChicago(source);
     },
 
-    _formatApa(source) {
+        _formatApa(source) {
         const authors = source.authors || [];
+    
         const formatAuthor = a => {
-            const initials = a.given ? a.given.split(' ').map(n => n[0] + '.').join(' ') : '';
+            if (!a.family) return '';
+            const initials = a.given
+                ? a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')
+                : '';
             return initials ? `${a.family}, ${initials}` : a.family;
         };
-
+    
         let authorStr = 'Unknown';
-        if (authors.length === 1) authorStr = formatAuthor(authors[0]);
-        else if (authors.length === 2) authorStr = `${formatAuthor(authors[0])} & ${formatAuthor(authors[1])}`;
-        else if (authors.length === 3) authorStr = `${formatAuthor(authors[0])}, ${formatAuthor(authors[1])}, & ${formatAuthor(authors[2])}`;
-        else if (authors.length > 3) authorStr = `${formatAuthor(authors[0])}, et al.`;
-
+        if (authors.length === 1) {
+            authorStr = formatAuthor(authors[0]);
+        } else if (authors.length === 2) {
+            authorStr = `${formatAuthor(authors[0])} & ${formatAuthor(authors[1])}`;
+        } else if (authors.length === 3) {
+            authorStr = `${formatAuthor(authors[0])}, ${formatAuthor(authors[1])}, & ${formatAuthor(authors[2])}`;
+        } else if (authors.length > 3) {
+            authorStr = `${formatAuthor(authors[0])}, et al.`;
+        }
+    
         const year = source.year || 'n.d.';
         const title = source.title || 'Untitled';
-        const journal = source.venue || '';
-        const volume = source.volume ? `, ${source.volume}` : '';
+        const journal = source.venue ? `*${source.venue}*` : '';
+        const volume = source.volume || '';
         const issue = source.issue ? `(${source.issue})` : '';
-        const pages = source.pages ? `, ${source.pages}` : '';
+        const pages = source.pages || '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-
-        // APA 7: Author, A. A. (Year). Title. Journal, volume(issue), pages. https://doi.org/xxx
+    
         let citation = `${authorStr} (${year}). ${title}.`;
-        if (journal) citation += ` ${journal}`;
-        if (volume || issue || pages) citation += `${volume}${issue}${pages}.`;
-        else if (journal) citation += '.';
+        if (journal) {
+            citation += ` ${journal}`;
+            if (volume) {
+                citation += `, *${volume}*${issue}`;
+                if (pages) citation += `, ${pages}`;
+            }
+            citation += '.';
+        }
         if (doi) citation += ` ${doi}`;
         return citation.trim();
     },
-
+    
     _formatMla(source) {
         const authors = source.authors || [];
+    
+        const formatFirst = a => {
+            if (!a.family) return '';
+            return a.given ? `${a.family}, ${a.given}` : a.family;
+        };
+        const formatRest = a => {
+            if (!a.family) return '';
+            return a.given ? `${a.given} ${a.family}` : a.family;
+        };
+    
         let authorStr = 'Unknown';
-        if (authors.length > 0) {
-            const first = authors[0];
-            const firstName = first.given ? `${first.family}, ${first.given}` : first.family;
-            if (authors.length === 1) authorStr = firstName;
-            else if (authors.length === 2) authorStr = `${firstName}, and ${authors[1].given ? `${authors[1].given} ` : ''}${authors[1].family}`;
-            else authorStr = `${firstName}, et al.`;
+        if (authors.length === 1) {
+            authorStr = formatFirst(authors[0]);
+        } else if (authors.length === 2) {
+            authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
+        } else if (authors.length >= 3) {
+            authorStr = `${formatFirst(authors[0])}, et al.`;
         }
-
+    
         const title = source.title || 'Untitled';
         const journal = source.venue || '';
         const year = source.year || 'n.d.';
-        const volume = source.volume || '';
+        const volume = source.volume ? `vol. ${source.volume}` : '';
         const issue = source.issue ? `no. ${source.issue}` : '';
-        const pages = source.pages || '';
+        const pages = source.pages ? `pp. ${source.pages}` : '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-
-        // MLA 9: Author. "Title." Journal, vol. X, no. Y, Year, pp. Z. DOI.
+    
         let citation = `${authorStr}. "${title}."`;
-        if (journal) citation += ` ${journal},`;
-        if (volume) citation += ` vol. ${volume},`;
-        if (issue) citation += ` ${issue},`;
-        citation += ` ${year}`;
-        if (pages) citation += `, pp. ${pages}`;
-        citation += `.`;
+        if (journal) citation += ` *${journal}*,`;
+        const details = [volume, issue, year, pages].filter(Boolean).join(', ');
+        if (details) citation += ` ${details}`;
+        citation += '.';
         if (doi) citation += ` ${doi}.`;
         return citation.trim();
     },
-
+    
     _formatChicago(source) {
         const authors = source.authors || [];
+    
+        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+    
         let authorStr = 'Unknown';
-        if (authors.length > 0) {
-            const first = authors[0];
-            const firstName = first.given ? `${first.family}, ${first.given}` : first.family;
-            if (authors.length === 1) authorStr = firstName;
-            else if (authors.length === 2) authorStr = `${firstName}, and ${authors[1].given ? `${authors[1].given} ` : ''}${authors[1].family}`;
-            else authorStr = `${firstName}, et al.`;
+        if (authors.length === 1) {
+            authorStr = formatFirst(authors[0]);
+        } else if (authors.length === 2) {
+            authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
+        } else if (authors.length >= 3) {
+            authorStr = `${formatFirst(authors[0])}, et al.`;
         }
-
+    
         const title = source.title || 'Untitled';
         const journal = source.venue || '';
         const year = source.year || 'n.d.';
@@ -178,14 +202,14 @@ export const SourceFinderAPI = {
         const issue = source.issue ? `no. ${source.issue}` : '';
         const pages = source.pages || '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-
+    
         let citation = `${authorStr}. "${title}."`;
         if (journal) citation += ` ${journal}`;
         if (volume) citation += ` ${volume}`;
         if (issue) citation += `, ${issue}`;
         citation += ` (${year})`;
         if (pages) citation += `: ${pages}`;
-        citation += `.`;
+        citation += '.';
         if (doi) citation += ` ${doi}.`;
         return citation.trim();
     },
