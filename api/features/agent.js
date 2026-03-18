@@ -238,14 +238,21 @@ Write the essay now:`;
 
                     // Fetch real Crossref citations for sources that don't already have them
                     const sourcesNeedingCitations = sources.filter(
-                      s => s.doi && s.citationSource !== 'crossref'
+                        s => s.doi && s.citationSource !== 'crossref'
                     );
+                    
                     if (sourcesNeedingCitations.length > 0) {
-                        const citationMap = await SourceFinderAPI.getCitations(sourcesNeedingCitations, style);
-                        sources.forEach(s => {
-                            if (s.doi && !s.citation && citationMap.has(s.doi)) {
-                                s.citation = citationMap.get(s.doi);
-                                s.citationSource = 'crossref';
+                        const updatedSources = await SourceFinderAPI.fetchAllCitations(
+                            sourcesNeedingCitations,
+                            style
+                        );
+                    
+                        // Merge updated citations back into original sources
+                        updatedSources.forEach(updated => {
+                            const original = sources.find(s => s.doi === updated.doi);
+                            if (original) {
+                                original.citation = updated.citation;
+                                original.citationSource = updated.citationSource;
                             }
                         });
                     }
