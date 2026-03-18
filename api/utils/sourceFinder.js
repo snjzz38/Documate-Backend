@@ -1,218 +1,195 @@
 // api/utils/sourceFinder.js
-// Academic source discovery using OpenAlex API
-// Fetches official citations from CrossRef/doi.org
+import { DoiAPI } from './doiAPI.js';
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
-// Map style names to CSL styles for CrossRef
-const CSL_STYLES = {
-    'apa': 'apa',
-    'apa7': 'apa',
-    'mla': 'modern-language-association',
-    'mla9': 'modern-language-association',
-    'chicago': 'chicago-author-date',
-    'harvard': 'harvard-cite-them-right',
-    'ieee': 'ieee'
-};
-
 export const SourceFinderAPI = {
-    
-    /**
-     * Fetch official citation from doi.org using CrossRef
-     * @param {string} doi - The DOI
-     * @param {string} style - Citation style (apa7, mla9, chicago, etc.)
-     * @returns {Promise<string|null>} - Formatted citation or null
-     */
-    async fetchCitation(doi, style = 'apa7') {
-        if (!doi) return null;
-        
-        const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, '').trim();
-        if (!cleanDoi) return null;
-        
-        const cslStyle = CSL_STYLES[style.toLowerCase()] || 'apa';
-        
-        try {
-            const response = await fetch(`https://doi.org/${cleanDoi}`, {
-                headers: { 'Accept': `text/x-bibliography; style=${cslStyle}` },
-                redirect: 'follow'
-            });
-            
-            if (!response.ok) return null;
-            
-            const citation = await response.text();
-            return citation.trim();
-        } catch (e) {
-            console.log(`[SourceFinder] Citation fetch failed for ${cleanDoi}:`, e.message);
-            return null;
-        }
-    },
 
-    /**
-     * Fetch citations for all sources
-     * @param {Array} sources - Array of source objects with doi field
-     * @param {string} style - Citation style
-     * @returns {Promise<Array>} - Sources with citation field added
-     */
     async fetchAllCitations(sources, style = 'apa7') {
         if (!sources?.length) return sources;
-        
         console.log(`[SourceFinder] Fetching ${sources.length} citations in ${style} format...`);
-        
-        const results = await Promise.all(
-            sources.map(async (source) => {
-                if (!source.doi) {
-                    return { ...source, citation: this._generateFallbackCitation(source, style) };
+
+        const results = [];
+        const batchSize = 3;
+
+        for (let i = 0; i < sources.length; i += batchSize) {
+            const batch = sources.slice(i, i + batchSize);
+            const enriched = await Promise.all(batch.map(async src => {
+                if (!src.doi) {
+                    return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
                 }
-                
-                const official = await this.fetchCitation(source.doi, style);
-                if (official) {
-                    return { ...source, citation: official, citationSource: 'crossref' };
+                const meta = await DoiAPI.fetchFromCrossref(src.doi);
+                if (!meta) {
+                    return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
                 }
-                
-                // Fallback if CrossRef fails
-                return { ...source, citation: this._generateFallbackCitation(source, style), citationSource: 'generated' };
-            })
-        );
-        
+
+                // Merge Crossref metadata — fill gaps from OpenAlex
+                let mergedAuthors = meta.authors?.length ? meta.authors : src.authors;
+                // Filter out bad single-letter family names
+                mergedAuthors = mergedAuthors.filter(a => a.family && a.family.length > 1 && !/^\d+$/.test(a.family));
+                if (mergedAuthors.length === 0) mergedAuthors = (src.authors || []).filter(a => a.family && a.family.length > 1);
+
+                const enrichedSrc = {
+                    ...src,
+                    authors: mergedAuthors,
+                    title: meta.title || src.title,
+                    venue: meta.journal || src.venue,
+                    year: (meta.year && meta.year !== 'n.d.') ? meta.year : src.year,
+                    volume: meta.volume || null,
+                    issue: meta.issue || null,
+                    pages: meta.pages || null,
+                };
+                enrichedSrc.citation = this._formatCitation(enrichedSrc, style);
+                enrichedSrc.citationSource = 'crossref';
+                return enrichedSrc;
+            }));
+            results.push(...enriched);
+            if (i + batchSize < sources.length) {
+                await new Promise(r => setTimeout(r, 300));
+            }
+        }
+
         const crossrefCount = results.filter(s => s.citationSource === 'crossref').length;
-        console.log(`[SourceFinder] Got ${crossrefCount}/${results.length} citations from CrossRef`);
-        
+        console.log(`[SourceFinder] ${crossrefCount}/${results.length} enriched from Crossref`);
         return results;
     },
 
-    /**
-     * Generate fallback citation when CrossRef is unavailable
-     */
-    _generateFallbackCitation(source, style) {
-        const isApa = style.includes('apa');
-        const isMla = style.includes('mla');
-        
-        const author = this._formatAuthorForCitation(source, isApa ? 'apa' : 'mla');
-        const title = source.title || 'Untitled';
-        const venue = source.venue || '';
+    _formatCitation(source, style = 'apa7') {
+        if (style.includes('mla')) return this._formatMla(source);
+        if (style.includes('chicago')) return this._formatChicago(source);
+        return this._formatApa(source);
+    },
+
+    _formatApa(source) {
+        const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
+        const formatAuthor = a => {
+            const initials = a.given
+                ? a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')
+                : '';
+            return initials ? `${a.family}, ${initials}` : a.family;
+        };
+
+        let authorStr = source.author || 'Unknown';
+        if (authors.length === 1) authorStr = formatAuthor(authors[0]);
+        else if (authors.length === 2) authorStr = `${formatAuthor(authors[0])} & ${formatAuthor(authors[1])}`;
+        else if (authors.length === 3) authorStr = `${formatAuthor(authors[0])}, ${formatAuthor(authors[1])}, & ${formatAuthor(authors[2])}`;
+        else if (authors.length > 3) authorStr = `${formatAuthor(authors[0])}, et al.`;
+
         const year = source.year || 'n.d.';
-        const url = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        
-        if (isApa) {
-            // APA 7th: Author, A. A. (Year). Title. Journal. URL
-            return `${author} (${year}). ${title}.${venue ? ` ${venue}.` : ''} ${url}`;
-        } else if (isMla) {
-            // MLA 9th: Author. "Title." Journal, Year, URL.
-            return `${author}. "${title}."${venue ? ` ${venue},` : ''} ${year}, ${url}.`;
-        } else {
-            // Chicago: Author. "Title." Journal. Year. URL.
-            return `${author}. "${title}."${venue ? ` ${venue}.` : ''} ${year}. ${url}.`;
-        }
+        const title = source.title || 'Untitled';
+        const journal = source.venue || '';
+        const volume = source.volume ? `, ${source.volume}` : '';
+        const issue = source.issue ? `(${source.issue})` : '';
+        const pages = source.pages ? `, ${source.pages}` : '';
+        const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
+
+        let citation = `${authorStr} (${year}). ${title}.`;
+        if (journal) citation += ` ${journal}${volume}${issue}${pages}.`;
+        if (doi) citation += ` ${doi}`;
+        return citation.trim();
     },
 
-    /**
-     * Format author name for citations
-     */
-    _formatAuthorForCitation(source, style) {
-        if (source.authors?.length && source.authors[0].family) {
-            const auths = source.authors;
-            if (style === 'apa') {
-                // APA: Last, F. I., Last, F. I., & Last, F. I.
-                const formatted = auths.slice(0, 3).map(a => {
-                    const initials = a.given ? a.given.split(' ').map(n => n[0] + '.').join(' ') : '';
-                    return `${a.family}, ${initials}`;
-                });
-                if (auths.length > 3) return formatted[0] + ', et al.';
-                if (formatted.length > 1) return formatted.slice(0, -1).join(', ') + ', & ' + formatted[formatted.length - 1];
-                return formatted[0];
-            } else {
-                // MLA: Last, First, et al.
-                const first = auths[0];
-                if (auths.length > 2) return `${first.family}, ${first.given || ''}, et al.`;
-                if (auths.length === 2) return `${first.family}, ${first.given || ''}, and ${auths[1].given || ''} ${auths[1].family}`;
-                return `${first.family}, ${first.given || ''}`;
-            }
-        }
-        return source.author || source.displayName || 'Unknown';
+    _formatMla(source) {
+        const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
+        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+
+        let authorStr = source.author || 'Unknown';
+        if (authors.length === 1) authorStr = formatFirst(authors[0]);
+        else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
+        else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
+
+        const title = source.title || 'Untitled';
+        const journal = source.venue || '';
+        const year = source.year || 'n.d.';
+        const volume = source.volume ? `vol. ${source.volume}` : '';
+        const issue = source.issue ? `no. ${source.issue}` : '';
+        const pages = source.pages ? `pp. ${source.pages}` : '';
+        const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
+
+        let citation = `${authorStr}. "${title}."`;
+        if (journal) citation += ` ${journal},`;
+        const details = [volume, issue, year, pages].filter(Boolean).join(', ');
+        if (details) citation += ` ${details}`;
+        citation += '.';
+        if (doi) citation += ` ${doi}.`;
+        return citation.trim();
     },
 
-    /**
-     * Search for academic papers on a topic
-     * Only returns papers with DOIs for proper citation
-     */
+    _formatChicago(source) {
+        const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
+        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+
+        let authorStr = source.author || 'Unknown';
+        if (authors.length === 1) authorStr = formatFirst(authors[0]);
+        else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
+        else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
+
+        const title = source.title || 'Untitled';
+        const journal = source.venue || '';
+        const year = source.year || 'n.d.';
+        const volume = source.volume || '';
+        const issue = source.issue ? `no. ${source.issue}` : '';
+        const pages = source.pages || '';
+        const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
+
+        let citation = `${authorStr}. "${title}."`;
+        if (journal) citation += ` ${journal}`;
+        if (volume) citation += ` ${volume}`;
+        if (issue) citation += `, ${issue}`;
+        citation += ` (${year})`;
+        if (pages) citation += `: ${pages}`;
+        citation += '.';
+        if (doi) citation += ` ${doi}.`;
+        return citation.trim();
+    },
+
     async search(query, limit = 12) {
-        if (!query || query.trim().length < 3) {
-            console.log('[SourceFinder] Query too short:', query);
-            return [];
-        }
-
+        if (!query || query.trim().length < 3) return [];
         try {
-            // Clean and enhance query
             const cleanQuery = query.trim().toLowerCase();
-            
-            // Build OpenAlex query - REQUIRE DOI
             const params = new URLSearchParams({
                 search: cleanQuery,
                 filter: 'is_oa:true,has_abstract:true,has_doi:true',
-                'per-page': '25', // Get more to filter
+                'per-page': '25',
                 sort: 'relevance_score:desc'
             });
-
-            const url = `${OPENALEX_BASE}?${params}`;
-            console.log('[SourceFinder] Searching:', url);
-
-            const response = await fetch(url, {
+            const response = await fetch(`${OPENALEX_BASE}?${params}`, {
                 headers: { 'User-Agent': 'DocuMate Academic Tool (mailto:contact@documate.app)' }
             });
-
             if (!response.ok) throw new Error(`OpenAlex returned ${response.status}`);
-
             const data = await response.json();
             if (!data.results?.length) return [];
 
-            // Transform and filter results
-            const papers = data.results
+            return data.results
                 .map(work => this._transformWork(work))
                 .filter(p => {
-                    // Must have DOI
                     if (!p.doi) return false;
-                    // Must have substantial abstract
                     if (!p.abstract || p.abstract.length < 150) return false;
-                    // Check relevance - title or abstract should contain query terms
                     const queryWords = cleanQuery.split(/\s+/).filter(w => w.length > 3);
                     const titleLower = p.title.toLowerCase();
                     const abstractLower = p.abstract.toLowerCase();
-                    const matchCount = queryWords.filter(w => 
+                    const matchCount = queryWords.filter(w =>
                         titleLower.includes(w) || abstractLower.includes(w)
                     ).length;
-                    // At least half the query words should match
                     return matchCount >= Math.ceil(queryWords.length / 2);
                 })
                 .slice(0, limit);
-
-            console.log('[SourceFinder] Found', papers.length, 'relevant papers with DOIs');
-            return papers;
-
         } catch (e) {
             console.error('[SourceFinder] Search failed:', e.message);
             return [];
         }
     },
 
-    /**
-     * Search with multiple specific queries for better coverage
-     * @param {string} topic - Topic to search
-     * @param {number} limit - Max results
-     * @param {string} citationStyle - Style for citations (apa7, mla9, chicago)
-     */
     async searchTopic(topic, limit = 12, citationStyle = null) {
-        // Generate specific search queries based on topic
         const queries = this._generateQueries(topic);
         console.log('[SourceFinder] Generated queries:', queries);
-        
-        const allResults = await Promise.all(
-            queries.map(q => this.search(q, 8))
-        );
 
-        // Deduplicate by DOI
+        const allResults = await Promise.all(queries.map(q => this.search(q, 8)));
+
         const seen = new Set();
         const deduplicated = [];
-
         for (const results of allResults) {
             for (const paper of results) {
                 if (paper.doi && !seen.has(paper.doi)) {
@@ -222,107 +199,56 @@ export const SourceFinderAPI = {
             }
         }
 
-        // Sort by citation count and get top results
         const topResults = deduplicated
             .sort((a, b) => (b.citationCount || 0) - (a.citationCount || 0))
             .slice(0, limit);
 
-        // If citation style specified, fetch official citations
         if (citationStyle) {
             return await this.fetchAllCitations(topResults, citationStyle);
         }
-
         return topResults;
     },
 
-    /**
-     * Generate multiple search queries for better coverage
-     */
     _generateQueries(topic) {
         const lower = topic.toLowerCase();
-        const queries = [topic]; // Original query
-        
-        // Add specific variations based on topic keywords
+        const queries = [topic];
         if (lower.includes('designer bab') || lower.includes('gene edit') || lower.includes('crispr')) {
-            queries.push(
-                'designer babies ethics genetic engineering',
-                'CRISPR human embryo editing ethics',
-                'germline editing ethical implications',
-                'preimplantation genetic diagnosis ethics',
-                'human genome editing policy regulation'
-            );
+            queries.push('designer babies ethics genetic engineering', 'CRISPR human embryo editing ethics', 'germline editing ethical implications', 'preimplantation genetic diagnosis ethics');
         } else if (lower.includes('climate') || lower.includes('global warming')) {
-            queries.push(
-                'climate change mitigation policy',
-                'global warming environmental impact',
-                'carbon emissions reduction strategies'
-            );
+            queries.push('climate change mitigation policy', 'global warming environmental impact', 'carbon emissions reduction strategies');
         } else if (lower.includes('artificial intelligence') || lower.includes(' ai ')) {
-            queries.push(
-                'artificial intelligence ethics society',
-                'machine learning bias fairness',
-                'AI regulation governance policy'
-            );
+            queries.push('artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance policy');
         }
-        
-        return queries.slice(0, 4); // Max 4 queries
+        return queries.slice(0, 4);
     },
 
-    /**
-     * Transform OpenAlex work to our format
-     */
     _transformWork(work) {
         const abstract = this._reconstructAbstract(work.abstract_inverted_index);
-        
-        // Get authors with structured names for proper citation
-        const authors = (work.authorships || [])
-            .slice(0, 5)
-            .map(a => {
-                const name = a.author?.display_name || '';
-                const parts = name.split(' ');
-                if (parts.length >= 2) {
-                    return {
-                        given: parts.slice(0, -1).join(' '),
-                        family: parts[parts.length - 1]
-                    };
-                }
-                return { given: '', family: name };
-            })
-            .filter(a => a.family);
+        const authors = (work.authorships || []).slice(0, 5).map(a => {
+            const name = a.author?.display_name || '';
+            const parts = name.split(' ');
+            if (parts.length >= 2) return { given: parts.slice(0, -1).join(' '), family: parts[parts.length - 1] };
+            return { given: '', family: name };
+        }).filter(a => a.family);
 
-        // Format display author
         let displayAuthor = 'Unknown';
         if (authors.length > 0) {
-            displayAuthor = authors.length > 2 
-                ? `${authors[0].family} et al.`
-                : authors.map(a => a.family).join(' & ');
+            displayAuthor = authors.length > 2 ? `${authors[0].family} et al.` : authors.map(a => a.family).join(' & ');
         }
 
-        const venue = work.primary_location?.source?.display_name ||
-                     work.host_venue?.display_name ||
-                     '';
-
+        const venue = work.primary_location?.source?.display_name || work.host_venue?.display_name || '';
         const doi = work.doi ? work.doi.replace('https://doi.org/', '') : null;
 
         return {
-            id: work.id,
-            title: work.title || 'Untitled',
-            authors: authors,
-            author: displayAuthor,
-            displayName: displayAuthor,
+            id: work.id, title: work.title || 'Untitled',
+            authors, author: displayAuthor, displayName: displayAuthor,
             year: work.publication_year || 'n.d.',
-            venue: venue,
-            citationCount: work.cited_by_count || 0,
+            venue, citationCount: work.cited_by_count || 0,
             url: doi ? `https://doi.org/${doi}` : work.id,
-            doi: doi,
-            abstract: abstract,
-            text: abstract
+            doi, abstract, text: abstract
         };
     },
 
-    /**
-     * Reconstruct abstract from inverted index
-     */
     _reconstructAbstract(invertedIndex) {
         if (!invertedIndex || typeof invertedIndex !== 'object') return null;
         try {
@@ -331,9 +257,7 @@ export const SourceFinderAPI = {
                 for (const pos of positions) words[pos] = word;
             }
             return words.filter(Boolean).join(' ');
-        } catch (e) {
-            return null;
-        }
+        } catch (e) { return null; }
     }
 };
 
@@ -342,12 +266,9 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.status(200).end();
-
     try {
         const query = req.query.q;
         if (!query) return res.status(400).json({ success: false, error: 'Missing ?q=' });
-
-        // Use topic search for better results
         const results = await SourceFinderAPI.searchTopic(query, 12);
         return res.status(200).json({ success: true, count: results.length, results });
     } catch (err) {
