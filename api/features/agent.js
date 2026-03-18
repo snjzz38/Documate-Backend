@@ -47,9 +47,10 @@ const buildBibliographyHTML = (sources, style, type) => {
         if (!html || !doi) return html || '';
         const doiUrl = `https://doi.org/${doi}`;
         const escaped = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Match the URL, capture any trailing period OUTSIDE the link
         return html.replace(
-            new RegExp(`${escaped}(\\.?)\\s*$`),
-            `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>$1`
+            new RegExp(`${escaped}(\\.?\\s*)$`),
+            `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">${doiUrl}</a>$1`
         );
     };
 
