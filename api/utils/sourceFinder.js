@@ -25,27 +25,33 @@ export const SourceFinderAPI = {
      */
     async fetchCitation(doi, style = 'apa7') {
         if (!doi) return null;
-        
         const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, '').trim();
         if (!cleanDoi) return null;
-        
         const cslStyle = CSL_STYLES[style.toLowerCase()] || 'apa';
-        
+    
         try {
-            const response = await fetch(`https://doi.org/${cleanDoi}`, {
-                headers: { 'Accept': `text/x-bibliography; style=${cslStyle}` },
-                redirect: 'follow'
+            // Use Crossref REST API directly — avoids doi.org redirect issues
+            const url = `https://api.crossref.org/works/${encodeURIComponent(cleanDoi)}/transform/text/x-bibliography?style=${cslStyle}`;
+            console.log('[CrossRef] Fetching:', url);
+            
+            const response = await fetch(url, {
+                headers: {
+                    'Accept': 'text/x-bibliography',
+                    'User-Agent': 'DocuMate Academic Tool (mailto:contact@documate.app)'
+                }
             });
-            
+    
             if (!response.ok) {
-            console.log('[CrossRef FAILED]', cleanDoi, response.status);
-            return null;
-        }
-            
+                console.log(`[CrossRef FAILED] ${cleanDoi} → ${response.status}`);
+                return null;
+            }
+    
             const citation = await response.text();
-            return citation.trim();
+            const trimmed = citation.trim();
+            console.log(`[CrossRef OK] ${cleanDoi} → ${trimmed.substring(0, 80)}...`);
+            return trimmed || null;
         } catch (e) {
-            console.log(`[SourceFinder] Citation fetch failed for ${cleanDoi}:`, e.message);
+            console.log(`[CrossRef ERROR] ${cleanDoi}:`, e.message);
             return null;
         }
     },
