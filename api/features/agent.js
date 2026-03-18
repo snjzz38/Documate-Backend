@@ -41,17 +41,36 @@ const buildBibliographyHTML = (sources, style, type) => {
             return ka.localeCompare(kb);
         });
 
-    // Replace trailing DOI URL with a clickable link
-    // Citations now contain HTML so we match the URL as plain text at the end
-    const linkifyDoi = (html, doi) => {
-        if (!html || !doi) return html || '';
-        const doiUrl = `https://doi.org/${doi}`;
-        const escaped = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Match the URL, capture any trailing period OUTSIDE the link
-        return html.replace(
-            new RegExp(`${escaped}(\\.?\\s*)$`),
-            `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">${doiUrl}</a>$1`
-        );
+    // Takes a plain-text citation and renders it as HTML:
+    // - italicises the journal name
+    // - makes only the DOI URL a clickable link
+    const renderAsHTML = (plainCitation, source) => {
+        if (!plainCitation) return '';
+
+        const doiUrl = source.doi ? `https://doi.org/${source.doi}` : '';
+        const journal = source.venue || '';
+
+        let html = plainCitation;
+
+        // 1. Italicise journal name (exact match, plain text)
+        if (journal) {
+            const escapedJournal = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            html = html.replace(
+                new RegExp(`(${escapedJournal})`),
+                `<i>$1</i>`
+            );
+        }
+
+        // 2. Replace DOI URL with clickable link (plain text → anchor)
+        if (doiUrl) {
+            const escapedUrl = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            html = html.replace(
+                new RegExp(`${escapedUrl}(\\.?)\\s*$`),
+                `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">${doiUrl}</a>$1`
+            );
+        }
+
+        return html;
     };
 
     const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000; background: #fff; padding: 20px;`;
@@ -63,16 +82,14 @@ const buildBibliographyHTML = (sources, style, type) => {
     let plain = `${title}\n\n`;
 
     sorted.forEach((s, i) => {
-        const citationHtml = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
-        const linked = linkifyDoi(citationHtml, s.doi);
-        // Plain text version strips HTML tags
-        const citationPlain = citationHtml.replace(/<[^>]+>/g, '').replace(/&ldquo;/g, '"').replace(/&rdquo;/g, '"');
+        const citationPlain = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
+        const citationHtml = renderAsHTML(citationPlain, s);
 
         if (type === 'footnotes') {
-            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${linked}</p>`;
+            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${citationHtml}</p>`;
             plain += `${i+1}. ${citationPlain}\n\n`;
         } else {
-            html += `<p style="${entryStyle}">${linked}</p>`;
+            html += `<p style="${entryStyle}">${citationHtml}</p>`;
             plain += `${citationPlain}\n\n`;
         }
     });
