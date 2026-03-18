@@ -40,15 +40,23 @@ const buildBibliographyHTML = (sources, style, type) => {
             return ka.localeCompare(kb);
         });
 
-    // Only linkify the DOI/URL at the end — not the whole citation
-    const linkifyTrailingUrl = (text) => {
-        if (!text) return '';
-        // Match only a URL that appears at the very end of the string (after whitespace)
-        return text.replace(
-            /(\s)(https?:\/\/\S+)(\s*\.?\s*)$/,
-            (_, space, url, trail) =>
-                `${space}<a href="${url}" target="_blank" style="color:#000; text-decoration:underline;">${url}</a>${trail}`
-        );
+    // Render citation as plain text but make ONLY the final DOI/URL clickable
+    const renderCitation = (citationText, doiUrl) => {
+        if (!citationText) return '';
+        // Escape HTML entities in the raw citation text
+        const escaped = citationText
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        // Replace only the DOI URL at the end with a clickable link
+        if (doiUrl) {
+            const escapedUrl = doiUrl.replace(/&/g, '&amp;');
+            return escaped.replace(
+                new RegExp(escapedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$'),
+                `<a href="${escapedUrl}" target="_blank" style="color:#000; text-decoration:underline;">${escapedUrl}</a>`
+            );
+        }
+        return escaped;
     };
 
     let html = `<div class="bibliography" style="${bibStyle}">`;
@@ -56,15 +64,14 @@ const buildBibliographyHTML = (sources, style, type) => {
     let plain = `${title}\n\n`;
 
     sorted.forEach((s, i) => {
-        const url = s.doi ? `https://doi.org/${s.doi}` : s.url || '';
+        const doiUrl = s.doi ? `https://doi.org/${s.doi}` : s.url || '';
 
         if (type === 'footnotes') {
-            const base = s.citation || `${fmtAuthor(s, 'mla')}, "${s.title}," ${s.year || 'n.d.'}. ${url}`;
-            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${linkifyTrailingUrl(base)}</p>`;
+            const base = s.citation || `${fmtAuthor(s, 'mla')}, "${s.title}," ${s.year || 'n.d.'}. ${doiUrl}`;
+            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${renderCitation(base, doiUrl)}</p>`;
             plain += `${i+1}. ${base}\n\n`;
         } else if (s.citation) {
-            // Crossref citation — only linkify the trailing URL
-            html += `<p style="${entryStyle}">${linkifyTrailingUrl(s.citation)}</p>`;
+            html += `<p style="${entryStyle}">${renderCitation(s.citation, doiUrl)}</p>`;
             plain += `${s.citation}\n\n`;
         } else {
             // Fallback manual format
@@ -72,13 +79,15 @@ const buildBibliographyHTML = (sources, style, type) => {
             const t = s.title || 'Untitled';
             const v = s.venue || 'Journal';
             const y = s.year || 'n.d.';
-            const link = url ? `<a href="${url}" target="_blank" style="color:#000; text-decoration:underline;">${url}</a>` : '';
+            const link = doiUrl
+                ? `<a href="${doiUrl}" target="_blank" style="color:#000; text-decoration:underline;">${doiUrl}</a>`
+                : '';
             const fmtH = isApa
                 ? `${a} (${y}). ${t}. <i>${v}</i>. ${link}`
-                : `${a}. "${t}." <i>${v}</i>, ${y}, ${link}.`;
+                : `${a}. &ldquo;${t}.&rdquo; <i>${v}</i>, ${y}, ${link}.`;
             const fmtP = isApa
-                ? `${a} (${y}). ${t}. ${v}. ${url}`
-                : `${a}. "${t}." ${v}, ${y}, ${url}.`;
+                ? `${a} (${y}). ${t}. ${v}. ${doiUrl}`
+                : `${a}. "${t}." ${v}, ${y}, ${doiUrl}.`;
             html += `<p style="${entryStyle}">${fmtH}</p>`;
             plain += `${fmtP}\n\n`;
         }
@@ -87,7 +96,6 @@ const buildBibliographyHTML = (sources, style, type) => {
     html += `</div>`;
     return { html, plain };
 };
-
 // Build formatted essay HTML on the backend
 const buildEssayHTML = text => {
     if (!text) return '<i>No output.</i>';
@@ -127,25 +135,29 @@ export default async function handler(req, res) {
 
             switch (step.tool.toUpperCase()) {
 
-                case 'RESEARCH': {
-                    const topic = extractTopic(context.task || '');
-                    const style = options.citationStyle || 'apa7';
-                    const papers = await SourceFinderAPI.searchTopic(topic, 12, style);
-                    if (!papers?.length) { result.output = { text: '', sources: [] }; result.type = 'research'; break; }
-
-                    const sources = papers.map((p, i) => ({
-                        id: i + 1,
-                        title: p.title, url: p.url, doi: p.doi,
-                        venue: p.venue, author: p.author, authors: p.authors || [],
-                        year: p.year, displayName: p.author || p.displayName,
-                        text: p.abstract, citation: p.citation,
-                        citationSource: p.citationSource
-                    }));
-
-                    result.output = { sources };
-                    result.type = 'research';
-                    break;
-                }
+            case 'RESEARCH': {
+                const topic = extractTopic(context.task || '');
+                const style = options.citationStyle || 'apa7';
+                const papers = await SourceFinderAPI.searchTopic(topic, 12, style);
+                if (!papers?.length) { result.output = { sources: [] }; result.type = 'research'; break; }
+            
+                const sources = papers.map((p, i) => ({
+                    id: i + 1,
+                    title: p.title, url: p.url, doi: p.doi,
+                    venue: p.venue, author: p.author, authors: p.authors || [],
+                    year: p.year, displayName: p.author || p.displayName,
+                    text: p.abstract,
+                    citation: p.citation || null,           // preserve Crossref citation
+                    citationSource: p.citationSource || null // preserve source flag
+                }));
+            
+                const crossrefCount = sources.filter(s => s.citationSource === 'crossref').length;
+                console.log(`[Agent] RESEARCH: ${crossrefCount}/${sources.length} Crossref citations fetched`);
+            
+                result.output = { sources };
+                result.type = 'research';
+                break;
+            }
 
                 case 'WRITE': {
                     const { researchSources = [], task: userTask, uploadedFile, uploadedFiles = [] } = context;
