@@ -134,6 +134,60 @@ export const SourceFinderAPI = {
     },
 
     /**
+     * Fetch a real formatted citation for a DOI using content negotiation
+     * @param {string} doi - e.g. "10.1038/s41586-020-2649-2"
+     * @param {string} style - 'apa7', 'mla9', 'chicago', etc.
+     * @returns {string} formatted citation text
+     */
+    async getCitation(doi, style = 'apa7') {
+        if (!doi) return null;
+        
+        // Map our style names to CSL style names
+        const styleMap = {
+            'apa7': 'apa',
+            'apa':  'apa',
+            'mla9': 'modern-language-association',
+            'mla':  'modern-language-association',
+            'chicago': 'chicago-author-date',
+            'ieee': 'ieee',
+            'harvard': 'harvard-cite-them-right'
+        };
+        
+        const cslStyle = styleMap[style.toLowerCase()] || 'apa';
+        const cleanDoi = doi.replace('https://doi.org/', '').trim();
+        
+        try {
+            const res = await fetch(`https://doi.org/${cleanDoi}`, {
+                headers: { 'Accept': `text/x-bibliography; style=${cslStyle}` }
+            });
+            if (!res.ok) throw new Error(`DOI lookup failed: ${res.status}`);
+            const text = await res.text();
+            return text.trim();
+        } catch (e) {
+            console.error('[SourceFinder] getCitation failed for', doi, e.message);
+            return null;
+        }
+    },
+    
+    /**
+     * Fetch citations for multiple sources in parallel
+     * @param {Array} sources - array of source objects with .doi
+     * @param {string} style - citation style
+     * @returns {Map} doi -> citation string
+     */
+    async getCitations(sources, style = 'apa7') {
+        const withDoi = sources.filter(s => s.doi);
+        const results = await Promise.all(
+            withDoi.map(async s => {
+                const citation = await this.getCitation(s.doi, style);
+                return [s.doi, citation];
+            })
+        );
+        return new Map(results.filter(([, c]) => c !== null));
+    },
+
+    
+    /**
      * Transform OpenAlex work to our format
      */
     _transformWork(work) {
