@@ -22,15 +22,6 @@ const fmtAuthor = (s, style = 'apa') => {
     return s.author || s.displayName || 'Unknown';
 };
 
-const buildEssayHTML = text => {
-    if (!text) return '<i>No output.</i>';
-    return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
-        text.split(/\n\n+/).map(p =>
-            `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>`
-        ).join('\n') +
-        `</div>`;
-};
-
 const renderEntry = (plainCitation, source) => {
     if (!plainCitation) return '';
     const journal = source.venue || '';
