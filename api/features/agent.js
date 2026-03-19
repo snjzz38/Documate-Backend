@@ -38,7 +38,7 @@ const renderEntry = (plainCitation, source) => {
     // 2. Mark DOI URL for linking before escaping
     if (doiUrl) {
         const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
+        text = text.replace(new RegExp(eu), doiUrl);
     }
 
     // 3. Escape HTML
@@ -51,8 +51,8 @@ const renderEntry = (plainCitation, source) => {
     text = text
         .replace(/\x00I\x00/g, '<i>')
         .replace(/\x00\/I\x00/g, '</i>')
-        .replace(/\x00A\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8 !important; text-decoration:none;">`)
-        .replace(/\x00\/A\x00/g, '</a>');
+        .replace(/\x00A\x00/g, '')
+        .replace(/\x00\/A\x00/g, '');
 
     return text;
 };
