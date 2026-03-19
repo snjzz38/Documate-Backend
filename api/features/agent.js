@@ -31,57 +31,48 @@ const buildEssayHTML = text => {
         `</div>`;
 };
 
-const buildBibliographyHTML = (sources, style, type) => {
+const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
     if (!sources?.length) return { html: '', plain: '' };
 
     const isApa = style.includes('apa');
     const isMla = style.includes('mla');
     const title = type === 'footnotes' ? 'Notes' : isMla ? 'Works Cited' : isApa ? 'References' : 'Bibliography';
 
+    // For footnotes: use insertion order if provided, otherwise keep source order
+    // For bibliography: sort alphabetically
     const sorted = type === 'footnotes'
-        ? sources
+        ? (insertionOrder || sources)
         : [...sources].sort((a, b) => {
             const ka = (a.authors?.[0]?.family || a.author || 'zzz').toLowerCase();
             const kb = (b.authors?.[0]?.family || b.author || 'zzz').toLowerCase();
             return ka.localeCompare(kb);
         });
 
-    // Render plain-text citation as HTML: italicise journal, linkify DOI
-    const renderEntry = (plainCitation, source) => {
-        if (!plainCitation) return '';
-        const doiUrl = source.doi ? `https://doi.org/${source.doi}` : '';
-        const journal = source.venue || '';
-    
-        let text = plainCitation;
-    
-        // 1. Replace journal name with placeholder BEFORE escaping
-        if (journal) {
-            const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
+    const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000; background: #fff; padding: 20px;`;
+    const titleStyle = `text-align: center; margin-bottom: 24px; font-weight: normal; font-family: 'Times New Roman', Times, serif; font-size: 12pt;`;
+    const entryStyle = `text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2; font-family: 'Times New Roman', Times, serif; font-size: 12pt; color: #000;`;
+
+    let html = `<div class="bibliography" style="${wrapStyle}">`;
+    html += `<p style="${titleStyle}">${title}</p>`;
+    let plain = `${title}\n\n`;
+
+    sorted.forEach((s, i) => {
+        const citationPlain = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
+        const citationHtml = renderEntry(citationPlain, s);
+        const num = i + 1;
+
+        if (type === 'footnotes') {
+            html += `<p style="${entryStyle}">${num}. ${citationHtml}</p>`;
+            plain += `${num}. ${citationPlain}\n\n`;
+        } else {
+            html += `<p style="${entryStyle}">${citationHtml}</p>`;
+            plain += `${citationPlain}\n\n`;
         }
-    
-        // 2. Replace DOI URL with placeholder BEFORE escaping
-        // Match the URL anywhere it appears (not just at end) to be safe
-        if (doiUrl) {
-            const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
-        }
-    
-        // 3. Escape HTML
-        text = text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    
-        // 4. Restore placeholders — these are safe because we placed them before escaping
-        text = text
-            .replace(/\x00I\x00/g, '<i>')
-            .replace(/\x00\/I\x00/g, '</i>')
-            .replace(/\x00A\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8; text-decoration:none;">`)
-            .replace(/\x00\/A\x00/g, '</a>');
-    
-        return text;
-    };
+    });
+
+    html += `</div>`;
+    return { html, plain };
+};
 
     const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000 !important; background: #fff; padding: 20px;`;
     const titleStyle = `text-align: center; margin-bottom: 24px; font-weight: normal; font-family: 'Times New Roman', Times, serif; font-size: 12pt;`;
@@ -229,7 +220,7 @@ Write the essay now:`;
                     break;
                 }
 
-               case 'CITE': {
+              case 'CITE': {
                 const input = context.previousOutput || '';
                 const sources = context.researchSources || [];
                 const style = options.citationStyle || 'apa7';
@@ -289,7 +280,7 @@ Write the essay now:`;
                     else if (isMla) citationFormat = `MLA 9th: (Author) - no year`;
                     else citationFormat = `Chicago: (Author Year)`;
                 } else if (type === 'footnotes') {
-                    citationFormat = `Superscript numbers¹ ² ³ at end of cited sentences.`;
+                    citationFormat = `Use superscript numbers at end of cited sentences. Each citation occurrence gets its OWN unique sequential number even if the same source is cited again. Number every citation sequentially from 1 upward — so if source [3] appears 3 times it gets three different numbers like ³ ⁷ ¹¹.`;
                 }
             
                 const prompt = `Add scholarly citations to this essay with strong signposting.
@@ -313,11 +304,50 @@ Write the essay now:`;
             Return ONLY the essay with citations inserted:`;
             
                 const citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
-                const bib = buildBibliographyHTML(sources, style, type);
             
-                result.output = citedText;
-                result.outputHtml = buildEssayHTML(citedText);
+                // For footnotes: extract insertion order and rebuild sequential numbering
+                let insertionOrder = null;
+                let finalText = citedText;
+            
+                if (type === 'footnotes') {
+                    const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
+                    const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
+            
+                    // Find all superscript occurrences in order of appearance
+                    const superMatches = [...citedText.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+            
+                    // Build ordered list of footnotes — each occurrence is a new entry
+                    const footnoteEntries = []; // { sourceIndex, superscript }
+                    superMatches.forEach(m => {
+                        const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
+                        if (!isNaN(num) && num > 0 && sources[num - 1]) {
+                            footnoteEntries.push({ source: sources[num - 1], oldSuper: m[0] });
+                        }
+                    });
+            
+                    // Rewrite text with sequential numbers
+                    let rewritten = citedText;
+                    let counter = 1;
+                    superMatches.forEach(m => {
+                        const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
+                        if (!isNaN(num) && num > 0 && sources[num - 1]) {
+                            // Replace first occurrence of this superscript
+                            rewritten = rewritten.replace(m[0], `\x00${toSuper(counter)}\x00`);
+                            counter++;
+                        }
+                    });
+                    rewritten = rewritten.replace(/\x00/g, '');
+                    finalText = rewritten;
+            
+                    // Build insertionOrder as ordered list of sources per footnote number
+                    insertionOrder = footnoteEntries.map(e => e.source);
+                }
+            
+                result.output = finalText;
+                result.outputHtml = buildEssayHTML(finalText);
                 result.citedSources = sources;
+            
+                const bib = buildBibliographyHTML(sources, style, type, insertionOrder);
                 result.bibliographyHtml = bib.html;
                 result.bibliographyPlain = bib.plain;
                 result.type = 'cited';
