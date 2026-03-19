@@ -86,10 +86,10 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
         const num = i + 1;
     
         if (type === 'footnotes') {
-            html += `<p style="${entryStyle}"><span style="color:#000;">${num}. ${citationHtml}</span></p>`;
+            html += `<p style="${entryStyle}">${num}. ${citationHtml}</p>`;
             plain += `${num}. ${citationPlain}\n\n`;
         } else {
-            html += `<p style="${entryStyle}"><span style="color:#000;">${citationHtml}</span></p>`;
+            html += `<p style="${entryStyle}">${citationHtml}</p>`;
             plain += `${citationPlain}\n\n`;
         }
     });
