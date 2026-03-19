@@ -54,46 +54,24 @@ const renderEntry = (plainCitation, source) => {
     return text;
 };
 
-const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
-    if (!sources?.length) return { html: '', plain: '' };
-
-    const isApa = style.includes('apa');
-    const isMla = style.includes('mla');
-    const title = type === 'footnotes' ? 'Notes' : isMla ? 'Works Cited' : isApa ? 'References' : 'Bibliography';
-
-    // For footnotes: use insertion order if provided, otherwise keep source order
-    // For bibliography: sort alphabetically
-    const sorted = type === 'footnotes'
-        ? (insertionOrder || sources)
-        : [...sources].sort((a, b) => {
-            const ka = (a.authors?.[0]?.family || a.author || 'zzz').toLowerCase();
-            const kb = (b.authors?.[0]?.family || b.author || 'zzz').toLowerCase();
-            return ka.localeCompare(kb);
-        });
-
-    const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000 !important; background: #fff; padding: 20px;`;
-    const titleStyle = `text-align: center; margin-bottom: 24px; font-weight: normal; font-family: 'Times New Roman', Times, serif; font-size: 12pt;`;
-    const entryStyle = `text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2; font-family: 'Times New Roman', Times, serif; font-size: 12pt; color: #000 !important;`;
-
-    let html = `<div class="bibliography" style="${wrapStyle}">`;
-    html += `<p style="${titleStyle}">${title}</p>`;
-    let plain = `${title}\n\n`;
-
-    sorted.forEach((s, i) => {
-        const citationPlain = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
-        const citationHtml = renderEntry(citationPlain, s);
-
-        if (type === 'footnotes') {
-            html += `<p style="${entryStyle}"><sup>${i+1}</sup> ${citationHtml}</p>`;
-            plain += `${i+1}. ${citationPlain}\n\n`;
-        } else {
-            html += `<p style="${entryStyle}">${citationHtml}</p>`;
-            plain += `${citationPlain}\n\n`;
-        }
-    });
-
-    html += `</div>`;
-    return { html, plain };
+const buildEssayHTML = text => {
+    if (!text) return '<i>No output.</i>';
+    // Check if text already contains HTML tags (e.g. <sup> from citations)
+    const hasHtml = /<[a-z][\s\S]*>/i.test(text);
+    if (hasHtml) {
+        // Already has HTML — just wrap in paragraphs without escaping
+        return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
+            text.split(/\n\n+/).map(p =>
+                `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/\n/g, '<br>')}</p>`
+            ).join('\n') +
+            `</div>`;
+    }
+    // Plain text — safe to escape
+    return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
+        text.split(/\n\n+/).map(p =>
+            `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>`
+        ).join('\n') +
+        `</div>`;
 };
 
 export default async function handler(req, res) {
@@ -309,35 +287,44 @@ Write the essay now:`;
                 if (type === 'footnotes') {
                     const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
                     const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-            
-                    // Find all superscript occurrences in order of appearance
-                    const superMatches = [...citedText.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
-            
-                    // Build ordered list of footnotes — each occurrence is a new entry
-                    const footnoteEntries = []; // { sourceIndex, superscript }
+                
+                    // Match BOTH <sup>N</sup> HTML format AND unicode superscripts
+                    const htmlSupRegex = /<sup>(\d+)<\/sup>/gi;
+                    const uniSupRegex = /[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g;
+                
+                    // Normalize: convert all <sup>N</sup> to unicode superscripts first
+                    let normalized = citedText.replace(htmlSupRegex, (_, n) => toSuper(parseInt(n)));
+                
+                    // Now find all unicode superscripts in order
+                    const superMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+                
+                    const footnoteEntries = [];
                     superMatches.forEach(m => {
                         const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
                         if (!isNaN(num) && num > 0 && sources[num - 1]) {
-                            footnoteEntries.push({ source: sources[num - 1], oldSuper: m[0] });
+                            footnoteEntries.push(sources[num - 1]);
                         }
                     });
-            
-                    // Rewrite text with sequential numbers
-                    let rewritten = citedText;
+                
+                    // Rewrite with sequential numbers
+                    let rewritten = normalized;
                     let counter = 1;
-                    superMatches.forEach(m => {
+                    // Replace each match individually using index-based approach
+                    const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+                    let offset = 0;
+                    allMatches.forEach(m => {
                         const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
                         if (!isNaN(num) && num > 0 && sources[num - 1]) {
-                            // Replace first occurrence of this superscript
-                            rewritten = rewritten.replace(m[0], `\x00${toSuper(counter)}\x00`);
+                            const newSuper = toSuper(counter);
+                            const pos = m.index + offset;
+                            rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
+                            offset += newSuper.length - m[0].length;
                             counter++;
                         }
                     });
-                    rewritten = rewritten.replace(/\x00/g, '');
+                
                     finalText = rewritten;
-            
-                    // Build insertionOrder as ordered list of sources per footnote number
-                    insertionOrder = footnoteEntries.map(e => e.source);
+                    insertionOrder = footnoteEntries;
                 }
             
                 result.output = finalText;
