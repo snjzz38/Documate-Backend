@@ -4,7 +4,13 @@ import { SourceFinderAPI } from '../utils/sourceFinder.js';
 import humanizerHandler from './humanizer.js';
 import graderHandler from './grader.js';
 
-const stripMarkdown = t => t.replace(/\*\*?([^*]+)\*\*?/g,'$1').replace(/__?([^_]+)__?/g,'$1').replace(/^#{1,6}\s*/gm,'').replace(/`([^`]+)`/g,'$1');
+const stripMarkdown = t => t
+    .replace(/\*\*?([^*]+)\*\*?/g, '$1')
+    .replace(/__(https?:\/\/[^_]+)__/g, '$1') 
+    .replace(/__?([^_\s][^_]*[^_\s])__?/g, '$1')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/`([^`]+)`/g, '$1');
+
 const stripRefs = t => t.replace(/\n\n\*?\*?(?:References|Works Cited|Bibliography)\*?\*?[\s\S]*$/i,'').trim();
 
 const extractTopic = text => {
@@ -384,43 +390,53 @@ export default async function handler(req, res) {
                 
                     const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
                 
-                    // Build map: first time we see each source, assign it a sequential note number
-                    // Same source cited multiple times = same note number
-                    const sourceToNoteNum = new Map(); // doi -> note number
-                    const noteOrder = []; // sources in order of first appearance
+                    // Parse a superscript match — handles both ¹⁰ (=10) and ¹² (could be 1+2)
+                    const parseSuper = (m) => {
+                        const chars = m.split('');
+                        const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
+                        if (num > 0 && num <= sources.length) return [num];
+                        // Number out of range — split into individual digits
+                        return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
+                    };
+                
+                    // Build note order — unique sources in first-appearance order
+                    const sourceToNoteNum = new Map();
+                    const noteOrder = [];
                     let noteCounter = 1;
                 
                     allMatches.forEach(m => {
-                        const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
-                        const sourceIdx = (num > 0 && num <= sources.length) ? num - 1 : (num - 1) % sources.length;
-                        const source = sources[sourceIdx];
-                        if (!source) return;
-                        const key = source.doi || source.title;
-                        if (!sourceToNoteNum.has(key)) {
-                            sourceToNoteNum.set(key, noteCounter++);
-                            noteOrder.push(source);
-                        }
+                        const nums = parseSuper(m[0]);
+                        nums.forEach(num => {
+                            const source = sources[num - 1];
+                            if (!source) return;
+                            const key = source.doi || source.title;
+                            if (!sourceToNoteNum.has(key)) {
+                                sourceToNoteNum.set(key, noteCounter++);
+                                noteOrder.push(source);
+                            }
+                        });
                     });
                 
                     // Rewrite superscripts to use consistent note numbers
                     let rewritten = normalized;
                     let offset = 0;
                     allMatches.forEach(m => {
-                        const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
-                        const sourceIdx = (num > 0 && num <= sources.length) ? num - 1 : (num - 1) % sources.length;
-                        const source = sources[sourceIdx];
-                        if (!source) return;
-                        const key = source.doi || source.title;
-                        const noteNum = sourceToNoteNum.get(key);
-                        if (!noteNum) return;
-                        const newSuper = toSuper(noteNum);
+                        const nums = parseSuper(m[0]);
+                        // Replace with new sequential superscripts joined together
+                        const newSuper = nums.map(num => {
+                            const source = sources[num - 1];
+                            if (!source) return '';
+                            const key = source.doi || source.title;
+                            return toSuper(sourceToNoteNum.get(key) || num);
+                        }).join('');
+                        if (!newSuper) return;
                         const pos = m.index + offset;
                         rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
                         offset += newSuper.length - m[0].length;
                     });
                 
                     finalText = rewritten;
-                    insertionOrder = noteOrder; // unique sources only, in first-appearance order
+                    insertionOrder = noteOrder;
                 }
             
                 result.output = finalText;
