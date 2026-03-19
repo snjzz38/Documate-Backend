@@ -29,24 +29,25 @@ const renderEntry = (plainCitation, source) => {
 
     let text = plainCitation;
 
-    // 1. Mark journal and DOI BEFORE escaping
+    // 1. Mark journal for italics before escaping
     if (journal) {
         const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
     }
 
+    // 2. Mark DOI URL — keep the URL text inside the placeholder
     if (doiUrl) {
         const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        text = text.replace(new RegExp(eu), '\x00A\x00\x00/A\x00');
+        text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
     }
 
-    // 2. Escape HTML
+    // 3. Escape HTML
     text = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
-    // 3. Restore — doiUrl is safe (no HTML chars) so inject directly
+    // 4. Restore tags
     text = text
         .replace(/\x00I\x00/g, '<i>')
         .replace(/\x00\/I\x00/g, '</i>')
