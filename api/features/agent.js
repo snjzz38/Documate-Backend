@@ -130,7 +130,10 @@ export default async function handler(req, res) {
 
         if (action === 'plan') {
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
-            if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Write essay' });
+            if (options.enableWrite !== false) {
+                steps.push({ tool: 'WRITE', action: 'Write essay' });
+                steps.push({ tool: 'REFINE', action: 'Strengthen argument' });
+            }
             if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
             if (options.enableCite) steps.push({ tool: 'CITE', action: `Add ${options.citationType || 'in-text'} citations` });
             if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Insert quotes with transitions' });
@@ -171,17 +174,18 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                case 'WRITE': {
+                  case 'WRITE': {
                     const { researchSources = [], task: userTask, uploadedFile, uploadedFiles = [] } = context;
+                
                     const sourceInfo = researchSources.slice(0, 10).map((s, i) =>
                         `SOURCE ${i+1}:\nTitle: "${s.title}"\nKey info: ${s.text?.substring(0, 500) || 'N/A'}`
                     ).join('\n\n');
-
+                
                     const allFiles = uploadedFiles.length > 0 ? uploadedFiles : (uploadedFile ? [uploadedFile] : []);
                     const imageFiles = allFiles.filter(f => f.type?.startsWith('image/'));
                     const pdfFiles = allFiles.filter(f => f.type === 'application/pdf');
                     const otherFiles = allFiles.filter(f => !f.type?.startsWith('image/') && f.type !== 'application/pdf');
-
+                
                     let pdfContext = '';
                     for (const pdf of pdfFiles) {
                         try {
@@ -189,27 +193,40 @@ export default async function handler(req, res) {
                             pdfContext += `\nUPLOADED DOCUMENT (${pdf.name}):\n${pdfText}\n`;
                         } catch (e) { console.error('[Agent] PDF extraction failed:', e.message); }
                     }
-
+                
                     const fileContext = otherFiles.length > 0
                         ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n` : '';
-
-                    const prompt = `Write a well-researched academic essay.
-TASK: ${userTask}
-${pdfContext}${fileContext}
-RESEARCH SOURCES:
-${sourceInfo}
-
-REQUIREMENTS:
-1. Write naturally WITHOUT any citations or author references
-2. Use research content in your own words
-3. Define acronyms on first use
-4. Structure: Introduction → Body paragraphs → Conclusion
-5. Plain text only - no markdown, no bold, no headers
-6. Do NOT include a bibliography
-${imageFiles.length > 0 ? '7. Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
-
-Write the essay now:`;
-
+                
+                    const prompt = `Write a high-level academic essay with a CLEAR ARGUMENT.
+                
+                TASK: ${userTask}
+                ${pdfContext}${fileContext}
+                RESEARCH SOURCES:
+                ${sourceInfo}
+                
+                THESIS:
+                - Must take a STRONG position (not neutral)
+                - Must include 2-3 clear reasons (e.g. safety, ethics, inequality)
+                
+                STRUCTURE:
+                - Introduction: context + clear argumentative thesis as the last sentence
+                - Body Paragraphs: each paragraph = ONE main argument with a strong topic sentence, research evidence, and explanation of WHY it matters
+                - Conclusion: reinforce the argument, do not just summarize
+                
+                STYLE:
+                - Be concise and direct — avoid filler phrases
+                - Avoid vague phrases like "this highlights" without explanation
+                - Formal academic tone throughout
+                
+                IMPORTANT:
+                - Do NOT include any citations or author references yet
+                - Do NOT include a bibliography
+                - Integrate ideas from sources meaningfully in your own words
+                - Plain text only - no markdown, no bold, no headers
+                ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
+                
+                Write the essay now:`;
+                
                     const rawText = imageFiles.length > 0
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
@@ -220,6 +237,33 @@ Write the essay now:`;
                     break;
                 }
 
+                case 'REFINE': {
+                    const input = context.previousOutput || '';
+                    if (!input) { result.output = ''; result.outputHtml = ''; break; }
+                
+                    const prompt = `Improve this academic essay's argument quality.
+                
+                ESSAY:
+                ${input}
+                
+                FOCUS:
+                1. Strengthen the thesis to be more specific and argumentative if it is vague or neutral
+                2. Ensure each body paragraph clearly supports the thesis with a strong topic sentence
+                3. Replace vague phrases like "this shows", "this highlights", "this underscores" with precise reasoning that explains the significance
+                4. Add stronger transitions between paragraphs
+                5. Ensure the conclusion reinforces the argument rather than just summarizing
+                6. Keep ALL original ideas and content — only improve clarity, logic, and argument strength
+                7. Plain text only - no markdown, no bold, no headers
+                
+                Return the improved essay:`;
+                
+                    const refined = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+                    result.output = refined;
+                    result.outputHtml = buildEssayHTML(refined);
+                    result.type = 'text';
+                    break;
+                }
+                    
                 case 'HUMANIZE': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
@@ -303,24 +347,26 @@ Write the essay now:`;
                 }
             
                 const prompt = `Add scholarly citations to this essay with strong signposting.
-            
-            ESSAY:
-            ${input}
-            
-            AVAILABLE SOURCES:
-            ${sourceList}
-            
-            CITATION FORMAT: ${citationFormat}
-            
-            INSTRUCTIONS:
-            1. Insert 10-15 citations with signposting phrases
-            2. Use varied phrases: "As X demonstrates,", "X argues that,", "According to X,"
-            3. Distribute citations across ALL paragraphs
-            4. Match citations to the most relevant sources
-            5. Do NOT add a bibliography section
-            6. Ensure format matches: ${citationFormat}
-            
-            Return ONLY the essay with citations inserted:`;
+                
+                ESSAY:
+                ${input}
+                
+                AVAILABLE SOURCES:
+                ${sourceList}
+                
+                CITATION FORMAT: ${citationFormat}
+                
+                INSTRUCTIONS:
+                1. Add citations ONLY where claims genuinely need evidence — do not force citations onto every sentence
+                2. Each citation must directly support the specific claim it follows
+                3. After each citation briefly explain its relevance if not already obvious — be specific, not generic
+                4. Avoid filler phrases like "this shows" or "this underscores" — explain the actual significance
+                5. Distribute citations naturally based on where evidence is needed, not evenly
+                6. Use varied signposting: "As X demonstrates,", "X argues that,", "According to X,"
+                7. Do NOT add a bibliography section
+                8. Ensure format matches: ${citationFormat}
+                
+                Return ONLY the essay with citations inserted:`;
             
                 const citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
             
