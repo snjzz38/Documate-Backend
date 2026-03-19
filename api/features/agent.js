@@ -31,6 +31,29 @@ const buildEssayHTML = text => {
         `</div>`;
 };
 
+const renderEntry = (plainCitation, source) => {
+    if (!plainCitation) return '';
+    const journal = source.venue || '';
+
+    let text = plainCitation;
+
+    if (journal) {
+        const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
+    }
+
+    text = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    text = text
+        .replace(/\x00I\x00/g, '<i>')
+        .replace(/\x00\/I\x00/g, '</i>');
+
+    return text;
+};
+
 const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
     if (!sources?.length) return { html: '', plain: '' };
 
@@ -47,32 +70,6 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
             const kb = (b.authors?.[0]?.family || b.author || 'zzz').toLowerCase();
             return ka.localeCompare(kb);
         });
-
-    const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000; background: #fff; padding: 20px;`;
-    const titleStyle = `text-align: center; margin-bottom: 24px; font-weight: normal; font-family: 'Times New Roman', Times, serif; font-size: 12pt;`;
-    const entryStyle = `text-indent: -36px; padding-left: 36px; margin: 0 0 24px 0; line-height: 2; font-family: 'Times New Roman', Times, serif; font-size: 12pt; color: #000;`;
-
-    let html = `<div class="bibliography" style="${wrapStyle}">`;
-    html += `<p style="${titleStyle}">${title}</p>`;
-    let plain = `${title}\n\n`;
-
-    sorted.forEach((s, i) => {
-        const citationPlain = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
-        const citationHtml = renderEntry(citationPlain, s);
-        const num = i + 1;
-
-        if (type === 'footnotes') {
-            html += `<p style="${entryStyle}">${num}. ${citationHtml}</p>`;
-            plain += `${num}. ${citationPlain}\n\n`;
-        } else {
-            html += `<p style="${entryStyle}">${citationHtml}</p>`;
-            plain += `${citationPlain}\n\n`;
-        }
-    });
-
-    html += `</div>`;
-    return { html, plain };
-};
 
     const wrapStyle = `font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000 !important; background: #fff; padding: 20px;`;
     const titleStyle = `text-align: center; margin-bottom: 24px; font-weight: normal; font-family: 'Times New Roman', Times, serif; font-size: 12pt;`;
