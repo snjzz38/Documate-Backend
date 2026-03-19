@@ -242,20 +242,21 @@ export default async function handler(req, res) {
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
                 
                     const prompt = `Improve this academic essay's argument quality.
-                
-                ESSAY:
-                ${input}
-                
-                FOCUS:
-                1. Strengthen the thesis to be more specific and argumentative if it is vague or neutral
-                2. Ensure each body paragraph clearly supports the thesis with a strong topic sentence
-                3. Replace vague phrases like "this shows", "this highlights", "this underscores" with precise reasoning that explains the significance
-                4. Add stronger transitions between paragraphs
-                5. Ensure the conclusion reinforces the argument rather than just summarizing
-                6. Keep ALL original ideas and content — only improve clarity, logic, and argument strength
-                7. Plain text only - no markdown, no bold, no headers
-                
-                Return the improved essay:`;
+                    
+                    ESSAY:
+                    ${input}
+                    
+                    FOCUS:
+                    1. Strengthen the thesis — it must take a CLEAR STRONG position, not just describe the issue
+                    2. Each body paragraph must develop ONE argument only — eliminate repetition across paragraphs
+                    3. Replace vague phrases like "this shows", "this highlights", "this underscores", "this demonstrates" with specific explanations of WHY the evidence matters to YOUR argument
+                    4. Every piece of evidence must be connected explicitly to the thesis
+                    5. Transitions between paragraphs must show logical progression, not just topic shifts
+                    6. Conclusion must synthesize the argument — not restate the introduction
+                    7. Keep ALL original content and ideas — only sharpen the logic and language
+                    8. Plain text only - no markdown, no bold, no headers
+                    
+                    Return the improved essay:`;
                 
                     const refined = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
                     result.output = refined;
@@ -357,12 +358,12 @@ export default async function handler(req, res) {
                 CITATION FORMAT: ${citationFormat}
                 
                 INSTRUCTIONS:
-                1. Add citations ONLY where claims genuinely need evidence — do not force citations onto every sentence
-                2. Each citation must directly support the specific claim it follows
-                3. After each citation briefly explain its relevance if not already obvious — be specific, not generic
-                4. Avoid filler phrases like "this shows" or "this underscores" — explain the actual significance
-                5. Distribute citations naturally based on where evidence is needed, not evenly
-                6. Use varied signposting: "As X demonstrates,", "X argues that,", "According to X,"
+                1. Add citations ONLY where claims genuinely need evidence
+                2. Each citation must directly support the SPECIFIC claim it follows — not just be topically related
+                3. After each citation, explain in ONE specific sentence HOW this source proves your point — avoid "this shows" or "this demonstrates" without explanation
+                4. Do NOT drop citations into sentences that already make the point clearly without them
+                5. Distribute citations naturally — frontload evidence in argumentative paragraphs
+                6. Use varied signposting: "As X argues,", "X's research confirms that,", "X found that,"
                 7. Do NOT add a bibliography section
                 8. Ensure format matches: ${citationFormat}
                 
@@ -378,45 +379,48 @@ export default async function handler(req, res) {
                     const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
                     const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
                 
-                    // Match BOTH <sup>N</sup> HTML format AND unicode superscripts
-                    const htmlSupRegex = /<sup>(\d+)<\/sup>/gi;
-                    const uniSupRegex = /[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g;
+                    // Normalize <sup>N</sup> to unicode
+                    let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
                 
-                    // Normalize: convert all <sup>N</sup> to unicode superscripts first
-                    let normalized = citedText.replace(htmlSupRegex, (_, n) => toSuper(parseInt(n)));
+                    const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
                 
-                    // Now find all unicode superscripts in order
-                    const superMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+                    // Build map: first time we see each source, assign it a sequential note number
+                    // Same source cited multiple times = same note number
+                    const sourceToNoteNum = new Map(); // doi -> note number
+                    const noteOrder = []; // sources in order of first appearance
+                    let noteCounter = 1;
                 
-                    const footnoteEntries = [];
-                    superMatches.forEach(m => {
+                    allMatches.forEach(m => {
                         const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
-                        // Use modulo to wrap around if AI generates numbers beyond source count
-                        const sourceIdx = num > 0 ? ((num - 1) % sources.length) : 0;
-                        if (!isNaN(num) && num > 0) {
-                            footnoteEntries.push(sources[sourceIdx]);
+                        const sourceIdx = (num > 0 && num <= sources.length) ? num - 1 : (num - 1) % sources.length;
+                        const source = sources[sourceIdx];
+                        if (!source) return;
+                        const key = source.doi || source.title;
+                        if (!sourceToNoteNum.has(key)) {
+                            sourceToNoteNum.set(key, noteCounter++);
+                            noteOrder.push(source);
                         }
                     });
                 
-                    // Rewrite with sequential numbers
+                    // Rewrite superscripts to use consistent note numbers
                     let rewritten = normalized;
-                    let counter = 1;
-                    // Replace each match individually using index-based approach
-                    const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
                     let offset = 0;
                     allMatches.forEach(m => {
                         const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
-                        if (!isNaN(num) && num > 0) {
-                            const newSuper = toSuper(counter);
-                            const pos = m.index + offset;
-                            rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
-                            offset += newSuper.length - m[0].length;
-                            counter++;
-                        }
+                        const sourceIdx = (num > 0 && num <= sources.length) ? num - 1 : (num - 1) % sources.length;
+                        const source = sources[sourceIdx];
+                        if (!source) return;
+                        const key = source.doi || source.title;
+                        const noteNum = sourceToNoteNum.get(key);
+                        if (!noteNum) return;
+                        const newSuper = toSuper(noteNum);
+                        const pos = m.index + offset;
+                        rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
+                        offset += newSuper.length - m[0].length;
                     });
                 
                     finalText = rewritten;
-                    insertionOrder = footnoteEntries;
+                    insertionOrder = noteOrder; // unique sources only, in first-appearance order
                 }
             
                 result.output = finalText;
