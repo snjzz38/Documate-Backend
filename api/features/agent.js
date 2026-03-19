@@ -25,22 +25,34 @@ const fmtAuthor = (s, style = 'apa') => {
 const renderEntry = (plainCitation, source) => {
     if (!plainCitation) return '';
     const journal = source.venue || '';
+    const doiUrl = source.doi ? `https://doi.org/${source.doi}` : '';
 
     let text = plainCitation;
 
+    // 1. Mark journal for italics before any escaping
     if (journal) {
         const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
     }
 
+    // 2. Mark DOI URL for linking before escaping
+    if (doiUrl) {
+        const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
+    }
+
+    // 3. Escape HTML
     text = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
+    // 4. Restore tags — link gets explicit black surrounding via parent p's color:#000
     text = text
         .replace(/\x00I\x00/g, '<i>')
-        .replace(/\x00\/I\x00/g, '</i>');
+        .replace(/\x00\/I\x00/g, '</i>')
+        .replace(/\x00A\x00/g, `<a href="${doiUrl}" target="_blank" style="color:#1a73e8 !important; text-decoration:none;">`)
+        .replace(/\x00\/A\x00/g, '</a>');
 
     return text;
 };
@@ -72,12 +84,12 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
         const citationPlain = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
         const citationHtml = renderEntry(citationPlain, s);
         const num = i + 1;
-
+    
         if (type === 'footnotes') {
-            html += `<p style="${entryStyle}">${num}. ${citationHtml}</p>`;
+            html += `<p style="${entryStyle}"><span style="color:#000;">${num}. ${citationHtml}</span></p>`;
             plain += `${num}. ${citationPlain}\n\n`;
         } else {
-            html += `<p style="${entryStyle}">${citationHtml}</p>`;
+            html += `<p style="${entryStyle}"><span style="color:#000;">${citationHtml}</span></p>`;
             plain += `${citationPlain}\n\n`;
         }
     });
@@ -333,8 +345,10 @@ Write the essay now:`;
                     const footnoteEntries = [];
                     superMatches.forEach(m => {
                         const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
-                        if (!isNaN(num) && num > 0 && sources[num - 1]) {
-                            footnoteEntries.push(sources[num - 1]);
+                        // Use modulo to wrap around if AI generates numbers beyond source count
+                        const sourceIdx = num > 0 ? ((num - 1) % sources.length) : 0;
+                        if (!isNaN(num) && num > 0) {
+                            footnoteEntries.push(sources[sourceIdx]);
                         }
                     });
                 
@@ -346,7 +360,7 @@ Write the essay now:`;
                     let offset = 0;
                     allMatches.forEach(m => {
                         const num = parseInt(m[0].split('').map(c => superToNum[c] ?? 0).join(''));
-                        if (!isNaN(num) && num > 0 && sources[num - 1]) {
+                        if (!isNaN(num) && num > 0) {
                             const newSuper = toSuper(counter);
                             const pos = m.index + offset;
                             rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
