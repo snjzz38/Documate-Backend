@@ -25,34 +25,22 @@ const fmtAuthor = (s, style = 'apa') => {
 const renderEntry = (plainCitation, source) => {
     if (!plainCitation) return '';
     const journal = source.venue || '';
-    const doiUrl = source.doi ? `https://doi.org/${source.doi}` : '';
 
     let text = plainCitation;
 
-    // 1. Mark journal for italics before any escaping
     if (journal) {
         const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
     }
 
-    // 2. Mark DOI URL for linking before escaping
-    if (doiUrl) {
-        const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        text = text.replace(new RegExp(eu), doiUrl);
-    }
-
-    // 3. Escape HTML
     text = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
-    // 4. Restore tags — link gets explicit black surrounding via parent p's color:#000
     text = text
         .replace(/\x00I\x00/g, '<i>')
-        .replace(/\x00\/I\x00/g, '</i>')
-        .replace(/\x00A\x00/g, '')
-        .replace(/\x00\/A\x00/g, '');
+        .replace(/\x00\/I\x00/g, '</i>');
 
     return text;
 };
