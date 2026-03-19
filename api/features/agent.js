@@ -382,58 +382,69 @@ export default async function handler(req, res) {
                 let finalText = citedText;
             
                if (type === 'footnotes') {
-                const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
-                const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-            
-                // Normalize <sup>N</sup> to unicode
-                let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
-            
-                // Find all superscript sequences in order of appearance
-                const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
-            
-                // Parse a superscript sequence into source indices
-                // ¹⁰ = source 10, ¹² = could be source 12 OR sources 1+2
-                const parseSuper = (str) => {
-                    const chars = str.split('');
-                    const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
-                    if (num > 0 && num <= sources.length) return [num];
-                    // Out of range — treat each char as separate citation
-                    return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
-                };
-            
-                // Build footnote list — every occurrence gets a NEW sequential number
-                // noteEntries[i] = source for footnote i+1
-                const noteEntries = [];
-                // Map from match index to new footnote numbers assigned
-                const matchToNewNums = new Map();
-            
-                allMatches.forEach((m, matchIdx) => {
-                    const sourceNums = parseSuper(m[0]);
-                    const newNums = sourceNums.map(sNum => {
-                        const source = sources[sNum - 1];
-                        if (!source) return null;
-                        noteEntries.push(source);
-                        return noteEntries.length; // new sequential number
-                    }).filter(Boolean);
-                    if (newNums.length > 0) matchToNewNums.set(matchIdx, newNums);
-                });
-            
-                // Rewrite text replacing each superscript with new sequential number(s)
-                let rewritten = normalized;
-                let offset = 0;
-                allMatches.forEach((m, matchIdx) => {
-                    const newNums = matchToNewNums.get(matchIdx);
-                    if (!newNums?.length) return;
-                    const newSuper = newNums.map(toSuper).join('');
-                    const pos = m.index + offset;
-                    rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
-                    offset += newSuper.length - m[0].length;
-                });
-            
-                finalText = rewritten;
-                insertionOrder = noteEntries; // one entry per footnote number, duplicates allowed
-            }
+                    const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
+                    const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
+                
+                    // Normalize <sup>N</sup> to unicode
+                    let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
+                
+                    // Find all superscript sequences in order of appearance
+                    const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+                
+                    // Parse a superscript sequence into source indices
+                    // ¹⁰ = source 10, ¹² = could be source 12 OR sources 1+2
+                    const parseSuper = (str) => {
+                        const chars = str.split('');
+                        const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
+                        if (num > 0 && num <= sources.length) return [num];
+                        // Out of range — treat each char as separate citation
+                        return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
+                    };
+                
+                    // Build footnote list — every occurrence gets a NEW sequential number
+                    // noteEntries[i] = source for footnote i+1
+                    const noteEntries = [];
+                    // Map from match index to new footnote numbers assigned
+                    const matchToNewNums = new Map();
+                
+                    allMatches.forEach((m, matchIdx) => {
+                        const sourceNums = parseSuper(m[0]);
+                        const newNums = sourceNums.map(sNum => {
+                            const source = sources[sNum - 1];
+                            if (!source) return null;
+                            noteEntries.push(source);
+                            return noteEntries.length; // new sequential number
+                        }).filter(Boolean);
+                        if (newNums.length > 0) matchToNewNums.set(matchIdx, newNums);
+                    });
+                
+                    // Rewrite text replacing each superscript with new sequential number(s)
+                    let rewritten = normalized;
+                    let offset = 0;
+                    allMatches.forEach((m, matchIdx) => {
+                        const newNums = matchToNewNums.get(matchIdx);
+                        if (!newNums?.length) return;
+                        const newSuper = newNums.map(toSuper).join('');
+                        const pos = m.index + offset;
+                        rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
+                        offset += newSuper.length - m[0].length;
+                    });
+                
+                    finalText = rewritten;
+                    insertionOrder = noteEntries; // one entry per footnote number, duplicates allowed
+                }
 
+                result.output = finalText;
+                result.outputHtml = buildEssayHTML(finalText);
+                result.citedSources = sources;
+    
+                const bib = buildBibliographyHTML(sources, style, type, insertionOrder);
+                result.bibliographyHtml = bib.html;
+                result.bibliographyPlain = bib.plain;
+                result.type = 'cited';
+                break;
+            }
+                  
                 case 'QUOTES': {
                     const input = context.previousOutput || '';
                     const sources = context.researchSources || [];
