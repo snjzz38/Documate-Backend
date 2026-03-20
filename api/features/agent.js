@@ -229,6 +229,9 @@ export default async function handler(req, res) {
                     - Do NOT include a bibliography
                     - Use ideas from the research but express them entirely in your own words as if they are your own knowledge
                     - Plain text only - no markdown, no bold, no headers
+                    - Define ALL acronyms on first use: e.g. "Carbon Capture and Storage (CCS)"
+                    - Never use an acronym without first spelling it out in full
+                    
                     ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
                     
                     Write the essay now:`;
@@ -511,14 +514,17 @@ Return the essay with quotes inserted:`;
                 case 'PROOFREAD': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
-
-                    const prompt = `Proofread and polish this academic essay. Fix grammar, spelling, punctuation. Improve awkward phrasing. Keep ALL existing content, citations, and quotes. Plain text only - no markdown.\n\nESSAY:\n${input}\n\nReturn the polished essay:`;
-                    const polished = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
-                    result.output = polished;
-                    result.outputHtml = buildEssayHTML(polished);
-                    result.type = 'text';
-                    break;
-                }
+                
+                    // Light proofread only — don't rewrite, just fix errors
+                    const prompt = `Lightly proofread this text. Fix only clear grammar errors, typos, and punctuation mistakes. 
+                DO NOT rewrite sentences. DO NOT change word choice. DO NOT improve style.
+                Keep ALL citations, superscripts, and author references exactly as they are.
+                Plain text only - no markdown.
+                
+                TEXT:
+                ${input}
+                
+                Return the text with only error corrections:`;
 
                 case 'GRADE': {
                     const text = context.previousOutput || '';
