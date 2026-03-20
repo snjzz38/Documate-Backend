@@ -229,9 +229,6 @@ export default async function handler(req, res) {
                     - Do NOT include a bibliography
                     - Use ideas from the research but express them entirely in your own words as if they are your own knowledge
                     - Plain text only - no markdown, no bold, no headers
-                    - Define ALL acronyms on first use: e.g. "Carbon Capture and Storage (CCS)"
-                    - Never use an acronym without first spelling it out in full
-                    
                     ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
                     
                     Write the essay now:`;
@@ -514,37 +511,49 @@ Return the essay with quotes inserted:`;
                 case 'PROOFREAD': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
-                
-                    // Light proofread only — don't rewrite, just fix errors
-                    const prompt = `Lightly proofread this text. Fix only clear grammar errors, typos, and punctuation mistakes. 
-                DO NOT rewrite sentences. DO NOT change word choice. DO NOT improve style.
-                Keep ALL citations, superscripts, and author references exactly as they are.
-                Plain text only - no markdown.
-                
-                TEXT:
-                ${input}
-                
-                Return the text with only error corrections:`;
+
+                    const prompt = `Proofread and polish this academic essay. Fix grammar, spelling, punctuation. Improve awkward phrasing. Keep ALL existing content, citations, and quotes. Plain text only - no markdown.\n\nESSAY:\n${input}\n\nReturn the polished essay:`;
+                    const polished = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+                    result.output = polished;
+                    result.outputHtml = buildEssayHTML(polished);
+                    result.type = 'text';
+                    break;
+                }
 
                 case 'GRADE': {
                     const text = context.previousOutput || '';
                     if (!text) { result.output = { grade: 'N/A', feedback: 'No text to grade.' }; result.type = 'grade'; break; }
-
+                
                     const mockReq = {
                         method: 'POST',
                         body: {
                             text,
                             instructions: context.task || '',
-                            rubric: `1. Thesis clarity and argumentation (25%)\n2. Evidence and source integration (25%)\n3. Organization and flow (20%)\n4. Writing quality and academic tone (20%)\n5. Grammar and mechanics (10%)`
+                            rubric: context.rubric || '',
+                            files: context.uploadedFiles?.map(f => ({
+                                name: f.name,
+                                type: f.type,
+                                content: f.data,
+                                isBase64: true
+                            })) || []
                         }
                     };
+                
                     let gradeResult = null;
-                    const mockRes = { setHeader: () => {}, status: () => ({ end: () => {}, json: d => { gradeResult = d; } }) };
+                    const mockRes = {
+                        setHeader: () => {},
+                        status: () => ({ end: () => {}, json: d => { gradeResult = d; } })
+                    };
                     await graderHandler(mockReq, mockRes);
-
+                
                     const feedback = gradeResult?.result || 'Grading completed.';
-                    const gradeMatch = feedback.match(/(?:Overall\s+)?Grade[:\s]*([A-F][+-]?)/i);
-                    result.output = { grade: gradeMatch ? gradeMatch[1].toUpperCase() : 'B', feedback };
+                    const gradeMatch = feedback.match(/(?:Overall\s+)?Grade[:\s]*([A-F][+-]?|\d+[\/.]\d+)/i)
+                        || feedback.match(/([A-F][+-]?)\s*(?:\/|out of|\()/i);
+                
+                    result.output = {
+                        grade: gradeMatch ? gradeMatch[1].toUpperCase() : '—',
+                        feedback
+                    };
                     result.type = 'grade';
                     break;
                 }
