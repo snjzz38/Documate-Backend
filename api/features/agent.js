@@ -5,9 +5,8 @@ import humanizerHandler from './humanizer.js';
 import graderHandler from './grader.js';
 
 const stripMarkdown = t => t
-    .replace(/\*\*?([^*]+)\*\*?/g, '$1')
-    .replace(/__(https?:\/\/[^_]+)__/g, '$1') 
-    .replace(/__?([^_\s][^_]*[^_\s])__?/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/`([^`]+)`/g, '$1');
 
@@ -365,13 +364,15 @@ export default async function handler(req, res) {
                 
                 INSTRUCTIONS:
                 1. Add citations ONLY where claims genuinely need evidence
-                2. Each citation must directly support the SPECIFIC claim it follows — not just be topically related
-                3. After each citation, explain in ONE specific sentence HOW this source proves your point — avoid "this shows" or "this demonstrates" without explanation
-                4. Do NOT drop citations into sentences that already make the point clearly without them
-                5. Distribute citations naturally — frontload evidence in argumentative paragraphs
-                6. Use varied signposting: "As X argues,", "X's research confirms that,", "X found that,"
-                7. Do NOT add a bibliography section
-                8. Ensure format matches: ${citationFormat}
+                2. Each citation must directly support the SPECIFIC claim it follows
+                3. After each citation, explain in ONE specific sentence HOW this source proves your point
+                4. NEVER mention an author's name in the text without immediately following it with a citation number
+                5. If you reference a source by name (e.g. "Smith argues"), you MUST add the superscript right after
+                6. Do NOT drop citations into sentences that already make the point clearly
+                7. Distribute citations naturally — frontload evidence in argumentative paragraphs
+                8. Use varied signposting: "As X argues,", "X's research confirms that,", "X found that,"
+                9. Do NOT add a bibliography section
+                10. Ensure format matches: ${citationFormat}
                 
                 Return ONLY the essay with citations inserted:`;
             
