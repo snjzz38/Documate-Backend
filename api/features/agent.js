@@ -203,34 +203,35 @@ export default async function handler(req, res) {
                         ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n` : '';
                 
                     const prompt = `Write a high-level academic essay with a CLEAR ARGUMENT.
-                
-                TASK: ${userTask}
-                ${pdfContext}${fileContext}
-                RESEARCH SOURCES:
-                ${sourceInfo}
-                
-                THESIS:
-                - Must take a STRONG position (not neutral)
-                - Must include 2-3 clear reasons (e.g. safety, ethics, inequality)
-                
-                STRUCTURE:
-                - Introduction: context + clear argumentative thesis as the last sentence
-                - Body Paragraphs: each paragraph = ONE main argument with a strong topic sentence, research evidence, and explanation of WHY it matters
-                - Conclusion: reinforce the argument, do not just summarize
-                
-                STYLE:
-                - Be concise and direct — avoid filler phrases
-                - Avoid vague phrases like "this highlights" without explanation
-                - Formal academic tone throughout
-                
-                IMPORTANT:
-                - Do NOT include any citations or author references yet
-                - Do NOT include a bibliography
-                - Integrate ideas from sources meaningfully in your own words
-                - Plain text only - no markdown, no bold, no headers
-                ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
-                
-                Write the essay now:`;
+                    
+                    TASK: ${userTask}
+                    ${pdfContext}${fileContext}
+                    RESEARCH SOURCES (for ideas only — do NOT cite or reference these):
+                    ${sourceInfo}
+                    
+                    THESIS:
+                    - Must take a STRONG position (not neutral)
+                    - Must include 2-3 clear reasons (e.g. safety, ethics, inequality)
+                    
+                    STRUCTURE:
+                    - Introduction: context + clear argumentative thesis as the last sentence
+                    - Body Paragraphs: each paragraph = ONE main argument with a strong topic sentence, research evidence, and explanation of WHY it matters
+                    - Conclusion: reinforce the argument, do not just summarize
+                    
+                    STYLE:
+                    - Be concise and direct — avoid filler phrases
+                    - Avoid vague phrases like "this highlights" without explanation
+                    - Formal academic tone throughout
+                    
+                    IMPORTANT:
+                    - Do NOT include any citations, author names, or source references of ANY kind
+                    - Do NOT write "(Source 1)", "(Author, 2020)", "According to Source 3", or anything similar
+                    - Do NOT include a bibliography
+                    - Use ideas from the research but express them entirely in your own words as if they are your own knowledge
+                    - Plain text only - no markdown, no bold, no headers
+                    ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
+                    
+                    Write the essay now:`;
                 
                     const rawText = imageFiles.length > 0
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
