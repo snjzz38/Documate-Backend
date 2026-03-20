@@ -289,162 +289,180 @@ export default async function handler(req, res) {
                     break;
                 }
 
-              case 'CITE': {
-                const input = context.previousOutput || '';
-                const sources = context.researchSources || [];
-                const style = options.citationStyle || 'apa7';
-                const type = options.citationType || 'in-text';
-            
-                if (!sources.length) {
-                    result.output = input;
-                    result.outputHtml = buildEssayHTML(input);
-                    result.citedSources = [];
-                    result.bibliographyHtml = '';
-                    result.type = 'cited';
-                    break;
-                }
-            
-                if (!input) {
-                    const earlyBib = buildBibliographyHTML(sources, style, type);
-                    result.output = '';
-                    result.outputHtml = '';
-                    result.citedSources = sources;
-                    result.bibliographyHtml = earlyBib.html;
-                    result.bibliographyPlain = earlyBib.plain;
-                    result.type = 'cited';
-                    break;
-                }
-            
-                const isApa = style.includes('apa');
-                const isMla = style.includes('mla');
-            
-                const needsCitation = sources.filter(s => s.doi && s.citationSource !== 'crossref');
-                if (needsCitation.length > 0) {
-                    console.log('[Agent] CITE: fetching', needsCitation.length, 'missing citations');
-                    const updated = await SourceFinderAPI.fetchAllCitations(needsCitation, style);
-                    updated.forEach(u => {
-                        if (u.citationSource !== 'crossref') return;
-                        const orig = sources.find(s => s.doi === u.doi);
-                        if (orig) {
-                            orig.citation = u.citation;
-                            orig.citationSource = 'crossref';
-                            orig.volume = u.volume;
-                            orig.issue = u.issue;
-                            orig.pages = u.pages;
-                            if (u.authors?.length) orig.authors = u.authors;
-                        }
-                    });
-                }
-            
-                console.log('[Agent] CITE:', sources.filter(s => s.citationSource === 'crossref').length, '/', sources.length, 'Crossref');
-            
-                const sourceList = sources.slice(0, 12).map((s, i) => {
-                    const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
-                    return `[${i+1}] ${author} (${s.year})\n   Title: "${s.title}"\n   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
-                }).join('\n\n');
-            
-                let citationFormat = '';
-                if (type === 'in-text') {
-                    if (isApa) citationFormat = `APA 7th: (Author, Year) or Author (Year)`;
-                    else if (isMla) citationFormat = `MLA 9th: (Author) - no year`;
-                    else citationFormat = `Chicago: (Author Year)`;
-                } else if (type === 'footnotes') {
-                    citationFormat = `Use superscript numbers at end of cited sentences. Each citation occurrence gets its OWN unique sequential number even if the same source is cited again. Number every citation sequentially from 1 upward — so if source [3] appears 3 times it gets three different numbers like ³ ⁷ ¹¹.`;
-                }
-            
-                const prompt = `Add scholarly citations to this essay with strong signposting.
-                
-                ESSAY:
-                ${input}
-                
-                AVAILABLE SOURCES:
-                ${sourceList}
-                
-                CITATION FORMAT: ${citationFormat}
-                
-                INSTRUCTIONS:
-                1. Add citations ONLY where claims genuinely need evidence
-                2. Each citation must directly support the SPECIFIC claim it follows
-                3. After each citation, explain in ONE specific sentence HOW this source proves your point
-                4. NEVER mention an author's name in the text without immediately following it with a citation number
-                5. If you reference a source by name (e.g. "Smith argues"), you MUST add the superscript right after
-                6. Do NOT drop citations into sentences that already make the point clearly
-                7. Distribute citations naturally — frontload evidence in argumentative paragraphs
-                8. Use varied signposting: "As X argues,", "X's research confirms that,", "X found that,"
-                9. Do NOT add a bibliography section
-                10. Ensure format matches: ${citationFormat}
-                
-                Return ONLY the essay with citations inserted:`;
-            
-                const citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
-            
-                // For footnotes: extract insertion order and rebuild sequential numbering
-                let insertionOrder = null;
-                let finalText = citedText;
-            
-               if (type === 'footnotes') {
-                    const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
-                    const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-                
-                    // Normalize <sup>N</sup> to unicode
-                    let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
-                
-                    // Find all superscript sequences in order of appearance
-                    const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
-                
-                    // Parse a superscript sequence into source indices
-                    // ¹⁰ = source 10, ¹² = could be source 12 OR sources 1+2
-                    const parseSuper = (str) => {
-                        const chars = str.split('');
-                        const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
-                        if (num > 0 && num <= sources.length) return [num];
-                        // Out of range — treat each char as separate citation
-                        return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
-                    };
-                
-                    // Build footnote list — every occurrence gets a NEW sequential number
-                    // noteEntries[i] = source for footnote i+1
-                    const noteEntries = [];
-                    // Map from match index to new footnote numbers assigned
-                    const matchToNewNums = new Map();
-                
-                    allMatches.forEach((m, matchIdx) => {
-                        const sourceNums = parseSuper(m[0]);
-                        const newNums = sourceNums.map(sNum => {
-                            const source = sources[sNum - 1];
-                            if (!source) return null;
-                            noteEntries.push(source);
-                            return noteEntries.length; // new sequential number
-                        }).filter(Boolean);
-                        if (newNums.length > 0) matchToNewNums.set(matchIdx, newNums);
-                    });
-                
-                    // Rewrite text replacing each superscript with new sequential number(s)
-                    let rewritten = normalized;
-                    let offset = 0;
-                    allMatches.forEach((m, matchIdx) => {
-                        const newNums = matchToNewNums.get(matchIdx);
-                        if (!newNums?.length) return;
-                        const newSuper = newNums.map(toSuper).join('');
-                        const pos = m.index + offset;
-                        rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
-                        offset += newSuper.length - m[0].length;
-                    });
-                
-                    finalText = rewritten;
-                    insertionOrder = noteEntries; // one entry per footnote number, duplicates allowed
-                }
+case 'CITE': {
+    const input = context.previousOutput || '';
+    const sources = context.researchSources || [];
+    const style = options.citationStyle || 'apa7';
+    const type = options.citationType || 'in-text';
 
-                result.output = finalText;
-                result.outputHtml = buildEssayHTML(finalText);
-                result.citedSources = sources;
-    
-                const bib = buildBibliographyHTML(sources, style, type, insertionOrder);
-                result.bibliographyHtml = bib.html;
-                result.bibliographyPlain = bib.plain;
-                result.type = 'cited';
-                break;
+    if (!sources.length) {
+        result.output = input;
+        result.outputHtml = buildEssayHTML(input);
+        result.citedSources = [];
+        result.bibliographyHtml = '';
+        result.type = 'cited';
+        break;
+    }
+
+    if (!input) {
+        const earlyBib = buildBibliographyHTML(sources, style, type);
+        result.output = '';
+        result.outputHtml = '';
+        result.citedSources = sources;
+        result.bibliographyHtml = earlyBib.html;
+        result.bibliographyPlain = earlyBib.plain;
+        result.type = 'cited';
+        break;
+    }
+
+    const isApa = style.includes('apa');
+    const isMla = style.includes('mla');
+
+    const needsCitation = sources.filter(s => s.doi && s.citationSource !== 'crossref');
+    if (needsCitation.length > 0) {
+        console.log('[Agent] CITE: fetching', needsCitation.length, 'missing citations');
+        const updated = await SourceFinderAPI.fetchAllCitations(needsCitation, style);
+        updated.forEach(u => {
+            if (u.citationSource !== 'crossref') return;
+            const orig = sources.find(s => s.doi === u.doi);
+            if (orig) {
+                orig.citation = u.citation;
+                orig.citationSource = 'crossref';
+                orig.volume = u.volume;
+                orig.issue = u.issue;
+                orig.pages = u.pages;
+                if (u.authors?.length) orig.authors = u.authors;
             }
+        });
+    }
+
+    console.log('[Agent] CITE:', sources.filter(s => s.citationSource === 'crossref').length, '/', sources.length, 'Crossref');
+
+    const sourceList = sources.slice(0, 12).map((s, i) => {
+        const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
+        return `[${i+1}] ${author} (${s.year})\n   Title: "${s.title}"\n   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
+    }).join('\n\n');
+
+    let citationFormat = '';
+    if (type === 'in-text') {
+        if (isApa) citationFormat = `APA 7th: (Author, Year) or Author (Year)`;
+        else if (isMla) citationFormat = `MLA 9th: (Author) - no year`;
+        else citationFormat = `Chicago: (Author Year)`;
+    } else if (type === 'footnotes') {
+        citationFormat = `Use superscript numbers at end of cited sentences. Each citation occurrence gets its OWN unique sequential number even if the same source is cited again. Number every citation sequentially from 1 upward — so if source [3] appears 3 times it gets three different numbers like ³ ⁷ ¹¹.`;
+    }
+
+    const prompt = `Add scholarly citations to this essay with strong signposting.
+
+ESSAY:
+${input}
+
+AVAILABLE SOURCES:
+${sourceList}
+
+CITATION FORMAT: ${citationFormat}
+
+INSTRUCTIONS:
+1. Add citations ONLY where claims genuinely need evidence
+2. Each citation must directly support the SPECIFIC claim it follows — not just be topically related
+3. After each citation, explain in ONE specific sentence HOW this source proves your point
+4. NEVER mention an author's name in the text without immediately following it with a citation number
+5. If you reference a source by name (e.g. "Smith argues"), you MUST add the superscript right after that sentence
+6. Do NOT drop citations into sentences that already make the point clearly
+7. Distribute citations naturally — frontload evidence in argumentative paragraphs
+8. Use varied signposting: "As X argues,", "X's research confirms that,", "X found that,"
+9. Do NOT add a bibliography section
+10. Ensure format matches: ${citationFormat}
+
+Return ONLY the essay with citations inserted:`;
+
+    let citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+
+    // Second pass: fix any author mentions missing a superscript
+    if (type === 'footnotes') {
+        const prompt = `Review this essay and fix any author mentions that are missing a footnote superscript number.
+
+ESSAY:
+${citedText}
+
+AVAILABLE SOURCES:
+${sourceList}
+
+RULES:
+1. Every time an author is mentioned by name (e.g. "Smith argues", "Jones & Lee found"), there MUST be a superscript number immediately after the closing punctuation of that sentence
+2. If an author is mentioned without a superscript, add the correct superscript based on the existing numbering pattern in the essay
+3. Do NOT change any existing superscripts
+4. Do NOT change any other text
+5. Do NOT add a bibliography
+
+Return the corrected essay only:`;
+
+        citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+    }
+
+    // For footnotes: extract insertion order and rebuild sequential numbering
+    let insertionOrder = null;
+    let finalText = citedText;
+
+    if (type === 'footnotes') {
+        const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
+        const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
+
+        // Normalize <sup>N</sup> to unicode
+        let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
+
+        // Find all superscript sequences in order of appearance
+        const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+
+        // Parse a superscript sequence into source indices
+        const parseSuper = (str) => {
+            const chars = str.split('');
+            const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
+            if (num > 0 && num <= sources.length) return [num];
+            return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
+        };
+
+        // Build footnote list — every occurrence gets a NEW sequential number
+        const noteEntries = [];
+        const matchToNewNums = new Map();
+
+        allMatches.forEach((m, matchIdx) => {
+            const sourceNums = parseSuper(m[0]);
+            const newNums = sourceNums.map(sNum => {
+                const source = sources[sNum - 1];
+                if (!source) return null;
+                noteEntries.push(source);
+                return noteEntries.length;
+            }).filter(Boolean);
+            if (newNums.length > 0) matchToNewNums.set(matchIdx, newNums);
+        });
+
+        // Rewrite text replacing each superscript with new sequential number(s)
+        let rewritten = normalized;
+        let offset = 0;
+        allMatches.forEach((m, matchIdx) => {
+            const newNums = matchToNewNums.get(matchIdx);
+            if (!newNums?.length) return;
+            const newSuper = newNums.map(toSuper).join('');
+            const pos = m.index + offset;
+            rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
+            offset += newSuper.length - m[0].length;
+        });
+
+        finalText = rewritten;
+        insertionOrder = noteEntries;
+    }
+
+    result.output = finalText;
+    result.outputHtml = buildEssayHTML(finalText);
+    result.citedSources = sources;
+
+    const bib = buildBibliographyHTML(sources, style, type, insertionOrder);
+    result.bibliographyHtml = bib.html;
+    result.bibliographyPlain = bib.plain;
+    result.type = 'cited';
+    break;
+}
                   
                 case 'QUOTES': {
                     const input = context.previousOutput || '';
