@@ -122,45 +122,52 @@ function buildPrompt(section, index, totalSections, prevSummary, nextSummary) {
     if (prevSummary) contextNote += `[Follows from: ${prevSummary}] `;
     if (nextSummary) contextNote += `[Leads into: ${nextSummary}]`;
 
-    return `Rewrite this ${position} section to read naturally.
+    return `Rewrite this ${position} section in plain, natural English.
 
 ${contextNote}
 
-WHAT AI WRITING LOOKS LIKE (avoid this):
-- Short choppy sentences that don't connect: "X is a problem. It causes Y. This leads to Z."
-- Fake casual phrases: "Here's the thing:", "You have to wonder", "The thing is"
-- The pattern "isn't just X, it's Y" or "isn't just X. It's Y"
-- Every sentence being its own isolated statement
-- Rhetorical questions that feel forced
-- Lists of three: "X, Y, and Z"
+AI DETECTION CATCHES THESE PATTERNS - AVOID ALL:
+1. "not X but Y" constructions - sounds like a debate speech
+2. "extends beyond" - AI loves this phrase
+3. Perfect parallel structures like "X into Y and A into B"  
+4. Formal verbs: "demanding", "representing", "intensifying", "transforming"
+5. Passive voice: "are displaced", "is already visible"
+6. Perfect grammar and sentence balance throughout
+7. Words like: essential, crucial, fundamental, significant, substantial
 
-WHAT NATURAL WRITING LOOKS LIKE:
-- Sentences that BUILD on each other with real logical connections
-- Some longer sentences with embedded clauses: "The warming climate, which has already displaced millions, threatens to destabilize regions that can least afford instability."
-- Mix of simple and complex structures occurring naturally
-- Ideas that flow: when you finish one sentence, the next one should feel inevitable
-- Occasional shorter sentence for emphasis, but not choppy
-- Subordinate clauses: "because", "although", "while", "given that", "even as"
+WRITE LIKE A HUMAN ACTUALLY WRITES:
+- Use normal verbs: "needs" not "demands", "shows" not "represents", "makes worse" not "exacerbates"
+- Active voice mostly: "storms destroy cities" not "cities are destroyed by storms"
+- Imperfect structures are fine - not every sentence needs to be balanced
+- Use contractions naturally but not constantly
+- Some sentences can be a bit wordy or imperfect - that's human
+- Connect ideas with simple words: "and", "but", "so", "because", "which"
 
-EXAMPLE OF NATURAL FLOW:
-"Climate change has moved beyond environmental concern into the realm of security threat. Rising temperatures don't just melt ice caps; they dry out farmland, intensify storms, and push already unstable regions toward breaking points. When crops fail repeatedly, people migrate, and mass migration creates pressures that even stable governments struggle to manage. The challenge now is whether the international community can coordinate a response before these pressures become unmanageable."
+WORD CHOICE - USE THE SIMPLER OPTION:
+- "needs" not "requires" or "demands"
+- "shows" not "represents" or "demonstrates"  
+- "gets worse" not "intensifies" or "escalates"
+- "people leave" not "displacement occurs"
+- "breaks down" not "erodes" or "deteriorates"
+- "can't handle" not "unable to withstand"
 
-EXAMPLE OF AI-SOUNDING WRITING (avoid):
-"Climate change is a serious threat. It's not just about the environment. It's about security. Rising temperatures cause problems. These problems include droughts and storms. People are forced to move. This creates pressure on borders. We need to act now."
+EXAMPLE OF NATURAL HUMAN WRITING:
+"Climate change is more than an environmental problem at this point. When you look at how droughts and floods affect poor countries, you start to see the security angle. Crops fail, people can't feed their families, and they have to move somewhere else. That puts pressure on neighboring countries, and things can spiral from there. We've already seen this happen in some regions, and it's probably going to get worse if emissions keep rising."
 
-REWRITE THIS TEXT:
+EXAMPLE OF AI WRITING TO AVOID:
+"Climate change extends beyond environmental concerns, representing a fundamental security challenge. Rising temperatures intensify resource conflicts, displacing populations and eroding international trust. This pattern, already visible, demands immediate policy intervention to prevent escalating instability."
+
+TEXT TO REWRITE:
 "${section.content}"
 
-RULES:
-- Make sentences CONNECT logically to each other
-- Use subordinating conjunctions naturally (because, although, while, as, since, when)
-- Some sentences should be longer with embedded clauses
-- No fake casual phrases like "here's the thing" or "you have to wonder"
-- No "isn't just X, it's Y" pattern
-- No semicolons or em dashes
-- Keep all the original meaning and information
+CRITICAL RULES:
+- Use simple, common words
+- Active voice as much as possible  
+- Not everything needs to be perfectly structured
+- Keep the meaning but make it sound like a regular person wrote it
+- NO "extends beyond", "not X but Y", or fancy parallel structures
 
-Write the rewritten version only:`;
+Write naturally:`;
 }
 
 // ==========================================================================
@@ -179,38 +186,50 @@ function postProcess(text, sectionTitle) {
     // Apply word swaps
     result = applySwaps(result);
     
-    // Remove fake casual phrases that AI uses to sound human
+    // Remove fake casual phrases
     result = result.replace(/\b(Here's the thing|The thing is|You have to wonder|You know how|What worries me is|And that's alarming)[,:]?\s*/gi, '');
-    result = result.replace(/\bLook,\s*/gi, '');
-    result = result.replace(/\bGranted,\s*/gi, '');
-    result = result.replace(/\bSure,\s*/gi, '');
     
-    // Remove any remaining "isn't just...it's" patterns
-    result = result.replace(/isn't just ([^.]+)\.\s*It's/gi, (_, x) => `extends beyond ${x.trim()}, becoming`);
-    result = result.replace(/is not just ([^.]+)\.\s*It is/gi, (_, x) => `extends beyond ${x.trim()}, becoming`);
-    result = result.replace(/isn't just/gi, 'extends beyond');
-    result = result.replace(/is not just/gi, 'extends beyond');
-    result = result.replace(/not just ([^,]+),\s*(it's|but)/gi, 'beyond $1, ');
+    // Remove "extends beyond" pattern
+    result = result.replace(/extends beyond/gi, 'is more than');
     
-    // Fix repeated sentence starters
-    const sentences = result.split(/(?<=[.!?])\s+/);
-    const starterCount = {};
-    const fixed = sentences.map((s, i) => {
-        const firstWord = s.split(/\s+/)[0];
-        starterCount[firstWord] = (starterCount[firstWord] || 0) + 1;
-        
-        // If same starter used 3+ times, try to vary
-        if (starterCount[firstWord] >= 3) {
-            if (/^(It|This|The|These|That|There)\b/i.test(s)) {
-                // Try to combine with previous sentence using conjunction
-                if (i > 0 && sentences[i-1] && !sentences[i-1].endsWith('?')) {
-                    return ', and ' + s.charAt(0).toLowerCase() + s.slice(1);
-                }
-            }
-        }
-        return s;
-    });
-    result = fixed.join(' ').replace(/\.\s*,\s*and/g, ', and');
+    // Remove "not X but Y" patterns
+    result = result.replace(/not in ([^,]+),?\s*but in/gi, 'in');
+    result = result.replace(/not ([^,]+),?\s*but rather/gi, '');
+    result = result.replace(/lies not in/gi, 'is about');
+    
+    // Remove formal/AI verb forms
+    result = result.replace(/\bdemanding\b/gi, 'that needs');
+    result = result.replace(/\brepresenting\b/gi, 'which is');
+    result = result.replace(/\bintensifying\b/gi, 'making worse');
+    result = result.replace(/\btransforming\b/gi, 'turning');
+    result = result.replace(/\bescalating\b/gi, 'getting worse');
+    result = result.replace(/\beroding\b/gi, 'breaking down');
+    result = result.replace(/\bdepleting\b/gi, 'using up');
+    
+    // Simplify fancy words
+    result = result.replace(/\bequitable\b/gi, 'fair');
+    result = result.replace(/\bvulnerable\b/gi, 'at risk');
+    result = result.replace(/\bessential\b/gi, 'needed');
+    result = result.replace(/\bfundamental\b/gi, 'basic');
+    result = result.replace(/\bsubstantial\b/gi, 'big');
+    
+    // Fix passive voice where easy
+    result = result.replace(/are displaced/gi, 'have to leave');
+    result = result.replace(/is already visible/gi, 'is already happening');
+    result = result.replace(/are destroyed/gi, 'get destroyed');
+    
+    // Remove any remaining "isn't just...it's" patterns  
+    result = result.replace(/isn't just ([^.]+)\.\s*It's/gi, 'is more than $1, it\'s also');
+    result = result.replace(/is not just ([^.]+)\.\s*It is/gi, 'is more than $1, and');
+    result = result.replace(/isn't just/gi, 'is more than');
+    result = result.replace(/is not just/gi, 'is more than');
+    
+    // Remove perfect parallel structures
+    result = result.replace(/(\w+) into (\w+) and (\w+) into (\w+)/gi, '$1 into $2, and $3 becomes $4');
+    
+    // Simplify "the choice is not X but Y"
+    result = result.replace(/the choice is not between ([^,]+),?\s*but between/gi, 'we\'re choosing between');
+    result = result.replace(/the choice is between ([^,]+) and/gi, 'it\'s either $1 or');
     
     // Remove semicolons
     result = result.replace(/;\s*/g, ', ');
@@ -219,9 +238,10 @@ function postProcess(text, sectionTitle) {
     result = result.replace(/\.\./g, '.');
     result = result.replace(/,,/g, ',');
     result = result.replace(/\s+,/g, ',');
+    result = result.replace(/\s{2,}/g, ' ');
     
-    // Clean spacing
-    result = result.replace(/\s{2,}/g, ' ').trim();
+    // Clean up
+    result = result.trim();
     
     // Restore title if needed
     if (sectionTitle) {
