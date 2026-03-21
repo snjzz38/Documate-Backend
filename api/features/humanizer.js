@@ -1,18 +1,15 @@
 // api/features/humanizer.js
-// Section-aware humanization with context preservation
 import { GroqAPI } from '../utils/groqAPI.js';
 
 // ==========================================================================
-// 1. BANNED WORDS & SIMPLE SWAPS
+// CONSTANTS
 // ==========================================================================
 
 const BANNED_WORDS = [
     "furthermore", "moreover", "additionally", "subsequently", "consequently",
-    "nevertheless", "notwithstanding", "whereby", "thereof", "wherein",
-    "aforementioned", "utilize", "leverage", "facilitate", "optimize",
-    "enhance", "streamline", "paradigm", "methodology", "comprehensive",
-    "multifaceted", "myriad", "plethora", "paramount", "pivotal",
-    "delve", "underscore", "realm", "landscape", "tapestry", "testament"
+    "nevertheless", "utilize", "leverage", "facilitate", "optimize", "enhance",
+    "comprehensive", "multifaceted", "paradigm", "methodology", "underscore",
+    "delve", "realm", "landscape", "crucial", "pivotal", "myriad", "plethora"
 ];
 
 const SIMPLE_SWAPS = {
@@ -20,72 +17,12 @@ const SIMPLE_SWAPS = {
     "enhance": "improve", "comprehensive": "full", "furthermore": "also",
     "moreover": "and", "additionally": "also", "subsequently": "then",
     "consequently": "so", "nevertheless": "but", "demonstrate": "show",
-    "indicate": "suggest", "significant": "major", "numerous": "many",
-    "sufficient": "enough", "prior to": "before", "in order to": "to",
-    "due to the fact that": "because", "in terms of": "for",
-    "it is important to note": "note that", "it should be noted": "note that"
-};
-
-// AI punctuation and pattern tells to fix
-const AI_PATTERNS = [
-    // Semicolon overuse - split into two sentences
-    { regex: /;\s*it's\b/gi, replacement: ". It is" },
-    { regex: /;\s*this\b/gi, replacement: ". This" },
-    { regex: /;\s*they\b/gi, replacement: ". They" },
-    { regex: /;\s*we\b/gi, replacement: ". We" },
-    
-    // Colon declarations - remove or rephrase
-    { regex: /Here's the (?:key |main |real )?(?:point|thing|issue|problem):\s*/gi, replacement: "" },
-    { regex: /Let's be clear:\s*/gi, replacement: "" },
-    { regex: /The (?:real |key |main )?(?:point|thing|issue) is:\s*/gi, replacement: "" },
-    { regex: /Here's what matters:\s*/gi, replacement: "" },
-    { regex: /Bottom line:\s*/gi, replacement: "" },
-    
-    // "isn't just X, it's Y" pattern - vary it
-    { regex: /isn't just ([^,]+),\s*it's/gi, replacement: "goes beyond $1. It is" },
-    { regex: /isn't just about ([^,]+),\s*it's/gi, replacement: "is more than $1. This is" },
-    { regex: /not just ([^,]+),\s*it's/gi, replacement: "more than $1. This means" },
-    { regex: /doesn't just ([^,]+),\s*it/gi, replacement: "does more than $1. It" },
-    
-    // Triple comma chains - break them up
-    { regex: /,\s*([^,]{10,40}),\s*and\s+([^,]{10,40}),/gi, replacement: ", $1. It also $2," },
-    
-    // "strains X, strains Y" repetition
-    { regex: /(\w+)s ([^,]+),\s*\1s ([^,]+),\s*and/gi, replacement: "$1s $2. It also $1s $3, and" },
-    
-    // Reduce "It's" at sentence starts
-    { regex: /\.\s+It's\s+(?:a|the|how|about|what)/gi, replacement: function(match) {
-        const alternatives = [". This is", ". We see", ". The reality is", ". What we face is"];
-        return alternatives[Math.floor(Math.random() * alternatives.length)] + match.slice(6);
-    }},
-];
-
-// Contraction balancing - don't overuse
-const CONTRACTION_PAIRS = [
-    ["isn't", "is not"],
-    ["doesn't", "does not"],
-    ["don't", "do not"],
-    ["won't", "will not"],
-    ["can't", "cannot"],
-    ["we're", "we are"],
-    ["they're", "they are"],
-    ["it's", "it is"],
-    ["that's", "that is"],
-];
-
-// Banned sentence starters when repeated
-const VARIED_STARTERS = {
-    "It's": ["This is", "What we see is", "The reality is", "We face"],
-    "It is": ["This is", "What exists is", "The situation is"],
-    "This is": ["Here we have", "What's happening is", "We are looking at"],
-    "The": ["A", "One", "This particular", ""],
-    "There is": ["We have", "You find", "One sees"],
-    "We need": ["The need is for", "What's required is", "This calls for"],
-    "It also": ["This also", "Additionally, it", "Beyond that, it"],
+    "significant": "major", "numerous": "many", "prior to": "before",
+    "in order to": "to", "due to the fact that": "because"
 };
 
 // ==========================================================================
-// 2. UTILITY FUNCTIONS
+// UTILITY FUNCTIONS
 // ==========================================================================
 
 function killEmDashes(text) {
@@ -95,7 +32,6 @@ function killEmDashes(text) {
         .replace(/—/g, ', ')
         .replace(/–/g, ', ')
         .replace(/ - /g, ', ')
-        .replace(/ -- /g, ', ')
         .replace(/,\s*,/g, ',')
         .replace(/\s{2,}/g, ' ')
         .trim();
@@ -111,299 +47,132 @@ function applySwaps(text) {
 
 function cleanOutput(text) {
     let cleaned = text;
-    // Remove AI preambles
-    cleaned = cleaned.replace(/^(Here's|Here is|Below is|Sure|I've rewritten|Rewritten)[^:.\n]*[:.]\s*/i, '');
+    cleaned = cleaned.replace(/^(Here's|Here is|Below is|Sure|I've rewritten|Rewritten|I have rewritten)[^:.\n]*[:.]\s*/gi, '');
     cleaned = cleaned.replace(/^["']|["']$/g, '');
     return cleaned.trim();
 }
 
 // ==========================================================================
-// 3. SECTION DETECTION - Preserve original structure
+// SECTION DETECTION
 // ==========================================================================
 
 function detectSections(text) {
-    // Split by headers or double newlines
     const lines = text.split('\n');
     const sections = [];
     let currentSection = { title: '', content: [] };
     
     for (const line of lines) {
         const trimmed = line.trim();
-        
-        // Detect headers (various formats)
-        const isHeader = /^#{1,3}\s+/.test(trimmed) ||  // Markdown
-                        /^[A-Z][^.!?]*$/.test(trimmed) && trimmed.length < 60 && trimmed.length > 3 ||  // Title case short line
-                        /^(Introduction|Conclusion|Summary|Background|Overview|Causes?|Effects?|Impacts?|Solutions?|Results?|Discussion|Methods?)/i.test(trimmed);
+        const isHeader = /^#{1,3}\s+/.test(trimmed) || 
+                        (/^[A-Z][^.!?]*$/.test(trimmed) && trimmed.length < 60 && trimmed.length > 3) ||
+                        /^(Introduction|Conclusion|Summary|Background|Causes?|Effects?|Impacts?|Solutions?)/i.test(trimmed);
         
         if (isHeader && trimmed.length > 0) {
-            // Save previous section if it has content
             if (currentSection.content.length > 0) {
-                sections.push({
-                    title: currentSection.title,
-                    content: currentSection.content.join('\n').trim()
-                });
+                sections.push({ title: currentSection.title, content: currentSection.content.join(' ').trim() });
             }
-            // Start new section
             currentSection = { title: trimmed.replace(/^#+\s*/, ''), content: [] };
         } else if (trimmed.length > 0) {
             currentSection.content.push(trimmed);
         }
     }
     
-    // Don't forget last section
     if (currentSection.content.length > 0) {
-        sections.push({
-            title: currentSection.title,
-            content: currentSection.content.join('\n').trim()
-        });
+        sections.push({ title: currentSection.title, content: currentSection.content.join(' ').trim() });
     }
     
-    // If no sections detected, treat whole text as one section
-    if (sections.length === 0) {
-        sections.push({ title: '', content: text.trim() });
-    }
-    
-    return sections;
+    return sections.length > 0 ? sections : [{ title: '', content: text.trim() }];
 }
 
 // ==========================================================================
-// 4. PLANNING REQUEST - Get essay overview and section summaries
+// PLANNING REQUEST
 // ==========================================================================
 
 async function planEssay(sections, apiKey) {
+    if (sections.length <= 1) return {};
+    
     const sectionList = sections.map((s, i) => 
-        `Section ${i + 1}${s.title ? ` (${s.title})` : ''}: ${s.content.substring(0, 150)}...`
+        `${i + 1}. ${s.content.substring(0, 120)}...`
     ).join('\n');
     
-    const prompt = `Analyze this essay structure and provide a brief plan.
-
-SECTIONS:
-${sectionList}
-
-For each section, write ONE sentence describing:
-1. What this section covers
-2. How it connects to neighboring sections
-
-Format your response as:
-Section 1: [summary and connection]
-Section 2: [summary and connection]
-...
-
-Be concise. Each summary should be under 25 words.`;
-
+    const prompt = `Summarize each section in 10 words or less:\n${sectionList}`;
     const messages = [{ role: "user", content: prompt }];
-    const plan = await GroqAPI.chat(messages, apiKey, false);
     
-    // Parse the plan into section summaries
-    const summaries = {};
-    const lines = plan.split('\n');
-    for (const line of lines) {
-        const match = line.match(/Section\s*(\d+):\s*(.+)/i);
-        if (match) {
-            summaries[parseInt(match[1]) - 1] = match[2].trim();
-        }
+    try {
+        const plan = await GroqAPI.chat(messages, apiKey, false);
+        const summaries = {};
+        plan.split('\n').forEach((line, i) => {
+            const cleaned = line.replace(/^\d+[\.\)]\s*/, '').trim();
+            if (cleaned) summaries[i] = cleaned;
+        });
+        return summaries;
+    } catch (e) {
+        return {};
     }
-    
-    return summaries;
 }
 
 // ==========================================================================
-// 5. HUMANIZATION PROMPT - Natural, context-aware
+// HUMANIZATION PROMPT - The key to beating detection
 // ==========================================================================
 
-function buildHumanizePrompt(section, index, total, prevSummary, nextSummary, sectionSummary) {
-    // Determine position
-    let position = 'middle';
-    if (index === 0) position = 'opening';
-    if (index === total - 1) position = 'closing';
+function buildPrompt(section, index, totalSections, prevSummary, nextSummary) {
+    const position = index === 0 ? 'OPENING' : index === totalSections - 1 ? 'CLOSING' : 'MIDDLE';
     
-    // Build context
-    let context = '';
-    if (prevSummary) {
-        context += `PREVIOUS SECTION covered: ${prevSummary}\n`;
-    }
-    if (nextSummary) {
-        context += `NEXT SECTION will cover: ${nextSummary}\n`;
-    }
-    if (sectionSummary) {
-        context += `THIS SECTION is about: ${sectionSummary}\n`;
-    }
+    // Rotate writing styles for variety
+    const styles = [
+        "explaining to a curious friend who asked about this",
+        "writing a thoughtful opinion piece",
+        "teaching someone who wants to understand the nuances",
+        "having a serious conversation about something you care about"
+    ];
+    const style = styles[index % styles.length];
 
-    const bannedList = BANNED_WORDS.slice(0, 15).join(', ');
+    let contextNote = '';
+    if (prevSummary) contextNote += `[Connects from: ${prevSummary}] `;
+    if (nextSummary) contextNote += `[Leads to: ${nextSummary}]`;
 
-    return `Rewrite this ${position} section to sound naturally human while keeping its structure.
+    return `You're ${style}. Rewrite this ${position} section.
 
-${context}
-WRITING STYLE:
-- Write like an informed person explaining something they understand well
-- Vary sentence lengths naturally: mix short (5-10 words), medium (12-18 words), and longer (20-30 words)
-- Use both contractions AND full forms - mix "it's" with "it is", "don't" with "do not"
-- Not every sentence needs a subject-verb-object structure
+${contextNote}
 
-PATTERNS TO AVOID (these flag AI detection):
-1. NO semicolons - use periods to separate ideas
-2. NO colons after intro phrases like "Here's the thing:" - just state it
-3. NO repeating "isn't just X, it's Y" pattern - find other ways to contrast
-4. NO comma chains (X, Y, and Z, which causes W) - break into shorter sentences
-5. NO starting multiple sentences with "It's" or "This is" 
-6. NO overusing contractions - balance "isn't" with "is not"
-7. NO em dashes (—)
-8. AVOID words like: ${bannedList}
+THE PROBLEM WITH AI WRITING (avoid all of these):
+1. The "isn't just X. It's Y" pattern - AI uses this constantly. NEVER use it.
+2. Starting sentences with "It's" repeatedly  
+3. Perfect three-part lists: "X, Y, and Z"
+4. Every sentence being a confident declaration
+5. Uniform sentence lengths
+6. Semicolons and em dashes
+7. No personality - just facts stated flatly
 
-GOOD RHYTHM EXAMPLE:
-"Climate change threatens more than coastlines. Rising temperatures destabilize entire regions. When crops fail, people move. This migration puts pressure on borders and resources alike. Governments that ignore these connections risk amplifying the very instability they want to prevent."
+WHAT MAKES WRITING SOUND HUMAN:
+1. Thinking out loud: "The thing is..." "What worries me is..." "You have to wonder..."
+2. Mixing confidence with uncertainty: "probably", "it seems", "arguably"
+3. Occasional questions (real or rhetorical)
+4. Uneven development - some points get more attention than others
+5. Sentence variety: fragments okay. Longer complex sentences also fine.
+6. Personal reactions embedded in facts: "And that's alarming because..."
+7. Connecting words that aren't robotic: "Look," "Granted," "Sure," "Still,"
 
-BAD RHYTHM EXAMPLE (too many contractions, repetitive starts):
-"It's a security threat. It's not just about the environment. It's about how droughts and storms create conflict. It doesn't just affect nature, it affects people."
+REWRITE THIS:
+"${section.content}"
 
-PRESERVE:
-- The section's meaning and main points
-- Any headers, citations, or technical terms
-- Logical flow between paragraphs
+${section.title ? `Keep the topic "${section.title}" but express it naturally.` : ''}
 
-SECTION TO REWRITE:
-${section.title ? `[${section.title}]\n` : ''}${section.content}
+CRITICAL: 
+- DO NOT use "isn't just" or "is not just" ANYWHERE
+- DO NOT start multiple sentences with "It's" or "This is"  
+- DO NOT use semicolons or em dashes
+- DO keep all the same information and meaning
+- DO sound like a real person with opinions wrote this
 
-OUTPUT the rewritten section only:`;
+Write the rewritten version only:`;
 }
 
 // ==========================================================================
-// 6. POST-PROCESSING - Fix AI patterns, vary starters, clean punctuation
+// POST-PROCESSING
 // ==========================================================================
 
-function fixAIPatterns(text) {
-    let result = text;
-    for (const { regex, replacement } of AI_PATTERNS) {
-        if (typeof replacement === 'function') {
-            result = result.replace(regex, replacement);
-        } else {
-            result = result.replace(regex, replacement);
-        }
-    }
-    return result;
-}
-
-function balanceContractions(text) {
-    // Count contractions - if too many, expand some back
-    let result = text;
-    let totalContractions = 0;
-    
-    for (const [contraction, _] of CONTRACTION_PAIRS) {
-        const matches = result.match(new RegExp(`\\b${contraction}\\b`, 'gi')) || [];
-        totalContractions += matches.length;
-    }
-    
-    const wordCount = result.split(/\s+/).length;
-    const contractionDensity = totalContractions / wordCount;
-    
-    // If more than 1 contraction per 15 words, expand some
-    if (contractionDensity > 0.066) {
-        let expanded = 0;
-        const targetExpansions = Math.floor(totalContractions * 0.4); // Expand 40%
-        
-        for (const [contraction, full] of CONTRACTION_PAIRS) {
-            if (expanded >= targetExpansions) break;
-            
-            const regex = new RegExp(`\\b${contraction}\\b`, 'gi');
-            const matches = result.match(regex) || [];
-            
-            // Expand every other occurrence
-            let count = 0;
-            result = result.replace(regex, (match) => {
-                count++;
-                if (count % 2 === 0 && expanded < targetExpansions) {
-                    expanded++;
-                    // Preserve capitalization
-                    if (match[0] === match[0].toUpperCase()) {
-                        return full.charAt(0).toUpperCase() + full.slice(1);
-                    }
-                    return full;
-                }
-                return match;
-            });
-        }
-    }
-    
-    return result;
-}
-
-function varyRepeatedStarters(text) {
-    const sentences = text.split(/(?<=[.!?])\s+/);
-    const starterCounts = {};
-    
-    const varied = sentences.map((sentence, i) => {
-        // Check first word/phrase
-        for (const [starter, alternatives] of Object.entries(VARIED_STARTERS)) {
-            if (sentence.startsWith(starter)) {
-                starterCounts[starter] = (starterCounts[starter] || 0) + 1;
-                
-                // If used more than once, start varying
-                if (starterCounts[starter] > 1 && alternatives.length > 0) {
-                    const alt = alternatives[(starterCounts[starter] - 2) % alternatives.length];
-                    if (alt) {
-                        return alt + sentence.slice(starter.length);
-                    }
-                }
-            }
-        }
-        return sentence;
-    });
-    
-    return varied.join(' ');
-}
-
-function fixPunctuation(text) {
-    let result = text;
-    
-    // Remove unnecessary semicolons (replace with periods)
-    result = result.replace(/;\s+(?=[a-z])/g, '. ');
-    
-    // Fix double punctuation
-    result = result.replace(/\.\./g, '.');
-    result = result.replace(/,,/g, ',');
-    result = result.replace(/\s+,/g, ',');
-    
-    // Reduce comma density in long sentences
-    const sentences = result.split(/(?<=[.!?])\s+/);
-    result = sentences.map(s => {
-        const commaCount = (s.match(/,/g) || []).length;
-        const wordCount = s.split(/\s+/).length;
-        
-        // If more than 1 comma per 8 words, it's too dense
-        if (commaCount > 3 && commaCount / wordCount > 0.125) {
-            // Replace middle commas with periods where sensible
-            const parts = s.split(/,\s*/);
-            if (parts.length > 3) {
-                const mid = Math.floor(parts.length / 2);
-                parts[mid] = '. ' + parts[mid].charAt(0).toUpperCase() + parts[mid].slice(1);
-                return parts.join(', ').replace(', . ', '. ');
-            }
-        }
-        return s;
-    }).join(' ');
-    
-    return result;
-}
-
-function varySentenceRhythm(text) {
-    // Detect if sentences have similar length patterns and vary them
-    const sentences = text.split(/(?<=[.!?])\s+/);
-    if (sentences.length < 4) return text;
-    
-    const lengths = sentences.map(s => s.split(/\s+/).length);
-    
-    // Check for monotonous rhythm (all similar lengths)
-    const avgLength = lengths.reduce((a, b) => a + b, 0) / lengths.length;
-    const variance = lengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / lengths.length;
-    
-    // If variance is low (monotonous), we'd want more variation
-    // But we can't easily fix this in post-processing without AI
-    // Just flag for the prompt to handle
-    
-    return text;
-}
-
-function postProcess(text, originalHadHeader, headerText) {
+function postProcess(text, sectionTitle) {
     let result = text;
     
     // Clean AI artifacts
@@ -415,36 +184,47 @@ function postProcess(text, originalHadHeader, headerText) {
     // Apply word swaps
     result = applySwaps(result);
     
-    // Fix AI patterns (semicolons, colons, repetitive structures)
-    result = fixAIPatterns(result);
+    // Remove any remaining "isn't just...it's" patterns
+    result = result.replace(/isn't just ([^.]+)\.\s*It's/gi, 'goes beyond $1. What we face is');
+    result = result.replace(/is not just ([^.]+)\.\s*It is/gi, 'goes beyond $1. What we see is');
+    result = result.replace(/isn't just/gi, 'goes beyond');
+    result = result.replace(/is not just/gi, 'goes beyond');
     
-    // Balance contractions (don't overuse them)
-    result = balanceContractions(result);
+    // Fix repeated "It's" at sentence starts
+    const sentences = result.split(/(?<=[.!?])\s+/);
+    let lastStartedWithIts = false;
+    const fixed = sentences.map(s => {
+        const startsWithIts = /^It's\b/i.test(s) || /^It is\b/i.test(s);
+        if (startsWithIts && lastStartedWithIts) {
+            // Replace with alternatives
+            const alts = ['This means', 'What happens is', 'The result:', 'We see'];
+            const alt = alts[Math.floor(Math.random() * alts.length)];
+            s = s.replace(/^It's\b/i, alt).replace(/^It is\b/i, alt);
+        }
+        lastStartedWithIts = startsWithIts;
+        return s;
+    });
+    result = fixed.join(' ');
     
-    // Fix punctuation issues
-    result = fixPunctuation(result);
+    // Remove semicolons
+    result = result.replace(/;\s*/g, '. ');
     
-    // Vary repeated sentence starters
-    result = varyRepeatedStarters(result);
-    
-    // Fix common AI participle patterns (but gently)
-    result = result.replace(/, making it /gi, '. This makes it ');
-    result = result.replace(/, leading to /gi, '. This leads to ');
-    result = result.replace(/, resulting in /gi, '. As a result, ');
-    
-    // Restore header if it was removed
-    if (originalHadHeader && headerText && !result.toLowerCase().startsWith(headerText.toLowerCase().substring(0, 10))) {
-        result = headerText + '\n' + result;
-    }
+    // Fix double periods
+    result = result.replace(/\.\./g, '.');
     
     // Clean spacing
-    result = result.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    result = result.replace(/\s{2,}/g, ' ').trim();
+    
+    // Restore title if needed
+    if (sectionTitle) {
+        result = sectionTitle + '\n' + result;
+    }
     
     return result;
 }
 
 // ==========================================================================
-// 7. MAIN HANDLER
+// MAIN HANDLER
 // ==========================================================================
 
 export default async function handler(req, res) {
@@ -462,47 +242,32 @@ export default async function handler(req, res) {
 
         const safeText = text.substring(0, 20000);
         
-        // Step 1: Detect sections
+        // Detect sections
         const sections = detectSections(safeText);
-        console.log(`[Humanizer] Detected ${sections.length} sections`);
+        console.log(`[Humanizer] Processing ${sections.length} sections`);
         
-        // Step 2: Plan essay (get summaries for context)
-        let summaries = {};
-        if (sections.length > 1) {
-            try {
-                summaries = await planEssay(sections, GROQ_KEY);
-                console.log(`[Humanizer] Generated ${Object.keys(summaries).length} section summaries`);
-            } catch (e) {
-                console.log('[Humanizer] Planning failed, continuing without summaries');
-            }
-        }
+        // Get section summaries for context
+        const summaries = await planEssay(sections, GROQ_KEY);
         
-        // Step 3: Humanize each section with context
+        // Process each section
         const results = [];
         
         for (let i = 0; i < sections.length; i++) {
             const section = sections[i];
-            const prevSummary = i > 0 ? summaries[i - 1] : null;
-            const nextSummary = i < sections.length - 1 ? summaries[i + 1] : null;
-            const sectionSummary = summaries[i];
+            const prevSummary = summaries[i - 1] || null;
+            const nextSummary = summaries[i + 1] || null;
             
-            const prompt = buildHumanizePrompt(
-                section, i, sections.length,
-                prevSummary, nextSummary, sectionSummary
-            );
-            
+            const prompt = buildPrompt(section, i, sections.length, prevSummary, nextSummary);
             const messages = [{ role: "user", content: prompt }];
-            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false);
             
-            // Post-process
-            const processed = postProcess(rawResult, !!section.title, section.title);
+            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false);
+            let processed = postProcess(rawResult, section.title);
+            
             results.push(processed);
         }
         
-        // Step 4: Assemble final output
+        // Assemble final output
         let finalOutput = results.join('\n\n');
-        
-        // Final cleanup
         finalOutput = killEmDashes(finalOutput);
         finalOutput = finalOutput.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 
@@ -519,11 +284,6 @@ export default async function handler(req, res) {
 }
 
 // ==========================================================================
-// EXPORTS for agent.js compatibility
+// EXPORTS
 // ==========================================================================
-export { 
-    postProcess as PostProcessor,
-    SIMPLE_SWAPS as AI_VOCAB_SWAPS,
-    detectSections as dynamicChunking,
-    killEmDashes
-};
+export { postProcess as PostProcessor, SIMPLE_SWAPS as AI_VOCAB_SWAPS, detectSections as dynamicChunking, killEmDashes };
