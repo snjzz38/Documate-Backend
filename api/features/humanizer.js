@@ -1,301 +1,237 @@
 // api/features/humanizer.js
-// Focus: Burstiness, perplexity variation, natural sentence structures
+// Section-aware humanization with context preservation
 import { GroqAPI } from '../utils/groqAPI.js';
 
 // ==========================================================================
-// 1. CONSTANTS - Banned words, phrases, and punctuation
+// 1. BANNED WORDS & SIMPLE SWAPS
 // ==========================================================================
 
 const BANNED_WORDS = [
-    // AI transitions
     "furthermore", "moreover", "additionally", "subsequently", "consequently",
-    "nevertheless", "notwithstanding", "henceforth", "whereby", "thereof",
-    "wherein", "heretofore", "aforementioned", "pertaining",
-    // Corporate speak
-    "leverage", "utilize", "implement", "facilitate", "optimize", "enhance",
-    "streamline", "synergy", "paradigm", "methodology", "framework", "robust",
-    "scalable", "seamless", "holistic", "innovative", "cutting-edge",
-    // Stuffy academic
-    "elucidate", "delineate", "ascertain", "endeavor", "commence", "terminate",
-    "ameliorate", "exacerbate", "mitigate", "precipitate", "substantiate",
-    "corroborate", "juxtapose", "proliferate", "underscore", "delve",
-    // Pretentious
-    "myriad", "plethora", "multifaceted", "comprehensive", "paramount",
-    "pivotal", "imperative", "quintessential", "ubiquitous", "profound",
-    // AI favorites
-    "landscape", "realm", "domain", "sphere", "tapestry", "symphony",
-    "testament", "beacon", "harbinger", "catalyst"
+    "nevertheless", "notwithstanding", "whereby", "thereof", "wherein",
+    "aforementioned", "utilize", "leverage", "facilitate", "optimize",
+    "enhance", "streamline", "paradigm", "methodology", "comprehensive",
+    "multifaceted", "myriad", "plethora", "paramount", "pivotal",
+    "delve", "underscore", "realm", "landscape", "tapestry", "testament"
 ];
 
-const WORD_SWAPS = {
-    "utilize": "use", "leverage": "use", "implement": "set up", "facilitate": "help",
-    "optimize": "improve", "enhance": "improve", "comprehensive": "full",
-    "furthermore": "also", "moreover": "also", "additionally": "also",
-    "subsequently": "then", "consequently": "so", "nevertheless": "still",
-    "crucial": "key", "significant": "big", "fundamental": "basic",
-    "demonstrate": "show", "indicate": "show", "illustrate": "show",
-    "numerous": "many", "various": "different", "substantial": "large",
-    "commence": "start", "terminate": "end", "acquire": "get",
-    "sufficient": "enough", "insufficient": "not enough", "excessive": "too much",
-    "prior to": "before", "subsequent to": "after", "in order to": "to",
-    "due to the fact that": "because", "in light of": "given",
-    "with regard to": "about", "in terms of": "for", "pertaining to": "about"
+const SIMPLE_SWAPS = {
+    "utilize": "use", "leverage": "use", "facilitate": "help", "optimize": "improve",
+    "enhance": "improve", "comprehensive": "full", "furthermore": "also",
+    "moreover": "and", "additionally": "also", "subsequently": "then",
+    "consequently": "so", "nevertheless": "but", "demonstrate": "show",
+    "indicate": "suggest", "significant": "major", "numerous": "many",
+    "sufficient": "enough", "prior to": "before", "in order to": "to",
+    "due to the fact that": "because", "in terms of": "for",
+    "it is important to note": "note that", "it should be noted": "note that"
 };
 
 // ==========================================================================
-// 2. CORE FUNCTIONS - EM dash removal, word replacement
+// 2. UTILITY FUNCTIONS
 // ==========================================================================
 
 function killEmDashes(text) {
     return text
-        .replace(/\u2014/g, ',')
-        .replace(/\u2013/g, ',')
-        .replace(/—/g, ',')
-        .replace(/–/g, ',')
+        .replace(/\u2014/g, ', ')
+        .replace(/\u2013/g, ', ')
+        .replace(/—/g, ', ')
+        .replace(/–/g, ', ')
         .replace(/ - /g, ', ')
         .replace(/ -- /g, ', ')
-        .replace(/--/g, ', ')
         .replace(/,\s*,/g, ',')
-        .replace(/\s{2,}/g, ' ');
+        .replace(/\s{2,}/g, ' ')
+        .trim();
 }
 
-function swapWords(text) {
+function applySwaps(text) {
     let result = text;
-    for (const [bad, good] of Object.entries(WORD_SWAPS)) {
-        const regex = new RegExp(`\\b${bad}\\b`, 'gi');
-        result = result.replace(regex, good);
+    for (const [bad, good] of Object.entries(SIMPLE_SWAPS)) {
+        result = result.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
     }
     return result;
 }
 
-function cleanAIArtifacts(text) {
+function cleanOutput(text) {
     let cleaned = text;
-    // Remove preambles
-    cleaned = cleaned.replace(/^(Here's|Here is|Below is|Sure,|I've rewritten|Rewritten)[^:]*:\s*/i, '');
+    // Remove AI preambles
+    cleaned = cleaned.replace(/^(Here's|Here is|Below is|Sure|I've rewritten|Rewritten)[^:.\n]*[:.]\s*/i, '');
     cleaned = cleaned.replace(/^["']|["']$/g, '');
-    // Fix spacing
-    cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
-    return cleaned;
+    return cleaned.trim();
 }
 
 // ==========================================================================
-// 3. BURSTINESS & PERPLEXITY - Randomize sentence characteristics
+// 3. SECTION DETECTION - Preserve original structure
 // ==========================================================================
 
-function generateBurstinessProfile() {
-    // Create a random profile that varies sentence length targets
-    // Burstiness = high variance in sentence length
-    const profiles = [
-        { short: 0.4, medium: 0.3, long: 0.3 },  // More short sentences
-        { short: 0.2, medium: 0.5, long: 0.3 },  // Balanced
-        { short: 0.3, medium: 0.3, long: 0.4 },  // More complex
-        { short: 0.5, medium: 0.3, long: 0.2 },  // Punchy style
-        { short: 0.25, medium: 0.5, long: 0.25 }, // Mostly medium
-    ];
-    return profiles[Math.floor(Math.random() * profiles.length)];
-}
-
-function generatePerplexityLevel() {
-    // Perplexity = unpredictability of word choice
-    // Higher = more unexpected word combinations
-    const levels = [
-        { name: "conversational", vocab: "simple", complexity: "low" },
-        { name: "thoughtful", vocab: "mixed", complexity: "medium" },
-        { name: "analytical", vocab: "precise", complexity: "medium" },
-        { name: "direct", vocab: "plain", complexity: "low" },
-        { name: "exploratory", vocab: "varied", complexity: "high" },
-    ];
-    return levels[Math.floor(Math.random() * levels.length)];
-}
-
-// ==========================================================================
-// 4. SENTENCE STRUCTURE PATTERNS - Randomized per chunk
-// ==========================================================================
-
-const SENTENCE_STRUCTURES = [
-    // Basic patterns
-    { pattern: "SVO", desc: "Subject-Verb-Object: 'The policy reduces emissions.'" },
-    { pattern: "SVA", desc: "Subject-Verb-Adverb: 'Temperatures rise sharply.'" },
-    { pattern: "SVOO", desc: "Subject-Verb-Object-Object: 'This gives countries options.'" },
+function detectSections(text) {
+    // Split by headers or double newlines
+    const lines = text.split('\n');
+    const sections = [];
+    let currentSection = { title: '', content: [] };
     
-    // Inverted/varied
-    { pattern: "Adverb-SV", desc: "Start with adverb: 'Clearly, this matters.'" },
-    { pattern: "Object-SV", desc: "Front the object: 'This problem, we can solve.'" },
-    { pattern: "Conditional", desc: "'If X happens, then Y.' or 'When X, Y follows.'" },
-    
-    // Compound
-    { pattern: "SV-and-SV", desc: "Two clauses with 'and': 'X happens and Y follows.'" },
-    { pattern: "SV-but-SV", desc: "Contrast with 'but': 'X seems true, but Y matters more.'" },
-    { pattern: "SV-so-SV", desc: "Cause-effect: 'X happened, so Y changed.'" },
-    
-    // Questions & fragments (human-like)
-    { pattern: "Rhetorical", desc: "Ask then answer: 'Why does this matter? Because...' " },
-    { pattern: "Fragment", desc: "Occasional fragment: 'Not just theory. Reality.'" },
-    
-    // Complex
-    { pattern: "Because-SV", desc: "Start with reason: 'Because X, we see Y.'" },
-    { pattern: "While-SV", desc: "Contrast while: 'While X seems true, Y is the reality.'" },
-];
-
-function getRandomStructures(count = 4) {
-    const shuffled = [...SENTENCE_STRUCTURES].sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, count);
-}
-
-// ==========================================================================
-// 5. NATURAL COLLOQUIALISMS - Subtle, not informal
-// ==========================================================================
-
-const COLLOQUIAL_TOUCHES = {
-    // Sentence starters (use sparingly ~10%)
-    starters: [
-        "The thing is,", "Here's what matters:", "Look at it this way:",
-        "Put simply,", "In practice,", "The reality is",
-    ],
-    // Transitional phrases
-    transitions: [
-        "That said,", "At the same time,", "On the flip side,",
-        "Even so,", "Still,", "Then again,",
-    ],
-    // Emphasis (use rarely ~5%)
-    emphasis: [
-        "actually", "really", "in fact", "clearly", "notably",
-    ],
-    // Hedges for nuance
-    hedges: [
-        "tends to", "often", "generally", "in most cases", "typically",
-    ],
-};
-
-function shouldAddColloquialism() {
-    return Math.random() < 0.12; // 12% chance
-}
-
-function getRandomColloquialism(type) {
-    const options = COLLOQUIAL_TOUCHES[type];
-    return options[Math.floor(Math.random() * options.length)];
-}
-
-// ==========================================================================
-// 6. CHUNKING WITH CONTEXT PRESERVATION
-// ==========================================================================
-
-function smartChunk(text) {
-    // Split by paragraphs first, then by sentence groups
-    const paragraphs = text.split(/\n\n+/);
-    const chunks = [];
-    
-    for (const para of paragraphs) {
-        const sentences = para.match(/[^.!?]+[.!?]+/g) || [para];
+    for (const line of lines) {
+        const trimmed = line.trim();
         
-        // Group 3-5 sentences per chunk for context
-        let current = [];
-        for (let i = 0; i < sentences.length; i++) {
-            current.push(sentences[i].trim());
-            if (current.length >= 3 + Math.floor(Math.random() * 3) || i === sentences.length - 1) {
-                if (current.length > 0) {
-                    chunks.push(current.join(' '));
-                }
-                current = [];
+        // Detect headers (various formats)
+        const isHeader = /^#{1,3}\s+/.test(trimmed) ||  // Markdown
+                        /^[A-Z][^.!?]*$/.test(trimmed) && trimmed.length < 60 && trimmed.length > 3 ||  // Title case short line
+                        /^(Introduction|Conclusion|Summary|Background|Overview|Causes?|Effects?|Impacts?|Solutions?|Results?|Discussion|Methods?)/i.test(trimmed);
+        
+        if (isHeader && trimmed.length > 0) {
+            // Save previous section if it has content
+            if (currentSection.content.length > 0) {
+                sections.push({
+                    title: currentSection.title,
+                    content: currentSection.content.join('\n').trim()
+                });
             }
+            // Start new section
+            currentSection = { title: trimmed.replace(/^#+\s*/, ''), content: [] };
+        } else if (trimmed.length > 0) {
+            currentSection.content.push(trimmed);
         }
     }
     
-    return chunks.filter(c => c.trim().length > 0);
+    // Don't forget last section
+    if (currentSection.content.length > 0) {
+        sections.push({
+            title: currentSection.title,
+            content: currentSection.content.join('\n').trim()
+        });
+    }
+    
+    // If no sections detected, treat whole text as one section
+    if (sections.length === 0) {
+        sections.push({ title: '', content: text.trim() });
+    }
+    
+    return sections;
 }
 
 // ==========================================================================
-// 7. BUILD PROMPT - With context, structure patterns, and variation
+// 4. PLANNING REQUEST - Get essay overview and section summaries
 // ==========================================================================
 
-function buildPrompt(chunk, chunkIndex, totalChunks, previousOutput = '') {
-    const burstiness = generateBurstinessProfile();
-    const perplexity = generatePerplexityLevel();
-    const structures = getRandomStructures(4);
+async function planEssay(sections, apiKey) {
+    const sectionList = sections.map((s, i) => 
+        `Section ${i + 1}${s.title ? ` (${s.title})` : ''}: ${s.content.substring(0, 150)}...`
+    ).join('\n');
     
-    // Context from previous chunk (last 2 sentences)
-    let contextNote = '';
-    if (previousOutput && chunkIndex > 0) {
-        const prevSentences = previousOutput.match(/[^.!?]+[.!?]+/g) || [];
-        const lastTwo = prevSentences.slice(-2).join(' ').trim();
-        if (lastTwo) {
-            contextNote = `\nPREVIOUS CONTEXT (maintain flow from this): "${lastTwo}"`;
+    const prompt = `Analyze this essay structure and provide a brief plan.
+
+SECTIONS:
+${sectionList}
+
+For each section, write ONE sentence describing:
+1. What this section covers
+2. How it connects to neighboring sections
+
+Format your response as:
+Section 1: [summary and connection]
+Section 2: [summary and connection]
+...
+
+Be concise. Each summary should be under 25 words.`;
+
+    const messages = [{ role: "user", content: prompt }];
+    const plan = await GroqAPI.chat(messages, apiKey, false);
+    
+    // Parse the plan into section summaries
+    const summaries = {};
+    const lines = plan.split('\n');
+    for (const line of lines) {
+        const match = line.match(/Section\s*(\d+):\s*(.+)/i);
+        if (match) {
+            summaries[parseInt(match[1]) - 1] = match[2].trim();
         }
     }
-
-    // Position-aware instructions
-    let positionNote = '';
-    if (chunkIndex === 0) {
-        positionNote = 'This is the OPENING. Start strong but natural.';
-    } else if (chunkIndex === totalChunks - 1) {
-        positionNote = 'This is the CONCLUSION. Wrap up naturally without clichés.';
-    } else {
-        positionNote = 'This is a MIDDLE section. Maintain momentum and flow.';
-    }
-
-    const structureList = structures.map(s => `• ${s.pattern}: ${s.desc}`).join('\n');
-
-    return `Rewrite this text to sound naturally human-written. Vary your approach.
-
-${positionNote}
-${contextNote}
-
-SENTENCE LENGTH MIX for this section:
-• ${Math.round(burstiness.short * 100)}% short (under 12 words)
-• ${Math.round(burstiness.medium * 100)}% medium (12-20 words)  
-• ${Math.round(burstiness.long * 100)}% longer (20+ words)
-
-VOCABULARY STYLE: ${perplexity.name} (${perplexity.vocab} words, ${perplexity.complexity} complexity)
-
-USE THESE SENTENCE STRUCTURES (mix them):
-${structureList}
-
-CRITICAL RULES:
-1. NO em dashes (—) or en dashes (–). Use commas or periods instead.
-2. NO words like: ${BANNED_WORDS.slice(0, 15).join(', ')}
-3. VARY how sentences start. Not every sentence begins with "The" or "This"
-4. Keep all citations and references exactly as written
-5. Be direct. Cut filler words.
-6. Occasional short sentence. For impact.
-
-TEXT TO REWRITE:
-"${chunk}"
-
-OUTPUT (rewritten text only):`;
+    
+    return summaries;
 }
 
 // ==========================================================================
-// 8. POST-PROCESS - Final cleanup
+// 5. HUMANIZATION PROMPT - Natural, context-aware
 // ==========================================================================
 
-function postProcess(text) {
+function buildHumanizePrompt(section, index, total, prevSummary, nextSummary, sectionSummary) {
+    // Determine position
+    let position = 'middle';
+    if (index === 0) position = 'opening';
+    if (index === total - 1) position = 'closing';
+    
+    // Build context
+    let context = '';
+    if (prevSummary) {
+        context += `PREVIOUS SECTION covered: ${prevSummary}\n`;
+    }
+    if (nextSummary) {
+        context += `NEXT SECTION will cover: ${nextSummary}\n`;
+    }
+    if (sectionSummary) {
+        context += `THIS SECTION is about: ${sectionSummary}\n`;
+    }
+
+    const bannedList = BANNED_WORDS.slice(0, 20).join(', ');
+
+    return `Rewrite this ${position} section to sound more human while PRESERVING its structure and meaning.
+
+${context}
+RULES:
+1. Keep the same ideas and flow - just make language more natural
+2. Preserve any headers, citations, or technical terms exactly
+3. NO em dashes (—). Use commas or periods instead
+4. Avoid these words: ${bannedList}
+5. Mix sentence lengths naturally - some short, some longer
+6. Don't start every sentence with "The" or "This"
+7. Keep transitions smooth between ideas
+8. Sound like a knowledgeable person explaining, not a textbook
+
+WHAT TO AVOID:
+- Choppy disconnected sentences
+- Overly casual slang
+- Changing the meaning or removing important points
+- Adding new information not in the original
+
+SECTION TO REWRITE:
+${section.title ? `[${section.title}]\n` : ''}${section.content}
+
+OUTPUT the rewritten section (keep the header if present):`;
+}
+
+// ==========================================================================
+// 6. POST-PROCESSING - Light touch cleanup
+// ==========================================================================
+
+function postProcess(text, originalHadHeader, headerText) {
     let result = text;
+    
+    // Clean AI artifacts
+    result = cleanOutput(result);
     
     // Kill em dashes
     result = killEmDashes(result);
     
-    // Clean AI artifacts
-    result = cleanAIArtifacts(result);
+    // Apply word swaps
+    result = applySwaps(result);
     
-    // Swap banned words
-    result = swapWords(result);
+    // Fix common AI participle patterns (but gently)
+    result = result.replace(/, making it /gi, '. This makes it ');
+    result = result.replace(/, leading to /gi, ', which leads to ');
+    result = result.replace(/, resulting in /gi, ', which results in ');
     
-    // Fix common AI patterns
-    result = result.replace(/, making /gi, '. This makes ');
-    result = result.replace(/, leading to /gi, '. This leads to ');
-    result = result.replace(/, resulting in /gi, '. This results in ');
-    result = result.replace(/, causing /gi, '. This causes ');
-    result = result.replace(/, enabling /gi, '. This enables ');
-    result = result.replace(/, allowing /gi, '. This allows ');
+    // Restore header if it was removed
+    if (originalHadHeader && headerText && !result.toLowerCase().startsWith(headerText.toLowerCase().substring(0, 10))) {
+        result = headerText + '\n' + result;
+    }
     
-    // Clean up
-    result = result.replace(/\s{2,}/g, ' ').trim();
+    // Clean spacing
+    result = result.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
     
     return result;
 }
 
 // ==========================================================================
-// 9. MAIN HANDLER
+// 7. MAIN HANDLER
 // ==========================================================================
 
 export default async function handler(req, res) {
@@ -305,40 +241,62 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { text, tone, apiKey } = req.body;
+        const { text, apiKey } = req.body;
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         
         if (!text) throw new Error("No text provided.");
         if (text.length < 10) throw new Error("Text too short.");
 
-        const safeText = text.substring(0, 15000);
-        const chunks = smartChunk(safeText);
-        const results = [];
-        let previousOutput = '';
-
-        console.log(`[Humanizer] Processing ${chunks.length} chunks`);
-
-        for (let i = 0; i < chunks.length; i++) {
-            const prompt = buildPrompt(chunks[i], i, chunks.length, previousOutput);
-            const messages = [{ role: "user", content: prompt }];
-            
-            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false);
-            let processed = postProcess(rawResult);
-            
-            results.push(processed);
-            previousOutput = processed; // Pass to next chunk for context
-        }
-
-        // Final assembly
-        let finalOutput = results.join(' ').replace(/\s{2,}/g, ' ').trim();
+        const safeText = text.substring(0, 20000);
         
-        // Final em dash paranoia check
+        // Step 1: Detect sections
+        const sections = detectSections(safeText);
+        console.log(`[Humanizer] Detected ${sections.length} sections`);
+        
+        // Step 2: Plan essay (get summaries for context)
+        let summaries = {};
+        if (sections.length > 1) {
+            try {
+                summaries = await planEssay(sections, GROQ_KEY);
+                console.log(`[Humanizer] Generated ${Object.keys(summaries).length} section summaries`);
+            } catch (e) {
+                console.log('[Humanizer] Planning failed, continuing without summaries');
+            }
+        }
+        
+        // Step 3: Humanize each section with context
+        const results = [];
+        
+        for (let i = 0; i < sections.length; i++) {
+            const section = sections[i];
+            const prevSummary = i > 0 ? summaries[i - 1] : null;
+            const nextSummary = i < sections.length - 1 ? summaries[i + 1] : null;
+            const sectionSummary = summaries[i];
+            
+            const prompt = buildHumanizePrompt(
+                section, i, sections.length,
+                prevSummary, nextSummary, sectionSummary
+            );
+            
+            const messages = [{ role: "user", content: prompt }];
+            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false);
+            
+            // Post-process
+            const processed = postProcess(rawResult, !!section.title, section.title);
+            results.push(processed);
+        }
+        
+        // Step 4: Assemble final output
+        let finalOutput = results.join('\n\n');
+        
+        // Final cleanup
         finalOutput = killEmDashes(finalOutput);
+        finalOutput = finalOutput.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 
         return res.status(200).json({
             success: true,
             result: finalOutput,
-            chunks: chunks.length
+            sections: sections.length
         });
 
     } catch (error) {
@@ -348,12 +306,11 @@ export default async function handler(req, res) {
 }
 
 // ==========================================================================
-// EXPORTS for agent.js
+// EXPORTS for agent.js compatibility
 // ==========================================================================
 export { 
-    postProcess as PostProcessor, 
-    WORD_SWAPS as AI_VOCAB_SWAPS, 
-    SENTENCE_STRUCTURES as STRATEGIES,
-    smartChunk as dynamicChunking,
+    postProcess as PostProcessor,
+    SIMPLE_SWAPS as AI_VOCAB_SWAPS,
+    detectSections as dynamicChunking,
     killEmDashes
 };
