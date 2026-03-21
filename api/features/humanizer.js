@@ -26,6 +26,42 @@ const SIMPLE_SWAPS = {
     "it is important to note": "note that", "it should be noted": "note that"
 };
 
+// AI punctuation and pattern tells to fix
+const AI_PATTERNS = [
+    // Semicolon overuse - split into two sentences
+    { regex: /;\s*it's\b/gi, replacement: ". It's" },
+    { regex: /;\s*this\b/gi, replacement: ". This" },
+    { regex: /;\s*they\b/gi, replacement: ". They" },
+    { regex: /;\s*we\b/gi, replacement: ". We" },
+    
+    // Colon declarations - remove or rephrase
+    { regex: /Here's the (?:key |main |real )?(?:point|thing|issue|problem):\s*/gi, replacement: "" },
+    { regex: /Let's be clear:\s*/gi, replacement: "" },
+    { regex: /The (?:real |key |main )?(?:point|thing|issue) is:\s*/gi, replacement: "" },
+    { regex: /Here's what matters:\s*/gi, replacement: "" },
+    { regex: /Bottom line:\s*/gi, replacement: "" },
+    
+    // "isn't just X, it's Y" pattern - vary it
+    { regex: /isn't just ([^,]+),\s*it's/gi, replacement: "goes beyond $1. It's" },
+    { regex: /isn't just about ([^,]+),\s*it's/gi, replacement: "is more than $1. It's" },
+    { regex: /not just ([^,]+),\s*it's/gi, replacement: "more than $1. It's" },
+    
+    // Triple comma chains - break them up
+    { regex: /,\s*([^,]{10,40}),\s*and\s+([^,]{10,40}),/gi, replacement: ", $1. And $2," },
+    
+    // "strains X, strains Y" repetition
+    { regex: /(\w+)s ([^,]+),\s*\1s ([^,]+),\s*and/gi, replacement: "$1s $2. It also $1s $3, and" },
+];
+
+// Banned sentence starters when repeated
+const VARIED_STARTERS = {
+    "It's": ["This is", "That's", "We see", "What we have is"],
+    "This is": ["It's", "Here we see", "What's happening is", "We're looking at"],
+    "The": ["A", "One", "This", ""],  // Empty means restructure
+    "There is": ["We have", "You'll find", "Look at"],
+    "We need": ["The need is", "What's needed is", "This requires"],
+};
+
 // ==========================================================================
 // 2. UTILITY FUNCTIONS
 // ==========================================================================
@@ -171,36 +207,105 @@ function buildHumanizePrompt(section, index, total, prevSummary, nextSummary, se
         context += `THIS SECTION is about: ${sectionSummary}\n`;
     }
 
-    const bannedList = BANNED_WORDS.slice(0, 20).join(', ');
+    const bannedList = BANNED_WORDS.slice(0, 15).join(', ');
 
-    return `Rewrite this ${position} section to sound more human while PRESERVING its structure and meaning.
+    return `Rewrite this ${position} section to sound naturally human while keeping its structure.
 
 ${context}
-RULES:
-1. Keep the same ideas and flow - just make language more natural
-2. Preserve any headers, citations, or technical terms exactly
-3. NO em dashes (—). Use commas or periods instead
-4. Avoid these words: ${bannedList}
-5. Mix sentence lengths naturally - some short, some longer
-6. Don't start every sentence with "The" or "This"
-7. Keep transitions smooth between ideas
-8. Sound like a knowledgeable person explaining, not a textbook
+WRITING STYLE:
+- Write like an informed person explaining something they know well
+- Use a mix of sentence lengths (some short, some medium, occasional longer ones)
+- Keep ideas flowing logically from one to the next
 
-WHAT TO AVOID:
-- Choppy disconnected sentences
-- Overly casual slang
-- Changing the meaning or removing important points
-- Adding new information not in the original
+MUST AVOID - these are AI tells:
+- Semicolons (;) - use periods instead to separate ideas
+- Colons after phrases like "Here's the thing:" or "Let's be clear:" - just state it directly
+- The pattern "isn't just X, it's Y" - vary how you express contrasts  
+- Comma chains with 3+ items that create run-on sentences
+- Starting multiple sentences with "It's" or "This is"
+- Dramatic declarations like "The real point is:" or "Bottom line:"
+- Em dashes (—) - use commas or periods
+
+PRESERVE:
+- The section's meaning and main points
+- Any headers, citations, or technical terms
+- Logical flow between paragraphs
 
 SECTION TO REWRITE:
 ${section.title ? `[${section.title}]\n` : ''}${section.content}
 
-OUTPUT the rewritten section (keep the header if present):`;
+OUTPUT the rewritten section only:`;
 }
 
 // ==========================================================================
-// 6. POST-PROCESSING - Light touch cleanup
+// 6. POST-PROCESSING - Fix AI patterns, vary starters, clean punctuation
 // ==========================================================================
+
+function fixAIPatterns(text) {
+    let result = text;
+    for (const { regex, replacement } of AI_PATTERNS) {
+        result = result.replace(regex, replacement);
+    }
+    return result;
+}
+
+function varyRepeatedStarters(text) {
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    const starterCounts = {};
+    
+    const varied = sentences.map((sentence, i) => {
+        // Check first word/phrase
+        for (const [starter, alternatives] of Object.entries(VARIED_STARTERS)) {
+            if (sentence.startsWith(starter)) {
+                starterCounts[starter] = (starterCounts[starter] || 0) + 1;
+                
+                // If used more than twice, vary it
+                if (starterCounts[starter] > 2 && alternatives.length > 0) {
+                    const alt = alternatives[Math.floor(Math.random() * alternatives.length)];
+                    if (alt) {
+                        return alt + sentence.slice(starter.length);
+                    }
+                }
+            }
+        }
+        return sentence;
+    });
+    
+    return varied.join(' ');
+}
+
+function fixPunctuation(text) {
+    let result = text;
+    
+    // Remove unnecessary semicolons (replace with periods)
+    result = result.replace(/;\s+(?=[a-z])/g, '. ');
+    
+    // Fix double punctuation
+    result = result.replace(/\.\./g, '.');
+    result = result.replace(/,,/g, ',');
+    result = result.replace(/\s+,/g, ',');
+    
+    // Reduce comma density in long sentences
+    const sentences = result.split(/(?<=[.!?])\s+/);
+    result = sentences.map(s => {
+        const commaCount = (s.match(/,/g) || []).length;
+        const wordCount = s.split(/\s+/).length;
+        
+        // If more than 1 comma per 8 words, it's too dense
+        if (commaCount > 3 && commaCount / wordCount > 0.125) {
+            // Replace middle commas with periods where sensible
+            const parts = s.split(/,\s*/);
+            if (parts.length > 3) {
+                const mid = Math.floor(parts.length / 2);
+                parts[mid] = '. ' + parts[mid].charAt(0).toUpperCase() + parts[mid].slice(1);
+                return parts.join(', ').replace(', . ', '. ');
+            }
+        }
+        return s;
+    }).join(' ');
+    
+    return result;
+}
 
 function postProcess(text, originalHadHeader, headerText) {
     let result = text;
@@ -213,6 +318,15 @@ function postProcess(text, originalHadHeader, headerText) {
     
     // Apply word swaps
     result = applySwaps(result);
+    
+    // Fix AI patterns (semicolons, colons, repetitive structures)
+    result = fixAIPatterns(result);
+    
+    // Fix punctuation issues
+    result = fixPunctuation(result);
+    
+    // Vary repeated sentence starters
+    result = varyRepeatedStarters(result);
     
     // Fix common AI participle patterns (but gently)
     result = result.replace(/, making it /gi, '. This makes it ');
