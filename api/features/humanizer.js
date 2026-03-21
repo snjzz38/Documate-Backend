@@ -122,56 +122,40 @@ function buildPrompt(section, index, totalSections, prevSummary, nextSummary) {
     if (prevSummary) contextNote += `[Follows from: ${prevSummary}] `;
     if (nextSummary) contextNote += `[Leads into: ${nextSummary}]`;
 
-    return `Rewrite this ${position} section in plain, natural English.
+    return `Rewrite this ${position} section in plain English.
 
 ${contextNote}
 
-AI DETECTION CATCHES THESE PATTERNS - AVOID ALL:
-1. "not X but Y" constructions - sounds like a debate speech
-2. "extends beyond" - AI loves this phrase
-3. Perfect parallel structures like "X into Y and A into B"  
-4. Formal verbs: "demanding", "representing", "intensifying", "transforming"
-5. Passive voice: "are displaced", "is already visible"
-6. Perfect grammar and sentence balance throughout
-7. Words like: essential, crucial, fundamental, significant, substantial
+BANNED PATTERNS - DO NOT USE ANY OF THESE:
+1. "isn't just X, it's Y" - BANNED (don't split across sentences either)
+2. "It's" to start sentences - use MAXIMUM once in the whole text
+3. "To be clear" / "The reality is" / "The truth is" - BANNED  
+4. Perfect parallels like "X we can Y and Z we can't" - BANNED
+5. "The real problem/threat/issue is" - BANNED
+6. Semicolons - BANNED
+7. Three-part lists "X, Y, and Z" - limit to one if needed
 
-WRITE LIKE A HUMAN ACTUALLY WRITES:
-- Use normal verbs: "needs" not "demands", "shows" not "represents", "makes worse" not "exacerbates"
-- Active voice mostly: "storms destroy cities" not "cities are destroyed by storms"
-- Imperfect structures are fine - not every sentence needs to be balanced
-- Use contractions naturally but not constantly
-- Some sentences can be a bit wordy or imperfect - that's human
-- Connect ideas with simple words: "and", "but", "so", "because", "which"
+INSTEAD, WRITE LIKE THIS:
+- Vary your sentence starters: "Climate...", "When...", "This...", "Countries...", "People..."
+- Use simple connectors: "and", "but", "so", "because", "which means"
+- Some sentences can run a bit long with multiple clauses
+- Other sentences can be short.
+- Don't wrap up every point perfectly - leave some ideas slightly open
 
-WORD CHOICE - USE THE SIMPLER OPTION:
-- "needs" not "requires" or "demands"
-- "shows" not "represents" or "demonstrates"  
-- "gets worse" not "intensifies" or "escalates"
-- "people leave" not "displacement occurs"
-- "breaks down" not "erodes" or "deteriorates"
-- "can't handle" not "unable to withstand"
+GOOD EXAMPLE:
+"Climate change has become a security problem, not just an environmental one. Hotter temperatures dry out farmland and make storms worse, which hits poor countries hardest. When crops fail year after year, families have to move somewhere else. That migration creates tension at borders and uses up resources that receiving countries need for their own people. We're already watching this happen in several regions."
 
-EXAMPLE OF NATURAL HUMAN WRITING:
-"Climate change is more than an environmental problem at this point. When you look at how droughts and floods affect poor countries, you start to see the security angle. Crops fail, people can't feed their families, and they have to move somewhere else. That puts pressure on neighboring countries, and things can spiral from there. We've already seen this happen in some regions, and it's probably going to get worse if emissions keep rising."
-
-EXAMPLE OF AI WRITING TO AVOID:
-"Climate change extends beyond environmental concerns, representing a fundamental security challenge. Rising temperatures intensify resource conflicts, displacing populations and eroding international trust. This pattern, already visible, demands immediate policy intervention to prevent escalating instability."
+BAD EXAMPLE (typical AI writing):
+"Climate change isn't just an environmental issue, it's a security crisis. It's causing droughts and storms. It's forcing people to migrate. It's straining borders. To be clear, the real threat is instability. We need to act now."
 
 TEXT TO REWRITE:
 "${section.content}"
 
-CRITICAL RULES:
-- Use simple, common words
-- Active voice as much as possible  
-- Not everything needs to be perfectly structured
-- Keep the meaning but make it sound like a regular person wrote it
-- NO "extends beyond", "not X but Y", or fancy parallel structures
-
-Write naturally:`;
+Write a natural version using varied sentence structures:`;
 }
 
 // ==========================================================================
-// POST-PROCESSING
+// POST-PROCESSING - Aggressive pattern breaking
 // ==========================================================================
 
 function postProcess(text, sectionTitle) {
@@ -186,62 +170,124 @@ function postProcess(text, sectionTitle) {
     // Apply word swaps
     result = applySwaps(result);
     
-    // Remove fake casual phrases
-    result = result.replace(/\b(Here's the thing|The thing is|You have to wonder|You know how|What worries me is|And that's alarming)[,:]?\s*/gi, '');
+    // Remove fake casual/transition phrases
+    const fakePhrases = [
+        /\bHere's the thing[,:]\s*/gi,
+        /\bThe thing is[,:]\s*/gi,
+        /\bTo be clear[,:]\s*/gi,
+        /\bTo be fair[,:]\s*/gi,
+        /\bLet's be honest[,:]\s*/gi,
+        /\bThe reality is[,:]\s*/gi,
+        /\bThe truth is[,:]\s*/gi,
+        /\bThe fact is[,:]\s*/gi,
+        /\bYou have to wonder\s*/gi,
+        /\bWhat worries me is\s*/gi,
+        /\bAnd that's alarming\s*/gi,
+        /\bLook[,:]\s*/gi,
+        /\bGranted[,:]\s*/gi,
+    ];
+    fakePhrases.forEach(p => { result = result.replace(p, ''); });
     
-    // Remove "extends beyond" pattern
+    // AGGRESSIVE: Fix ALL "isn't just X, it's Y" patterns (including split across sentences)
+    result = result.replace(/isn't just ([^,\.]+)[,\.]\s*[Ii]t's/gi, 'goes beyond $1 and becomes');
+    result = result.replace(/isn't just ([^,\.]+)[,\.]\s*[Ii]t is/gi, 'goes beyond $1 and becomes');
+    result = result.replace(/is not just ([^,\.]+)[,\.]\s*[Ii]t's/gi, 'goes beyond $1 and becomes');
+    result = result.replace(/isn't just/gi, 'goes beyond being');
+    result = result.replace(/is not just/gi, 'goes beyond being');
+    result = result.replace(/not just ([^,\.]+),\s*it's/gi, 'more than $1, becoming');
+    
+    // Remove "extends beyond" 
     result = result.replace(/extends beyond/gi, 'is more than');
     
-    // Remove "not X but Y" patterns
-    result = result.replace(/not in ([^,]+),?\s*but in/gi, 'in');
-    result = result.replace(/not ([^,]+),?\s*but rather/gi, '');
-    result = result.replace(/lies not in/gi, 'is about');
+    // Fix "It's" sentence starters - convert many to other structures
+    let sentences = result.split(/(?<=[.!?])\s+/);
+    let itsCount = 0;
+    sentences = sentences.map((s, i) => {
+        if (/^It's\b/i.test(s)) {
+            itsCount++;
+            if (itsCount > 1) {
+                // Replace with varied alternatives
+                const replacements = [
+                    s.replace(/^It's\s+/i, 'This becomes '),
+                    s.replace(/^It's\s+/i, 'What we see is '),
+                    s.replace(/^It's\s+(a|an|the)\s+/i, 'We face $1 '),
+                    s.replace(/^It's\s+about\s+/i, 'The issue is '),
+                    s.replace(/^It's\s+how\s+/i, 'Consider how '),
+                    s.replace(/^It's\s+not\s+/i, 'The point is not '),
+                ];
+                // Pick based on what fits
+                for (const rep of replacements) {
+                    if (rep !== s) return rep;
+                }
+            }
+        } else if (/^It is\b/i.test(s)) {
+            itsCount++;
+            if (itsCount > 1) {
+                return s.replace(/^It is\s+/i, 'This is ');
+            }
+        }
+        return s;
+    });
+    result = sentences.join(' ');
     
-    // Remove formal/AI verb forms
-    result = result.replace(/\bdemanding\b/gi, 'that needs');
-    result = result.replace(/\brepresenting\b/gi, 'which is');
-    result = result.replace(/\bintensifying\b/gi, 'making worse');
-    result = result.replace(/\btransforming\b/gi, 'turning');
-    result = result.replace(/\bescalating\b/gi, 'getting worse');
-    result = result.replace(/\beroding\b/gi, 'breaking down');
-    result = result.replace(/\bdepleting\b/gi, 'using up');
+    // Fix "The real X isn't/is" pattern
+    result = result.replace(/The real (problem|threat|issue|danger|risk) isn't/gi, 'The bigger concern is not');
+    result = result.replace(/The real (problem|threat|issue|danger|risk) is/gi, 'What matters more is');
+    
+    // Break perfect parallel structures
+    result = result.replace(/(\w+) we can (\w+) and (\w+) we can't/gi, '$1 we can $2, versus $3 that spirals out of control');
+    result = result.replace(/(\w+) into (\w+)[,]? and (\w+) into (\w+)/gi, '$1 becomes $2 while $3 turns to $4');
+    result = result.replace(/between (\w+) and (\w+)$/gi, 'between $1 or $2');
+    
+    // Remove formal verb forms
+    const formalVerbs = [
+        [/\bdemanding\b/gi, 'that needs'],
+        [/\brepresenting\b/gi, 'which is'],
+        [/\bintensifying\b/gi, 'making worse'],
+        [/\btransforming\b/gi, 'turning'],
+        [/\bescalating\b/gi, 'getting worse'],
+        [/\beroding\b/gi, 'wearing down'],
+        [/\bdepleting\b/gi, 'draining'],
+        [/\bexacerbating\b/gi, 'making worse'],
+    ];
+    formalVerbs.forEach(([p, r]) => { result = result.replace(p, r); });
     
     // Simplify fancy words
-    result = result.replace(/\bequitable\b/gi, 'fair');
-    result = result.replace(/\bvulnerable\b/gi, 'at risk');
-    result = result.replace(/\bessential\b/gi, 'needed');
-    result = result.replace(/\bfundamental\b/gi, 'basic');
-    result = result.replace(/\bsubstantial\b/gi, 'big');
+    const fancyWords = [
+        [/\bequitable\b/gi, 'fair'],
+        [/\bvulnerable\b/gi, 'at risk'],
+        [/\bessential\b/gi, 'needed'],
+        [/\bfundamental\b/gi, 'basic'],
+        [/\bsubstantial\b/gi, 'large'],
+        [/\bsignificant\b/gi, 'major'],
+        [/\bcrucial\b/gi, 'important'],
+        [/\becological\b/gi, 'environmental'],
+        [/\bfragile communities\b/gi, 'struggling communities'],
+        [/\bmass displacement\b/gi, 'people fleeing'],
+    ];
+    fancyWords.forEach(([p, r]) => { result = result.replace(p, r); });
     
-    // Fix passive voice where easy
-    result = result.replace(/are displaced/gi, 'have to leave');
+    // Fix passive voice
+    result = result.replace(/are displaced/gi, 'have to move');
     result = result.replace(/is already visible/gi, 'is already happening');
     result = result.replace(/are destroyed/gi, 'get destroyed');
+    result = result.replace(/are being forced/gi, 'have to');
     
-    // Remove any remaining "isn't just...it's" patterns  
-    result = result.replace(/isn't just ([^.]+)\.\s*It's/gi, 'is more than $1, it\'s also');
-    result = result.replace(/is not just ([^.]+)\.\s*It is/gi, 'is more than $1, and');
-    result = result.replace(/isn't just/gi, 'is more than');
-    result = result.replace(/is not just/gi, 'is more than');
+    // Remove "basic stuff like" - too casual
+    result = result.replace(/basic stuff like/gi, 'basics like');
     
-    // Remove perfect parallel structures
-    result = result.replace(/(\w+) into (\w+) and (\w+) into (\w+)/gi, '$1 into $2, and $3 becomes $4');
-    
-    // Simplify "the choice is not X but Y"
-    result = result.replace(/the choice is not between ([^,]+),?\s*but between/gi, 'we\'re choosing between');
-    result = result.replace(/the choice is between ([^,]+) and/gi, 'it\'s either $1 or');
-    
-    // Remove semicolons
+    // Clean punctuation
     result = result.replace(/;\s*/g, ', ');
-    
-    // Fix awkward punctuation
     result = result.replace(/\.\./g, '.');
     result = result.replace(/,,/g, ',');
     result = result.replace(/\s+,/g, ',');
     result = result.replace(/\s{2,}/g, ' ');
     
-    // Clean up
+    // Final cleanup
     result = result.trim();
+    
+    // Fix any sentences that now start with lowercase after our replacements
+    result = result.replace(/\.\s+([a-z])/g, (m, c) => '. ' + c.toUpperCase());
     
     // Restore title if needed
     if (sectionTitle) {
