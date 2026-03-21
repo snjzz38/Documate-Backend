@@ -126,32 +126,32 @@ function buildPrompt(section, index, totalSections, prevSummary, nextSummary) {
 
 ${contextNote}
 
-BANNED PATTERNS - DO NOT USE ANY OF THESE:
-1. "isn't just X, it's Y" - BANNED (don't split across sentences either)
-2. "It's" to start sentences - use MAXIMUM once in the whole text
-3. "To be clear" / "The reality is" / "The truth is" - BANNED  
-4. Perfect parallels like "X we can Y and Z we can't" - BANNED
-5. "The real problem/threat/issue is" - BANNED
-6. Semicolons - BANNED
-7. Three-part lists "X, Y, and Z" - limit to one if needed
+COMPLETELY BANNED - never use these patterns:
+- "isn't just X, it's Y" or "doesn't just X, it Y" - ANY variation of this
+- Starting sentences with "It's" more than once total
+- Starting sentences with "We're" more than once total  
+- ", which means" as a connector
+- "The real danger/problem/threat is/comes from"
+- Perfect parallels: "between X and Y" at the end
+- "To be clear" / "The reality is"
+- Semicolons
 
-INSTEAD, WRITE LIKE THIS:
-- Vary your sentence starters: "Climate...", "When...", "This...", "Countries...", "People..."
-- Use simple connectors: "and", "but", "so", "because", "which means"
-- Some sentences can run a bit long with multiple clauses
-- Other sentences can be short.
-- Don't wrap up every point perfectly - leave some ideas slightly open
+VARY YOUR SENTENCE STARTERS - use different ones:
+"Climate...", "Rising...", "When...", "This...", "Countries...", "People...", "Droughts...", "The...", "A...", "Without..."
 
-GOOD EXAMPLE:
-"Climate change has become a security problem, not just an environmental one. Hotter temperatures dry out farmland and make storms worse, which hits poor countries hardest. When crops fail year after year, families have to move somewhere else. That migration creates tension at borders and uses up resources that receiving countries need for their own people. We're already watching this happen in several regions."
+USE SIMPLE CONNECTORS:
+"and", "but", "so", "because", "since", "as", "after", "before"
 
-BAD EXAMPLE (typical AI writing):
-"Climate change isn't just an environmental issue, it's a security crisis. It's causing droughts and storms. It's forcing people to migrate. It's straining borders. To be clear, the real threat is instability. We need to act now."
+GOOD EXAMPLE (varied starters, no banned patterns):
+"Climate change has moved beyond environmental concern into security territory. Rising temperatures dry out farmland and make storms more destructive, hitting poor countries hardest. When harvests fail repeatedly, families pack up and leave. That migration creates friction at borders and drains resources from host countries. Several regions are already dealing with this, and the pattern keeps accelerating."
+
+BAD EXAMPLE (repetitive starters, banned patterns):
+"It's a security crisis. It's causing problems. We're seeing this happen. We're not prepared. The real danger is instability. This isn't just about environment, it's about survival."
 
 TEXT TO REWRITE:
 "${section.content}"
 
-Write a natural version using varied sentence structures:`;
+Write using varied sentence starters and no banned patterns:`;
 }
 
 // ==========================================================================
@@ -182,62 +182,79 @@ function postProcess(text, sectionTitle) {
         /\bThe fact is[,:]\s*/gi,
         /\bYou have to wonder\s*/gi,
         /\bWhat worries me is\s*/gi,
-        /\bAnd that's alarming\s*/gi,
         /\bLook[,:]\s*/gi,
         /\bGranted[,:]\s*/gi,
     ];
     fakePhrases.forEach(p => { result = result.replace(p, ''); });
     
-    // AGGRESSIVE: Fix ALL "isn't just X, it's Y" patterns (including split across sentences)
-    result = result.replace(/isn't just ([^,\.]+)[,\.]\s*[Ii]t's/gi, 'goes beyond $1 and becomes');
-    result = result.replace(/isn't just ([^,\.]+)[,\.]\s*[Ii]t is/gi, 'goes beyond $1 and becomes');
-    result = result.replace(/is not just ([^,\.]+)[,\.]\s*[Ii]t's/gi, 'goes beyond $1 and becomes');
-    result = result.replace(/isn't just/gi, 'goes beyond being');
-    result = result.replace(/is not just/gi, 'goes beyond being');
-    result = result.replace(/not just ([^,\.]+),\s*it's/gi, 'more than $1, becoming');
+    // AGGRESSIVE: Fix ALL "just X, it's/it Y" patterns
+    result = result.replace(/isn't just ([^,\.]+),\s*it's/gi, 'goes beyond $1 to become');
+    result = result.replace(/isn't just ([^,\.]+),\s*it/gi, 'goes beyond $1 and');
+    result = result.replace(/doesn't just ([^,\.]+),\s*it/gi, 'does more than $1 and');
+    result = result.replace(/don't just ([^,\.]+),\s*they/gi, 'do more than $1 and');
+    result = result.replace(/isn't just ([^,\.]+)\.\s*[Ii]t's/gi, 'goes beyond $1, becoming');
+    result = result.replace(/isn't just/gi, 'goes beyond');
+    result = result.replace(/doesn't just/gi, 'does more than');
+    result = result.replace(/don't just/gi, 'do more than');
     
-    // Remove "extends beyond" 
-    result = result.replace(/extends beyond/gi, 'is more than');
+    // Remove "which means" right after period or at sentence start
+    result = result.replace(/,\s*which means/gi, '. This means');
     
-    // Fix "It's" sentence starters - convert many to other structures
+    // Fix "The real X comes from/is" pattern  
+    result = result.replace(/The real (danger|problem|threat|issue|risk) (comes from|is)\s*/gi, 'The bigger concern is ');
+    
+    // Fix repeated "We're" starters
     let sentences = result.split(/(?<=[.!?])\s+/);
+    let wereCount = 0;
     let itsCount = 0;
     sentences = sentences.map((s, i) => {
+        // Handle "We're" repetition
+        if (/^We're\b/i.test(s)) {
+            wereCount++;
+            if (wereCount > 1) {
+                const alts = [
+                    s.replace(/^We're\s+already\s+/i, 'This is already '),
+                    s.replace(/^We're\s+not\s+/i, 'The choice is not '),
+                    s.replace(/^We're\s+choosing\s+/i, 'The choice is '),
+                    s.replace(/^We're\s+seeing\s+/i, 'Evidence shows '),
+                    s.replace(/^We're\s+/i, 'People are '),
+                ];
+                for (const alt of alts) {
+                    if (alt !== s) return alt;
+                }
+            }
+        }
+        // Handle "It's" repetition  
         if (/^It's\b/i.test(s)) {
             itsCount++;
             if (itsCount > 1) {
-                // Replace with varied alternatives
-                const replacements = [
-                    s.replace(/^It's\s+/i, 'This becomes '),
-                    s.replace(/^It's\s+/i, 'What we see is '),
-                    s.replace(/^It's\s+(a|an|the)\s+/i, 'We face $1 '),
-                    s.replace(/^It's\s+about\s+/i, 'The issue is '),
+                const alts = [
+                    s.replace(/^It's\s+the\s+/i, 'This is the '),
+                    s.replace(/^It's\s+a\s+/i, 'This represents a '),
+                    s.replace(/^It's\s+about\s+/i, 'The question is '),
                     s.replace(/^It's\s+how\s+/i, 'Consider how '),
-                    s.replace(/^It's\s+not\s+/i, 'The point is not '),
+                    s.replace(/^It's\s+/i, 'This is '),
                 ];
-                // Pick based on what fits
-                for (const rep of replacements) {
-                    if (rep !== s) return rep;
+                for (const alt of alts) {
+                    if (alt !== s) return alt;
                 }
-            }
-        } else if (/^It is\b/i.test(s)) {
-            itsCount++;
-            if (itsCount > 1) {
-                return s.replace(/^It is\s+/i, 'This is ');
             }
         }
         return s;
     });
     result = sentences.join(' ');
     
-    // Fix "The real X isn't/is" pattern
-    result = result.replace(/The real (problem|threat|issue|danger|risk) isn't/gi, 'The bigger concern is not');
-    result = result.replace(/The real (problem|threat|issue|danger|risk) is/gi, 'What matters more is');
+    // Break perfect parallel structures at end of sentences
+    result = result.replace(/between (\w+) (\w+) and (\w+) (\w+)\.$/gi, 'between $1 $2 or $3 $4.');
+    result = result.replace(/between ([^,]+) and ([^\.]+)\./gi, (match, a, b) => {
+        if (a.split(' ').length > 1 && b.split(' ').length > 1) {
+            return `between ${a}, or ${b}.`;
+        }
+        return match;
+    });
     
-    // Break perfect parallel structures
-    result = result.replace(/(\w+) we can (\w+) and (\w+) we can't/gi, '$1 we can $2, versus $3 that spirals out of control');
-    result = result.replace(/(\w+) into (\w+)[,]? and (\w+) into (\w+)/gi, '$1 becomes $2 while $3 turns to $4');
-    result = result.replace(/between (\w+) and (\w+)$/gi, 'between $1 or $2');
+    // Fix awkward "X becomes Y while Z turns to W" 
+    result = result.replace(/(\w+) becomes (\w+) while (\w+) turns to (\w+)/gi, '$1 leads to $2, and $3 breeds $4');
     
     // Remove formal verb forms
     const formalVerbs = [
@@ -246,9 +263,8 @@ function postProcess(text, sectionTitle) {
         [/\bintensifying\b/gi, 'making worse'],
         [/\btransforming\b/gi, 'turning'],
         [/\bescalating\b/gi, 'getting worse'],
-        [/\beroding\b/gi, 'wearing down'],
+        [/\beroding\b/gi, 'wearing away'],
         [/\bdepleting\b/gi, 'draining'],
-        [/\bexacerbating\b/gi, 'making worse'],
     ];
     formalVerbs.forEach(([p, r]) => { result = result.replace(p, r); });
     
@@ -259,11 +275,12 @@ function postProcess(text, sectionTitle) {
         [/\bessential\b/gi, 'needed'],
         [/\bfundamental\b/gi, 'basic'],
         [/\bsubstantial\b/gi, 'large'],
-        [/\bsignificant\b/gi, 'major'],
-        [/\bcrucial\b/gi, 'important'],
+        [/\bsignificant\b/gi, 'big'],
+        [/\bcrucial\b/gi, 'key'],
         [/\becological\b/gi, 'environmental'],
         [/\bfragile communities\b/gi, 'struggling communities'],
-        [/\bmass displacement\b/gi, 'people fleeing'],
+        [/\bfragile societies\b/gi, 'unstable societies'],
+        [/\bmass displacement\b/gi, 'large-scale migration'],
     ];
     fancyWords.forEach(([p, r]) => { result = result.replace(p, r); });
     
@@ -273,9 +290,6 @@ function postProcess(text, sectionTitle) {
     result = result.replace(/are destroyed/gi, 'get destroyed');
     result = result.replace(/are being forced/gi, 'have to');
     
-    // Remove "basic stuff like" - too casual
-    result = result.replace(/basic stuff like/gi, 'basics like');
-    
     // Clean punctuation
     result = result.replace(/;\s*/g, ', ');
     result = result.replace(/\.\./g, '.');
@@ -283,11 +297,11 @@ function postProcess(text, sectionTitle) {
     result = result.replace(/\s+,/g, ',');
     result = result.replace(/\s{2,}/g, ' ');
     
+    // Fix sentences starting with lowercase after replacements
+    result = result.replace(/\.\s+([a-z])/g, (m, c) => '. ' + c.toUpperCase());
+    
     // Final cleanup
     result = result.trim();
-    
-    // Fix any sentences that now start with lowercase after our replacements
-    result = result.replace(/\.\s+([a-z])/g, (m, c) => '. ' + c.toUpperCase());
     
     // Restore title if needed
     if (sectionTitle) {
