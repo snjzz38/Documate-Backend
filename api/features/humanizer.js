@@ -29,7 +29,7 @@ const SIMPLE_SWAPS = {
 // AI punctuation and pattern tells to fix
 const AI_PATTERNS = [
     // Semicolon overuse - split into two sentences
-    { regex: /;\s*it's\b/gi, replacement: ". It's" },
+    { regex: /;\s*it's\b/gi, replacement: ". It is" },
     { regex: /;\s*this\b/gi, replacement: ". This" },
     { regex: /;\s*they\b/gi, replacement: ". They" },
     { regex: /;\s*we\b/gi, replacement: ". We" },
@@ -42,24 +42,46 @@ const AI_PATTERNS = [
     { regex: /Bottom line:\s*/gi, replacement: "" },
     
     // "isn't just X, it's Y" pattern - vary it
-    { regex: /isn't just ([^,]+),\s*it's/gi, replacement: "goes beyond $1. It's" },
-    { regex: /isn't just about ([^,]+),\s*it's/gi, replacement: "is more than $1. It's" },
-    { regex: /not just ([^,]+),\s*it's/gi, replacement: "more than $1. It's" },
+    { regex: /isn't just ([^,]+),\s*it's/gi, replacement: "goes beyond $1. It is" },
+    { regex: /isn't just about ([^,]+),\s*it's/gi, replacement: "is more than $1. This is" },
+    { regex: /not just ([^,]+),\s*it's/gi, replacement: "more than $1. This means" },
+    { regex: /doesn't just ([^,]+),\s*it/gi, replacement: "does more than $1. It" },
     
     // Triple comma chains - break them up
-    { regex: /,\s*([^,]{10,40}),\s*and\s+([^,]{10,40}),/gi, replacement: ", $1. And $2," },
+    { regex: /,\s*([^,]{10,40}),\s*and\s+([^,]{10,40}),/gi, replacement: ", $1. It also $2," },
     
     // "strains X, strains Y" repetition
     { regex: /(\w+)s ([^,]+),\s*\1s ([^,]+),\s*and/gi, replacement: "$1s $2. It also $1s $3, and" },
+    
+    // Reduce "It's" at sentence starts
+    { regex: /\.\s+It's\s+(?:a|the|how|about|what)/gi, replacement: function(match) {
+        const alternatives = [". This is", ". We see", ". The reality is", ". What we face is"];
+        return alternatives[Math.floor(Math.random() * alternatives.length)] + match.slice(6);
+    }},
+];
+
+// Contraction balancing - don't overuse
+const CONTRACTION_PAIRS = [
+    ["isn't", "is not"],
+    ["doesn't", "does not"],
+    ["don't", "do not"],
+    ["won't", "will not"],
+    ["can't", "cannot"],
+    ["we're", "we are"],
+    ["they're", "they are"],
+    ["it's", "it is"],
+    ["that's", "that is"],
 ];
 
 // Banned sentence starters when repeated
 const VARIED_STARTERS = {
-    "It's": ["This is", "That's", "We see", "What we have is"],
-    "This is": ["It's", "Here we see", "What's happening is", "We're looking at"],
-    "The": ["A", "One", "This", ""],  // Empty means restructure
-    "There is": ["We have", "You'll find", "Look at"],
-    "We need": ["The need is", "What's needed is", "This requires"],
+    "It's": ["This is", "What we see is", "The reality is", "We face"],
+    "It is": ["This is", "What exists is", "The situation is"],
+    "This is": ["Here we have", "What's happening is", "We are looking at"],
+    "The": ["A", "One", "This particular", ""],
+    "There is": ["We have", "You find", "One sees"],
+    "We need": ["The need is for", "What's required is", "This calls for"],
+    "It also": ["This also", "Additionally, it", "Beyond that, it"],
 };
 
 // ==========================================================================
@@ -213,18 +235,26 @@ function buildHumanizePrompt(section, index, total, prevSummary, nextSummary, se
 
 ${context}
 WRITING STYLE:
-- Write like an informed person explaining something they know well
-- Use a mix of sentence lengths (some short, some medium, occasional longer ones)
-- Keep ideas flowing logically from one to the next
+- Write like an informed person explaining something they understand well
+- Vary sentence lengths naturally: mix short (5-10 words), medium (12-18 words), and longer (20-30 words)
+- Use both contractions AND full forms - mix "it's" with "it is", "don't" with "do not"
+- Not every sentence needs a subject-verb-object structure
 
-MUST AVOID - these are AI tells:
-- Semicolons (;) - use periods instead to separate ideas
-- Colons after phrases like "Here's the thing:" or "Let's be clear:" - just state it directly
-- The pattern "isn't just X, it's Y" - vary how you express contrasts  
-- Comma chains with 3+ items that create run-on sentences
-- Starting multiple sentences with "It's" or "This is"
-- Dramatic declarations like "The real point is:" or "Bottom line:"
-- Em dashes (—) - use commas or periods
+PATTERNS TO AVOID (these flag AI detection):
+1. NO semicolons - use periods to separate ideas
+2. NO colons after intro phrases like "Here's the thing:" - just state it
+3. NO repeating "isn't just X, it's Y" pattern - find other ways to contrast
+4. NO comma chains (X, Y, and Z, which causes W) - break into shorter sentences
+5. NO starting multiple sentences with "It's" or "This is" 
+6. NO overusing contractions - balance "isn't" with "is not"
+7. NO em dashes (—)
+8. AVOID words like: ${bannedList}
+
+GOOD RHYTHM EXAMPLE:
+"Climate change threatens more than coastlines. Rising temperatures destabilize entire regions. When crops fail, people move. This migration puts pressure on borders and resources alike. Governments that ignore these connections risk amplifying the very instability they want to prevent."
+
+BAD RHYTHM EXAMPLE (too many contractions, repetitive starts):
+"It's a security threat. It's not just about the environment. It's about how droughts and storms create conflict. It doesn't just affect nature, it affects people."
 
 PRESERVE:
 - The section's meaning and main points
@@ -244,8 +274,56 @@ OUTPUT the rewritten section only:`;
 function fixAIPatterns(text) {
     let result = text;
     for (const { regex, replacement } of AI_PATTERNS) {
-        result = result.replace(regex, replacement);
+        if (typeof replacement === 'function') {
+            result = result.replace(regex, replacement);
+        } else {
+            result = result.replace(regex, replacement);
+        }
     }
+    return result;
+}
+
+function balanceContractions(text) {
+    // Count contractions - if too many, expand some back
+    let result = text;
+    let totalContractions = 0;
+    
+    for (const [contraction, _] of CONTRACTION_PAIRS) {
+        const matches = result.match(new RegExp(`\\b${contraction}\\b`, 'gi')) || [];
+        totalContractions += matches.length;
+    }
+    
+    const wordCount = result.split(/\s+/).length;
+    const contractionDensity = totalContractions / wordCount;
+    
+    // If more than 1 contraction per 15 words, expand some
+    if (contractionDensity > 0.066) {
+        let expanded = 0;
+        const targetExpansions = Math.floor(totalContractions * 0.4); // Expand 40%
+        
+        for (const [contraction, full] of CONTRACTION_PAIRS) {
+            if (expanded >= targetExpansions) break;
+            
+            const regex = new RegExp(`\\b${contraction}\\b`, 'gi');
+            const matches = result.match(regex) || [];
+            
+            // Expand every other occurrence
+            let count = 0;
+            result = result.replace(regex, (match) => {
+                count++;
+                if (count % 2 === 0 && expanded < targetExpansions) {
+                    expanded++;
+                    // Preserve capitalization
+                    if (match[0] === match[0].toUpperCase()) {
+                        return full.charAt(0).toUpperCase() + full.slice(1);
+                    }
+                    return full;
+                }
+                return match;
+            });
+        }
+    }
+    
     return result;
 }
 
@@ -259,9 +337,9 @@ function varyRepeatedStarters(text) {
             if (sentence.startsWith(starter)) {
                 starterCounts[starter] = (starterCounts[starter] || 0) + 1;
                 
-                // If used more than twice, vary it
-                if (starterCounts[starter] > 2 && alternatives.length > 0) {
-                    const alt = alternatives[Math.floor(Math.random() * alternatives.length)];
+                // If used more than once, start varying
+                if (starterCounts[starter] > 1 && alternatives.length > 0) {
+                    const alt = alternatives[(starterCounts[starter] - 2) % alternatives.length];
                     if (alt) {
                         return alt + sentence.slice(starter.length);
                     }
@@ -307,6 +385,24 @@ function fixPunctuation(text) {
     return result;
 }
 
+function varySentenceRhythm(text) {
+    // Detect if sentences have similar length patterns and vary them
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    if (sentences.length < 4) return text;
+    
+    const lengths = sentences.map(s => s.split(/\s+/).length);
+    
+    // Check for monotonous rhythm (all similar lengths)
+    const avgLength = lengths.reduce((a, b) => a + b, 0) / lengths.length;
+    const variance = lengths.reduce((sum, len) => sum + Math.pow(len - avgLength, 2), 0) / lengths.length;
+    
+    // If variance is low (monotonous), we'd want more variation
+    // But we can't easily fix this in post-processing without AI
+    // Just flag for the prompt to handle
+    
+    return text;
+}
+
 function postProcess(text, originalHadHeader, headerText) {
     let result = text;
     
@@ -322,6 +418,9 @@ function postProcess(text, originalHadHeader, headerText) {
     // Fix AI patterns (semicolons, colons, repetitive structures)
     result = fixAIPatterns(result);
     
+    // Balance contractions (don't overuse them)
+    result = balanceContractions(result);
+    
     // Fix punctuation issues
     result = fixPunctuation(result);
     
@@ -330,8 +429,8 @@ function postProcess(text, originalHadHeader, headerText) {
     
     // Fix common AI participle patterns (but gently)
     result = result.replace(/, making it /gi, '. This makes it ');
-    result = result.replace(/, leading to /gi, ', which leads to ');
-    result = result.replace(/, resulting in /gi, ', which results in ');
+    result = result.replace(/, leading to /gi, '. This leads to ');
+    result = result.replace(/, resulting in /gi, '. As a result, ');
     
     // Restore header if it was removed
     if (originalHadHeader && headerText && !result.toLowerCase().startsWith(headerText.toLowerCase().substring(0, 10))) {
