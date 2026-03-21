@@ -118,52 +118,47 @@ async function planEssay(sections, apiKey) {
 function buildPrompt(section, index, totalSections, prevSummary, nextSummary) {
     const position = index === 0 ? 'OPENING' : index === totalSections - 1 ? 'CLOSING' : 'MIDDLE';
     
-    // Rotate writing styles for variety
-    const styles = [
-        "explaining to a curious friend who asked about this",
-        "writing a thoughtful opinion piece",
-        "teaching someone who wants to understand the nuances",
-        "having a serious conversation about something you care about"
-    ];
-    const style = styles[index % styles.length];
-
     let contextNote = '';
-    if (prevSummary) contextNote += `[Connects from: ${prevSummary}] `;
-    if (nextSummary) contextNote += `[Leads to: ${nextSummary}]`;
+    if (prevSummary) contextNote += `[Follows from: ${prevSummary}] `;
+    if (nextSummary) contextNote += `[Leads into: ${nextSummary}]`;
 
-    return `You're ${style}. Rewrite this ${position} section.
+    return `Rewrite this ${position} section to read naturally.
 
 ${contextNote}
 
-THE PROBLEM WITH AI WRITING (avoid all of these):
-1. The "isn't just X. It's Y" pattern - AI uses this constantly. NEVER use it.
-2. Starting sentences with "It's" repeatedly  
-3. Perfect three-part lists: "X, Y, and Z"
-4. Every sentence being a confident declaration
-5. Uniform sentence lengths
-6. Semicolons and em dashes
-7. No personality - just facts stated flatly
+WHAT AI WRITING LOOKS LIKE (avoid this):
+- Short choppy sentences that don't connect: "X is a problem. It causes Y. This leads to Z."
+- Fake casual phrases: "Here's the thing:", "You have to wonder", "The thing is"
+- The pattern "isn't just X, it's Y" or "isn't just X. It's Y"
+- Every sentence being its own isolated statement
+- Rhetorical questions that feel forced
+- Lists of three: "X, Y, and Z"
 
-WHAT MAKES WRITING SOUND HUMAN:
-1. Thinking out loud: "The thing is..." "What worries me is..." "You have to wonder..."
-2. Mixing confidence with uncertainty: "probably", "it seems", "arguably"
-3. Occasional questions (real or rhetorical)
-4. Uneven development - some points get more attention than others
-5. Sentence variety: fragments okay. Longer complex sentences also fine.
-6. Personal reactions embedded in facts: "And that's alarming because..."
-7. Connecting words that aren't robotic: "Look," "Granted," "Sure," "Still,"
+WHAT NATURAL WRITING LOOKS LIKE:
+- Sentences that BUILD on each other with real logical connections
+- Some longer sentences with embedded clauses: "The warming climate, which has already displaced millions, threatens to destabilize regions that can least afford instability."
+- Mix of simple and complex structures occurring naturally
+- Ideas that flow: when you finish one sentence, the next one should feel inevitable
+- Occasional shorter sentence for emphasis, but not choppy
+- Subordinate clauses: "because", "although", "while", "given that", "even as"
 
-REWRITE THIS:
+EXAMPLE OF NATURAL FLOW:
+"Climate change has moved beyond environmental concern into the realm of security threat. Rising temperatures don't just melt ice caps; they dry out farmland, intensify storms, and push already unstable regions toward breaking points. When crops fail repeatedly, people migrate, and mass migration creates pressures that even stable governments struggle to manage. The challenge now is whether the international community can coordinate a response before these pressures become unmanageable."
+
+EXAMPLE OF AI-SOUNDING WRITING (avoid):
+"Climate change is a serious threat. It's not just about the environment. It's about security. Rising temperatures cause problems. These problems include droughts and storms. People are forced to move. This creates pressure on borders. We need to act now."
+
+REWRITE THIS TEXT:
 "${section.content}"
 
-${section.title ? `Keep the topic "${section.title}" but express it naturally.` : ''}
-
-CRITICAL: 
-- DO NOT use "isn't just" or "is not just" ANYWHERE
-- DO NOT start multiple sentences with "It's" or "This is"  
-- DO NOT use semicolons or em dashes
-- DO keep all the same information and meaning
-- DO sound like a real person with opinions wrote this
+RULES:
+- Make sentences CONNECT logically to each other
+- Use subordinating conjunctions naturally (because, although, while, as, since, when)
+- Some sentences should be longer with embedded clauses
+- No fake casual phrases like "here's the thing" or "you have to wonder"
+- No "isn't just X, it's Y" pattern
+- No semicolons or em dashes
+- Keep all the original meaning and information
 
 Write the rewritten version only:`;
 }
@@ -184,33 +179,46 @@ function postProcess(text, sectionTitle) {
     // Apply word swaps
     result = applySwaps(result);
     
-    // Remove any remaining "isn't just...it's" patterns
-    result = result.replace(/isn't just ([^.]+)\.\s*It's/gi, 'goes beyond $1. What we face is');
-    result = result.replace(/is not just ([^.]+)\.\s*It is/gi, 'goes beyond $1. What we see is');
-    result = result.replace(/isn't just/gi, 'goes beyond');
-    result = result.replace(/is not just/gi, 'goes beyond');
+    // Remove fake casual phrases that AI uses to sound human
+    result = result.replace(/\b(Here's the thing|The thing is|You have to wonder|You know how|What worries me is|And that's alarming)[,:]?\s*/gi, '');
+    result = result.replace(/\bLook,\s*/gi, '');
+    result = result.replace(/\bGranted,\s*/gi, '');
+    result = result.replace(/\bSure,\s*/gi, '');
     
-    // Fix repeated "It's" at sentence starts
+    // Remove any remaining "isn't just...it's" patterns
+    result = result.replace(/isn't just ([^.]+)\.\s*It's/gi, (_, x) => `extends beyond ${x.trim()}, becoming`);
+    result = result.replace(/is not just ([^.]+)\.\s*It is/gi, (_, x) => `extends beyond ${x.trim()}, becoming`);
+    result = result.replace(/isn't just/gi, 'extends beyond');
+    result = result.replace(/is not just/gi, 'extends beyond');
+    result = result.replace(/not just ([^,]+),\s*(it's|but)/gi, 'beyond $1, ');
+    
+    // Fix repeated sentence starters
     const sentences = result.split(/(?<=[.!?])\s+/);
-    let lastStartedWithIts = false;
-    const fixed = sentences.map(s => {
-        const startsWithIts = /^It's\b/i.test(s) || /^It is\b/i.test(s);
-        if (startsWithIts && lastStartedWithIts) {
-            // Replace with alternatives
-            const alts = ['This means', 'What happens is', 'The result:', 'We see'];
-            const alt = alts[Math.floor(Math.random() * alts.length)];
-            s = s.replace(/^It's\b/i, alt).replace(/^It is\b/i, alt);
+    const starterCount = {};
+    const fixed = sentences.map((s, i) => {
+        const firstWord = s.split(/\s+/)[0];
+        starterCount[firstWord] = (starterCount[firstWord] || 0) + 1;
+        
+        // If same starter used 3+ times, try to vary
+        if (starterCount[firstWord] >= 3) {
+            if (/^(It|This|The|These|That|There)\b/i.test(s)) {
+                // Try to combine with previous sentence using conjunction
+                if (i > 0 && sentences[i-1] && !sentences[i-1].endsWith('?')) {
+                    return ', and ' + s.charAt(0).toLowerCase() + s.slice(1);
+                }
+            }
         }
-        lastStartedWithIts = startsWithIts;
         return s;
     });
-    result = fixed.join(' ');
+    result = fixed.join(' ').replace(/\.\s*,\s*and/g, ', and');
     
     // Remove semicolons
-    result = result.replace(/;\s*/g, '. ');
+    result = result.replace(/;\s*/g, ', ');
     
-    // Fix double periods
+    // Fix awkward punctuation
     result = result.replace(/\.\./g, '.');
+    result = result.replace(/,,/g, ',');
+    result = result.replace(/\s+,/g, ',');
     
     // Clean spacing
     result = result.replace(/\s{2,}/g, ' ').trim();
