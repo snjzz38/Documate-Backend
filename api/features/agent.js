@@ -179,7 +179,7 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                  case 'WRITE': {
+                 case 'WRITE': {
                     const { researchSources = [], task: userTask, uploadedFile, uploadedFiles = [] } = context;
                 
                     const sourceInfo = researchSources.slice(0, 10).map((s, i) =>
@@ -202,36 +202,67 @@ export default async function handler(req, res) {
                     const fileContext = otherFiles.length > 0
                         ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n` : '';
                 
-                    const prompt = `Write a high-level academic essay with a CLEAR ARGUMENT.
-                    
-                    TASK: ${userTask}
-                    ${pdfContext}${fileContext}
-                    RESEARCH SOURCES (for ideas only — do NOT cite or reference these):
-                    ${sourceInfo}
-                    
-                    THESIS:
-                    - Must take a STRONG position (not neutral)
-                    - Must include 2-3 clear reasons (e.g. safety, ethics, inequality)
-                    
-                    STRUCTURE:
-                    - Introduction: context + clear argumentative thesis as the last sentence
-                    - Body Paragraphs: each paragraph = ONE main argument with a strong topic sentence, research evidence, and explanation of WHY it matters
-                    - Conclusion: reinforce the argument, do not just summarize
-                    
-                    STYLE:
-                    - Be concise and direct — avoid filler phrases
-                    - Avoid vague phrases like "this highlights" without explanation
-                    - Formal academic tone throughout
-                    
-                    IMPORTANT:
-                    - Do NOT include any citations, author names, or source references of ANY kind
-                    - Do NOT write "(Source 1)", "(Author, 2020)", "According to Source 3", or anything similar
-                    - Do NOT include a bibliography
-                    - Use ideas from the research but express them entirely in your own words as if they are your own knowledge
-                    - Plain text only - no markdown, no bold, no headers
-                    ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the essay.' : ''}
-                    
-                    Write the essay now:`;
+                    // Detect task type to avoid forcing essay format on everything
+                    const taskLower = userTask.toLowerCase();
+                    const isQuestions = /\?\s*$|\?\s*\n|questions?|answer|respond to|a\)|b\)|1\.|2\./i.test(userTask);
+                    const isList = /list|bullet|enumerate|summarize|outline/i.test(taskLower);
+                    const isEssay = /essay|argue|argument|thesis|discuss at length|write about/i.test(taskLower);
+                
+                    let formatInstructions = '';
+                    if (isQuestions) {
+                        formatInstructions = `FORMAT RULES:
+                - Answer each question directly and completely
+                - Keep the same question structure/numbering as given
+                - Answer each part (a, b, c etc.) separately and clearly labeled
+                - Do not turn this into an essay — answer each question as its own response
+                - Be thorough but concise for each answer
+                - Plain text only - no markdown, no bold, no headers beyond the question labels`;
+                    } else if (isList) {
+                        formatInstructions = `FORMAT RULES:
+                - Use clear, organized structure appropriate to the task
+                - Plain text only - no markdown
+                - Be concise and direct`;
+                    } else if (isEssay) {
+                        formatInstructions = `FORMAT RULES — ESSAY:
+                THESIS:
+                - Must take a STRONG position (not neutral)
+                - Must include 2-3 clear reasons
+                
+                STRUCTURE:
+                - Introduction: context + clear argumentative thesis as the last sentence
+                - Body Paragraphs: each paragraph = ONE main argument with topic sentence, evidence, and explanation of WHY it matters
+                - Conclusion: reinforce the argument, do not just summarize
+                
+                STYLE:
+                - Be concise and direct — avoid filler phrases
+                - Avoid vague phrases like "this highlights" without explanation
+                - Formal academic tone throughout`;
+                    } else {
+                        formatInstructions = `FORMAT RULES:
+                - Follow the format most appropriate for this specific task
+                - If it asks questions, answer them directly
+                - If it asks for analysis, provide structured analysis
+                - If it asks for creative work, be creative
+                - Do not default to essay format unless explicitly asked
+                - Plain text only - no markdown`;
+                    }
+                
+                    const prompt = `Complete the following task accurately and appropriately.
+                
+                TASK:
+                ${userTask}
+                ${pdfContext}${fileContext}
+                ${researchSources.length > 0 ? `RESEARCH SOURCES (for ideas only — do NOT cite or reference these):\n${sourceInfo}` : ''}
+                
+                ${formatInstructions}
+                
+                IMPORTANT:
+                - Do NOT include any citations, author names, or source references of ANY kind
+                - Do NOT include a bibliography
+                - Plain text only - no markdown, no bold, no headers unless the task requires them
+                ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the response.' : ''}
+                
+                Complete the task now:`;
                 
                     const rawText = imageFiles.length > 0
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
@@ -243,33 +274,50 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                case 'REFINE': {
-                    const input = context.previousOutput || '';
-                    if (!input) { result.output = ''; result.outputHtml = ''; break; }
-                
-                    const prompt = `Improve this academic essay's argument quality.
-                    
-                    ESSAY:
-                    ${input}
-                    
-                    FOCUS:
-                    1. Strengthen the thesis — it must take a CLEAR STRONG position, not just describe the issue
-                    2. Each body paragraph must develop ONE argument only — eliminate repetition across paragraphs
-                    3. Replace vague phrases like "this shows", "this highlights", "this underscores", "this demonstrates" with specific explanations of WHY the evidence matters to YOUR argument
-                    4. Every piece of evidence must be connected explicitly to the thesis
-                    5. Transitions between paragraphs must show logical progression, not just topic shifts
-                    6. Conclusion must synthesize the argument — not restate the introduction
-                    7. Keep ALL original content and ideas — only sharpen the logic and language
-                    8. Plain text only - no markdown, no bold, no headers
-                    
-                    Return the improved essay:`;
-                
-                    const refined = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
-                    result.output = refined;
-                    result.outputHtml = buildEssayHTML(refined);
-                    result.type = 'text';
-                    break;
-                }
+             case 'REFINE': {
+                const input = context.previousOutput || '';
+                if (!input) { result.output = ''; result.outputHtml = ''; break; }
+            
+                const taskLower = (context.task || '').toLowerCase();
+                const isQuestions = /\?\s*$|\?\s*\n|questions?|answer|a\)|b\)|1\.|2\./i.test(context.task || '');
+            
+                const refinePrompt = isQuestions
+                    ? `Review these question answers and improve them.
+            
+            ANSWERS:
+            ${input}
+            
+            FOCUS:
+            1. Make each answer more complete and specific
+            2. Ensure each part (a, b, etc.) is clearly addressed
+            3. Add relevant detail or analysis where answers are thin
+            4. Keep the same question structure and labels
+            5. Plain text only - no markdown
+            
+            Return the improved answers:`
+                    : `Improve this academic writing's argument quality.
+            
+            ESSAY:
+            ${input}
+            
+            FOCUS:
+            1. Strengthen the thesis — clear strong position, not just describing the issue
+            2. Each body paragraph develops ONE argument only — eliminate repetition
+            3. Replace vague phrases like "this shows", "this highlights" with specific explanations of WHY the evidence matters
+            4. Every piece of evidence must connect explicitly to the thesis
+            5. Transitions must show logical progression
+            6. Conclusion must synthesize — not restate the introduction
+            7. Keep ALL original content and ideas — only sharpen logic and language
+            8. Plain text only - no markdown, no bold, no headers
+            
+            Return the improved writing:`;
+            
+                const refined = stripMarkdown(stripRefs(await GeminiAPI.chat(refinePrompt, GEMINI)));
+                result.output = refined;
+                result.outputHtml = buildEssayHTML(refined);
+                result.type = 'text';
+                break;
+            }
                     
                 case 'HUMANIZE': {
                     const input = context.previousOutput || '';
