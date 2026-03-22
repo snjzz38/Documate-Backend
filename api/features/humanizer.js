@@ -172,91 +172,103 @@ function postProcess(text, sectionTitle) {
     
     // Remove fake casual/transition phrases
     const fakePhrases = [
-        /\bHere's the thing[,:]\s*/gi,
-        /\bThe thing is[,:]\s*/gi,
-        /\bTo be clear[,:]\s*/gi,
-        /\bTo be fair[,:]\s*/gi,
-        /\bLet's be honest[,:]\s*/gi,
-        /\bThe reality is[,:]\s*/gi,
-        /\bThe truth is[,:]\s*/gi,
-        /\bThe fact is[,:]\s*/gi,
+        /Here's the thing[,:]\s*/gi,
+        /The thing is[,:]\s*/gi,
+        /To be clear[,:]\s*/gi,
+        /To be fair[,:]\s*/gi,
+        /Let's be honest[,:]\s*/gi,
+        /The reality is[,:]\s*/gi,
+        /The truth is[,:]\s*/gi,
+        /The fact is[,:]\s*/gi,
     ];
     fakePhrases.forEach(p => { result = result.replace(p, ''); });
     
     // ===========================================
-    // NUCLEAR OPTION: Kill ALL "just X, it's/they" patterns
+    // NUCLEAR: Kill ALL "just X, it's" patterns with broad regex
     // ===========================================
     
-    // Pattern: "isn't just X, it's Y" -> completely restructure
-    result = result.replace(/isn't just ([^,\.]+),\s*it's ([^,\.]+)/gi, 'goes beyond $1 and becomes $2');
-    result = result.replace(/isn't just ([^,\.]+),\s*it ([^,\.]+)/gi, 'goes beyond $1 and $2');
-    result = result.replace(/isn't just ([^,\.]+)\.\s*[Ii]t's/gi, 'goes beyond $1, becoming');
+    // Most common pattern: "isn't just [anything], it's [anything]"
+    // Using lazy match .*? to catch everything between
+    result = result.replace(/isn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'goes beyond $1 and actually $2$3');
+    result = result.replace(/isn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'goes beyond $1 and $2$3');
     
-    // Pattern: "doesn't just X, it's/it Y"
-    result = result.replace(/doesn't just ([^,\.]+),\s*it's ([^,\.]+)/gi, 'does more than $1, actually $2');
-    result = result.replace(/doesn't just ([^,\.]+),\s*it ([^,\.]+)/gi, 'does more than $1 and $2');
+    // "doesn't just X, it's/it Y"
+    result = result.replace(/doesn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'does more than $1, actually $2$3');
+    result = result.replace(/doesn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'does more than $1 and $2$3');
     
-    // Pattern: "don't just X, they Y"
-    result = result.replace(/don't just ([^,\.]+),\s*they ([^,\.]+)/gi, 'do more than $1, and $2');
-    result = result.replace(/don't just ([^,\.]+),\s*they're/gi, 'do more than $1, becoming');
+    // "don't just X, they Y"
+    result = result.replace(/don't just (.*?),\s*they (.*?)([\.!\?])/gi, 'do more than $1 and $2$3');
     
-    // Pattern: "Waiting/Delaying isn't just X, it's Y"
-    result = result.replace(/(Waiting|Delaying) to act isn't just ([^,\.]+),\s*it's ([^,\.]+)/gi, '$1 means $2 and also $3');
-    result = result.replace(/(Waiting|Delaying) isn't just ([^,\.]+),\s*it's ([^,\.]+)/gi, '$1 means $2 and $3');
+    // "wasn't just X, it was Y"
+    result = result.replace(/wasn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'was more than $1 and $2$3');
     
-    // Catch any remaining "isn't just" or "doesn't just"
-    result = result.replace(/isn't just/gi, 'goes beyond');
-    result = result.replace(/doesn't just/gi, 'does more than');
-    result = result.replace(/don't just/gi, 'do more than');
-    result = result.replace(/wasn't just/gi, 'was more than');
-    result = result.replace(/aren't just/gi, 'are more than');
+    // Catch stragglers - any remaining "n't just" 
+    result = result.replace(/isn't just /gi, 'goes beyond ');
+    result = result.replace(/doesn't just /gi, 'does more than ');
+    result = result.replace(/don't just /gi, 'do more than ');
+    result = result.replace(/wasn't just /gi, 'was more than ');
+    result = result.replace(/aren't just /gi, 'are more than ');
+    result = result.replace(/weren't just /gi, 'were more than ');
     
-    // Pattern: "The bigger X isn't" 
-    result = result.replace(/The bigger (risk|threat|problem|danger|issue) isn't/gi, 'Beyond that,');
-    result = result.replace(/The (real|bigger|main) (risk|threat|problem|danger|issue) (is|isn't|comes from)/gi, 'What matters here is that');
+    // Also catch "not just X, it's Y" without contraction
+    result = result.replace(/is not just (.*?),\s*it's/gi, 'goes beyond $1 and becomes');
+    result = result.replace(/is not just /gi, 'goes beyond ');
+    result = result.replace(/are not just /gi, 'are more than ');
+    result = result.replace(/do not just /gi, 'do more than ');
+    result = result.replace(/does not just /gi, 'does more than ');
     
-    // Remove ", which means" connector
+    // "not just about X" patterns
+    result = result.replace(/not just about /gi, 'more than ');
+    result = result.replace(/more than just /gi, 'more than ');
+    
+    // ===========================================
+    // Fix "The bigger/real X" patterns
+    // ===========================================
+    result = result.replace(/The (bigger|real|main|true) (risk|threat|problem|danger|issue|concern) (is|isn't|comes from)/gi, 'What matters is');
+    result = result.replace(/What matters here is that how/gi, 'What matters is how'); // Fix awkward phrasing
+    
+    // ===========================================
+    // Fix ", which means" and similar connectors
+    // ===========================================
     result = result.replace(/,\s*which means/gi, '. That means');
+    result = result.replace(/,\s*which is why/gi, '. That is why');
     
     // ===========================================
-    // Fix repeated sentence starters
+    // Fix "It's" at start - replace ALL instances after first
     // ===========================================
     let sentences = result.split(/(?<=[.!?])\s+/);
-    let starterCounts = {};
+    let itsFound = false;
+    let thisCount = 0;
+    let theCount = 0;
     
-    sentences = sentences.map((s, i) => {
-        const firstWords = s.split(/\s+/).slice(0, 2).join(' ');
-        const firstWord = s.split(/\s+/)[0];
-        
-        // Track starters
-        starterCounts[firstWord] = (starterCounts[firstWord] || 0) + 1;
-        
-        // Fix "It's" - only allow once
-        if (/^It's\b/i.test(s) && starterCounts["It's"] > 1) {
-            if (/^It's about/i.test(s)) return s.replace(/^It's about/i, 'The question is');
-            if (/^It's a/i.test(s)) return s.replace(/^It's a/i, 'This is a');
-            if (/^It's the/i.test(s)) return s.replace(/^It's the/i, 'This becomes the');
-            return s.replace(/^It's/i, 'This is');
+    sentences = sentences.map((s) => {
+        // Handle "It's" - only first one allowed
+        if (/^It's /i.test(s)) {
+            if (itsFound) {
+                // Replace subsequent "It's"
+                s = s.replace(/^It's a /i, 'This represents a ');
+                s = s.replace(/^It's the /i, 'This becomes the ');
+                s = s.replace(/^It's about /i, 'The issue is ');
+                s = s.replace(/^It's /i, 'This is ');
+            }
+            itsFound = true;
         }
         
-        // Fix "We're" - only allow once
-        if (/^We're\b/i.test(s) && starterCounts["We're"] > 1) {
-            if (/^We're already/i.test(s)) return s.replace(/^We're already/i, 'This is already');
-            if (/^We're not/i.test(s)) return s.replace(/^We're not/i, 'The choice is not');
-            if (/^We're choosing/i.test(s)) return s.replace(/^We're choosing/i, 'The choice comes down to');
-            return s.replace(/^We're/i, 'People are');
+        // Handle "This" - only two allowed
+        if (/^This /i.test(s)) {
+            thisCount++;
+            if (thisCount > 2) {
+                s = s.replace(/^This is /i, 'That is ');
+                s = s.replace(/^This /i, 'That ');
+            }
         }
         
-        // Fix "This" - only allow twice
-        if (/^This\b/i.test(s) && starterCounts["This"] > 2) {
-            if (/^This movement/i.test(s)) return s.replace(/^This movement/i, 'Such movement');
-            if (/^This pattern/i.test(s)) return s.replace(/^This pattern/i, 'The pattern');
-            return s.replace(/^This/i, 'That');
-        }
-        
-        // Fix "The" - only allow three times
-        if (/^The\b/i.test(s) && starterCounts["The"] > 3) {
-            return s.replace(/^The/i, 'A');
+        // Handle "The" - only three allowed
+        if (/^The /i.test(s)) {
+            theCount++;
+            if (theCount > 3) {
+                s = s.replace(/^The /i, 'A ');
+            }
         }
         
         return s;
@@ -264,45 +276,32 @@ function postProcess(text, sectionTitle) {
     result = sentences.join(' ');
     
     // ===========================================
-    // Break parallel structures
+    // Fix parallel structures
     // ===========================================
-    result = result.replace(/between ([^,]+) or ([^\.]+)\./gi, 'between $1, versus $2.');
-    result = result.replace(/between controlled (\w+) or total (\w+)/gi, 'between managing $1 or facing $2');
-    result = result.replace(/scarcity into conflict and inequality into desperation/gi, 'scarcity into conflict, with inequality breeding desperation');
-    result = result.replace(/(\w+) into (\w+) and (\w+) into (\w+)/gi, '$1 into $2, while $3 breeds $4');
+    result = result.replace(/between ([\w\s]+) and ([\w\s]+)\.$/gi, 'between $1 or facing $2.');
+    result = result.replace(/,\s*but between /gi, '. The real choice is ');
+    result = result.replace(/scarcity into conflict and inequality into/gi, 'scarcity into conflict, while inequality turns to');
     
     // ===========================================
     // Simplify formal language
     // ===========================================
     const formalWords = [
-        [/\bdemanding\b/gi, 'needing'],
-        [/\brepresenting\b/gi, 'being'],
-        [/\bintensifying\b/gi, 'worsening'],
-        [/\btransforming\b/gi, 'turning'],
-        [/\bescalating\b/gi, 'growing'],
-        [/\beroding\b/gi, 'weakening'],
-        [/\bdepleting\b/gi, 'draining'],
+        [/\bMass displacement\b/gi, 'Large-scale migration'],
+        [/\bweak societies\b/gi, 'struggling regions'],
         [/\bequitable\b/gi, 'fair'],
         [/\bvulnerable\b/gi, 'at risk'],
         [/\bessential\b/gi, 'needed'],
-        [/\bfundamental\b/gi, 'basic'],
-        [/\bunstable societies\b/gi, 'weak societies'],
-        [/\bfragile societies\b/gi, 'weak societies'],
     ];
     formalWords.forEach(([p, r]) => { result = result.replace(p, r); });
     
-    // Fix passive voice
-    result = result.replace(/are displaced/gi, 'have to move');
-    result = result.replace(/are destroyed/gi, 'get destroyed');
-    
-    // Clean punctuation
+    // ===========================================
+    // Clean up
+    // ===========================================
     result = result.replace(/;\s*/g, ', ');
     result = result.replace(/\.\./g, '.');
     result = result.replace(/,,/g, ',');
     result = result.replace(/\s+,/g, ',');
     result = result.replace(/\s{2,}/g, ' ');
-    
-    // Fix lowercase after periods
     result = result.replace(/\.\s+([a-z])/g, (m, c) => '. ' + c.toUpperCase());
     
     result = result.trim();
