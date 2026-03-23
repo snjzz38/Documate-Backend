@@ -57,6 +57,11 @@ function detectProblems(sentence) {
         problems.push('doesnt_just');
     }
     
+    // "The choice is not X, but Y"
+    if (/(choice|decision|question) is not .+,\s*but\b/i.test(sentence)) {
+        problems.push('choice_not_but');
+    }
+    
     // Participle chains
     if (/,\s*(forcing|creating|causing|making|pushing|leaving|turning|requiring|demanding|driving|sparking|straining|transforming|amplifying)\s+/i.test(sentence)) {
         problems.push('participle');
@@ -77,14 +82,24 @@ function detectProblems(sentence) {
         problems.push('this_is_critical');
     }
     
-    // "The true/real X lies/is"
-    if (/The (true|real|actual|core) .+ (lies|is)\b/i.test(sentence)) {
-        problems.push('true_x_lies');
+    // "The true/real/main X lies/is/comes from"
+    if (/The (true|real|actual|core|main|primary) .+ (lies|is|comes from)\b/i.test(sentence)) {
+        problems.push('true_x_pattern');
     }
     
     // "This isn't about X" at start
     if (/^This isn't about/i.test(sentence)) {
         problems.push('this_isnt_about');
+    }
+    
+    // Parallel structure: "X into Y and A into B"
+    if (/\w+ (into|to|from) \w+ and \w+ (into|to|from) \w+/i.test(sentence)) {
+        problems.push('parallel_structure');
+    }
+    
+    // Dramatic phrases
+    if (/(unfolding|playing out|happening) (before our eyes|in plain sight|right now)/i.test(sentence)) {
+        problems.push('dramatic_phrase');
     }
     
     return problems;
@@ -109,11 +124,14 @@ async function fixSentence(sentence, problems, apiKey, logs) {
     if (problems.includes('contrast_pattern') || problems.includes('is_not_simply') || problems.includes('isnt_just')) {
         instructions.push('Remove the "not simply X, it is Y" contrast. Just state the main point.');
     }
+    if (problems.includes('choice_not_but')) {
+        instructions.push('Remove "The choice is not X, but Y" - just state what we should choose');
+    }
     if (problems.includes('doesnt_just')) {
         instructions.push('Remove "doesn\'t/don\'t just" - state directly what happens');
     }
     if (problems.includes('participle')) {
-        instructions.push('Remove participle phrase. Make it a new sentence starting with "This" or "That"');
+        instructions.push('Remove participle phrase (like ", pushing X"). Make it a separate sentence.');
     }
     if (problems.includes('which_clause')) {
         instructions.push('Remove ", which" clause. Make it a separate sentence.');
@@ -124,11 +142,17 @@ async function fixSentence(sentence, problems, apiKey, logs) {
     if (problems.includes('this_is_critical')) {
         instructions.push('Remove "This is a critical issue" - just describe what happens');
     }
-    if (problems.includes('true_x_lies')) {
-        instructions.push('Remove "The true X lies in" - state it simply');
+    if (problems.includes('true_x_pattern')) {
+        instructions.push('Remove "The main/true danger comes from" - state the danger directly');
     }
     if (problems.includes('this_isnt_about')) {
         instructions.push('Rephrase "This isn\'t about X" to state what it IS about');
+    }
+    if (problems.includes('parallel_structure')) {
+        instructions.push('Break up the parallel "X into Y and A into B" - make two separate statements');
+    }
+    if (problems.includes('dramatic_phrase')) {
+        instructions.push('Remove dramatic phrasing like "unfolding in plain sight" - be more direct');
     }
     
     const prompt = `Rewrite this sentence naturally:
