@@ -251,6 +251,11 @@ function postProcess(text, sectionTitle) {
     result = result.replace(/,\s*straining ([^,\.]+)([,\.])/gi, '. This strains $1$2');
     result = result.replace(/,\s*fueling ([^,\.]+)([,\.])/gi, '. This fuels $1$2');
     result = result.replace(/,\s*driving ([^,\.]+)([,\.])/gi, '. This drives $1$2');
+    result = result.replace(/,\s*demanding ([^,\.]+)([,\.])/gi, '. This demands $1$2');
+    result = result.replace(/,\s*threatening ([^,\.]+)([,\.])/gi, '. This threatens $1$2');
+    result = result.replace(/,\s*affecting ([^,\.]+)([,\.])/gi, '. This affects $1$2');
+    result = result.replace(/,\s*putting ([^,\.]+)([,\.])/gi, '. This puts $1$2');
+    result = result.replace(/,\s*raising ([^,\.]+)([,\.])/gi, '. This raises $1$2');
     
     // Double participle: ", Xing A and Ying B"
     result = result.replace(/,\s*(\w+ing) ([^,]+) and (\w+ing) ([^\.]+)\./gi, '. This $1 $2 and $3 $4.');
@@ -432,6 +437,10 @@ export default async function handler(req, res) {
         finalOutput = finalOutput.replace(/(goal|point|aim|idea) isn't to (.*?),\s*it's to (.*?)([\.!\?])/gi, '$1 is to $3, rather than $2$4');
         finalOutput = finalOutput.replace(/isn't to (.*?),\s*it's to/gi, 'is to');
         
+        // Split across sentences: "X isn't about Y. It's about Z"
+        finalOutput = finalOutput.replace(/The (decision|choice|question|issue) isn't about ([^\.]+)\.\s*It's about/gi, 'The $1 is about');
+        finalOutput = finalOutput.replace(/isn't about ([^\.]+)\.\s*It's about/gi, 'is about');
+        
         // Participle chains
         finalOutput = finalOutput.replace(/,\s*forcing ([^,\.]+)([,\.])/gi, '. This forces $1$2');
         finalOutput = finalOutput.replace(/,\s*creating ([^,\.]+)([,\.])/gi, '. This creates $1$2');
@@ -440,6 +449,9 @@ export default async function handler(req, res) {
         finalOutput = finalOutput.replace(/,\s*pushing ([^,\.]+)([,\.])/gi, '. This pushes $1$2');
         finalOutput = finalOutput.replace(/,\s*turning ([^,\.]+)([,\.])/gi, '. This turns $1$2');
         finalOutput = finalOutput.replace(/,\s*straining ([^,\.]+)([,\.])/gi, '. This strains $1$2');
+        finalOutput = finalOutput.replace(/,\s*demanding ([^,\.]+)([,\.])/gi, '. This demands $1$2');
+        finalOutput = finalOutput.replace(/,\s*threatening ([^,\.]+)([,\.])/gi, '. This threatens $1$2');
+        finalOutput = finalOutput.replace(/,\s*affecting ([^,\.]+)([,\.])/gi, '. This affects $1$2');
         finalOutput = finalOutput.replace(/,\s*(\w+ing) ([^,]+) and (\w+ing) ([^\.]+)\./gi, '. This $1 $2 and $3 $4.');
         
         // Balance structures
