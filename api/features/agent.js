@@ -313,14 +313,21 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
+    // Logging object to return in response
+    const logs = {
+        steps: [],
+        proofreaderResponse: null,
+        proofreaderFixes: [],
+        fallbackChanges: false,
+        modelUsed: null
+    };
+
     try {
         const { text, apiKey, model } = req.body;
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         
-        // Model selection - can be passed in request body
-        // Options: 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768', 'llama-3.1-8b-instant'
         const selectedModel = model || 'llama-3.1-70b-versatile';
-        console.log(`[Humanizer] Using model: ${selectedModel}`);
+        logs.steps.push(`Requested model: ${selectedModel}`);
         
         if (!text) throw new Error("No text provided.");
         if (text.length < 10) throw new Error("Text too short.");
@@ -329,7 +336,7 @@ export default async function handler(req, res) {
         
         // Step 1: Detect sections
         const sections = detectSections(safeText);
-        console.log(`[Humanizer] Processing ${sections.length} sections`);
+        logs.steps.push(`Detected ${sections.length} sections`);
         
         // Step 2: Humanize each section
         const humanizedParts = [];
@@ -339,13 +346,24 @@ export default async function handler(req, res) {
             const prompt = buildHumanizePrompt(section, i, sections.length);
             const messages = [{ role: "user", content: prompt }];
             
-            console.log(`[Humanizer] Section ${i + 1}/${sections.length} - sending to Groq...`);
-            // NOTE: GroqAPI.chat needs to accept model as 4th parameter
-            // Update groqAPI.js to support: GroqAPI.chat(messages, apiKey, stream, model)
-            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false, selectedModel);
+            logs.steps.push(`Processing section ${i + 1}/${sections.length}...`);
             
-            console.log(`[Humanizer] Section ${i + 1} raw response (first 200 chars):`);
-            console.log(rawResult.substring(0, 200) + '...');
+            // GroqAPI now returns { content, model }
+            const response = await GroqAPI.chat(messages, GROQ_KEY, false, selectedModel);
+            
+            // Handle both old format (string) and new format (object)
+            let rawResult, usedModel;
+            if (typeof response === 'string') {
+                rawResult = response;
+                usedModel = selectedModel;
+            } else {
+                rawResult = response.content;
+                usedModel = response.model;
+            }
+            
+            logs.modelUsed = usedModel;
+            logs.steps.push(`Section ${i + 1} used model: ${usedModel}`);
+            logs.steps.push(`Section ${i + 1} raw (100 chars): ${rawResult.substring(0, 100)}...`);
             
             let processed = postProcess(rawResult, section.title);
             humanizedParts.push(processed);
@@ -355,51 +373,102 @@ export default async function handler(req, res) {
         let combined = humanizedParts.join('\n\n');
         combined = killEmDashes(combined);
         
-        console.log('[Humanizer] Combined text before proofreader:');
-        console.log(combined.substring(0, 500) + '...');
+        logs.steps.push(`Combined text (200 chars): ${combined.substring(0, 200)}...`);
         
-        // Step 4: AI Proofreader - detect and fix remaining AI patterns
-        console.log('[Humanizer] Running AI proofreader...');
-        const fixes = await proofreadForAIPatterns(combined, GROQ_KEY);
+        // Step 4: AI Proofreader
+        logs.steps.push('Running AI proofreader...');
+        
+        const proofResponse = await GroqAPI.chat(
+            [{ role: "user", content: buildProofreaderPrompt(combined) }], 
+            GROQ_KEY, 
+            false, 
+            selectedModel
+        );
+        
+        // Handle response format
+        const proofRaw = typeof proofResponse === 'string' ? proofResponse : proofResponse.content;
+        logs.proofreaderResponse = proofRaw;
+        
+        // Parse proofreader response
+        const fixes = parseProofreaderResponse(proofRaw);
+        logs.proofreaderFixes = fixes;
+        logs.steps.push(`Proofreader found ${fixes.length} fixes`);
         
         if (fixes.length > 0) {
-            console.log(`[Humanizer] Applying ${fixes.length} AI-detected fixes`);
             combined = applyFixes(combined, fixes);
-        } else {
-            console.log('[Humanizer] Proofreader found no fixes (or failed)');
+            logs.steps.push('Applied proofreader fixes');
         }
         
-        // Step 5: Fallback regex for patterns that ALWAYS slip through
-        console.log('[Humanizer] Applying fallback pattern fixes...');
+        // Step 5: Fallback regex fixes
+        logs.steps.push('Applying fallback regex fixes...');
         const beforeFallback = combined;
         combined = applyFallbackFixes(combined);
-        
-        if (beforeFallback !== combined) {
-            console.log('[Humanizer] Fallback fixes made changes');
-        } else {
-            console.log('[Humanizer] Fallback fixes made no changes');
-        }
+        logs.fallbackChanges = (beforeFallback !== combined);
+        logs.steps.push(`Fallback made changes: ${logs.fallbackChanges}`);
         
         // Final cleanup
         const finalOutput = combined.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
         
-        console.log('[Humanizer] Final output (first 300 chars):');
-        console.log(finalOutput.substring(0, 300) + '...');
+        logs.steps.push(`Final output (200 chars): ${finalOutput.substring(0, 200)}...`);
 
         return res.status(200).json({
             success: true,
             result: finalOutput,
             sections: sections.length,
             fixes: fixes.length,
-            model: selectedModel
+            model: logs.modelUsed,
+            logs: logs
         });
 
     } catch (error) {
         console.error("Humanizer Error:", error);
-        return res.status(500).json({ success: false, error: error.message });
+        logs.steps.push(`ERROR: ${error.message}`);
+        return res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            logs: logs 
+        });
     }
 }
-        return res.status(500).json({ success: false, error: error.message });
+
+// Helper to build proofreader prompt
+function buildProofreaderPrompt(text) {
+    return `Find AI-sounding sentences and rewrite them naturally.
+
+TEXT:
+"${text}"
+
+FIND THESE PATTERNS:
+1. "isn't just X, it's Y" - any variation
+2. "doesn't just X, it Y"
+3. Participle phrases: ", forcing X", ", creating Y", ", pushing Z"
+4. "The goal/decision isn't X. It's Y."
+5. Multiple "It's" starters
+
+Return ONLY JSON:
+{"fixes": [{"original": "exact sentence", "fixed": "rewrite"}]}
+
+If no issues: {"fixes": []}`;
+}
+
+// Helper to parse proofreader response
+function parseProofreaderResponse(response) {
+    try {
+        let jsonStr = response.trim();
+        
+        // Extract from code blocks
+        const codeMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (codeMatch) jsonStr = codeMatch[1].trim();
+        
+        // Find JSON object
+        const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+        if (objMatch) jsonStr = objMatch[0];
+        
+        const parsed = JSON.parse(jsonStr);
+        return parsed.fixes || [];
+    } catch (e) {
+        console.error('[Proofreader] Parse error:', e.message);
+        return [];
     }
 }
 
