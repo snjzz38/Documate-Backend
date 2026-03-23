@@ -208,6 +208,85 @@ function postProcess(text, sectionTitle) {
 }
 
 // ==========================================================================
+// FALLBACK REGEX FIXES - For patterns that always slip through
+// ==========================================================================
+
+function applyFallbackFixes(text) {
+    let result = text;
+    
+    // Pattern 1: "isn't just X, it's Y" - all variations
+    result = result.replace(/isn't just ([^,]+),\s*it's ([^\.]+)\./gi, (_, x, y) => {
+        return `goes beyond ${x.trim()}. ${y.trim().charAt(0).toUpperCase() + y.trim().slice(1)}.`;
+    });
+    
+    // Pattern 2: "doesn't just X, it Y"
+    result = result.replace(/doesn't just ([^,]+),\s*it ([^\.]+)\./gi, (_, x, y) => {
+        return `does more than ${x.trim()}. It also ${y.trim()}.`;
+    });
+    
+    // Pattern 3: "don't just X, they Y"
+    result = result.replace(/don't just ([^,]+),\s*they ([^\.]+)\./gi, (_, x, y) => {
+        return `do more than ${x.trim()}. They ${y.trim()}.`;
+    });
+    
+    // Pattern 4: Split contrast "X isn't about Y. It's about Z"
+    result = result.replace(/The (decision|choice|question|goal|point) isn't about ([^\.]+)\.\s*It's about ([^\.]+)\./gi, (_, noun, y, z) => {
+        return `The ${noun} comes down to ${z.trim()}, not ${y.trim()}.`;
+    });
+    
+    // Pattern 5: "isn't about X or Y. It's about Z"  
+    result = result.replace(/isn't about ([^\.]+)\.\s*It's about ([^\.]+)\./gi, (_, x, y) => {
+        return `is really about ${y.trim()}.`;
+    });
+    
+    // Pattern 6: Participle chains ", forcing/creating/pushing X"
+    const participles = ['forcing', 'creating', 'causing', 'making', 'pushing', 'leaving', 'turning', 'driving', 'demanding', 'requiring'];
+    for (const p of participles) {
+        const regex = new RegExp(`,\\s*${p}\\s+([^,\\.]+)[\\.\\,]`, 'gi');
+        result = result.replace(regex, (match, captured) => {
+            const verb = p.replace(/ing$/, '');
+            const presentVerb = verb + (verb.endsWith('e') ? 's' : 'es');
+            return `. This ${presentVerb} ${captured.trim()}.`;
+        });
+    }
+    
+    // Pattern 7: Triple parallel "X, X, and X"
+    result = result.replace(/(\w+)s ([^,]+),\s*\1s ([^,]+),\s*and\s*\1s ([^\.]+)\./gi, (_, verb, a, b, c) => {
+        return `${verb}s ${a.trim()} and ${b.trim()}, and also ${verb}s ${c.trim()}.`;
+    });
+    
+    // Pattern 8: "between X and Y" at end
+    result = result.replace(/between ([^,]+) and ([^\.]+)\.$/gi, (_, x, y) => {
+        return `between ${x.trim()} or ${y.trim()}.`;
+    });
+    
+    // Pattern 9: Multiple "It's" at sentence start - vary them
+    const sentences = result.split(/(?<=[.!?])\s+/);
+    let itsCount = 0;
+    const varied = sentences.map(s => {
+        if (/^It's\s/i.test(s)) {
+            itsCount++;
+            if (itsCount > 1) {
+                // Vary subsequent "It's"
+                if (/^It's about/i.test(s)) return s.replace(/^It's about/i, 'This concerns');
+                if (/^It's a/i.test(s)) return s.replace(/^It's a/i, 'This is a');
+                if (/^It's the/i.test(s)) return s.replace(/^It's the/i, 'This represents the');
+                if (/^It's needed/i.test(s)) return s.replace(/^It's needed/i, 'This is necessary');
+                return s.replace(/^It's/i, 'This is');
+            }
+        }
+        return s;
+    });
+    result = varied.join(' ');
+    
+    // Clean up any double periods or spaces
+    result = result.replace(/\.\./g, '.');
+    result = result.replace(/\s{2,}/g, ' ');
+    
+    return result;
+}
+
+// ==========================================================================
 // MAIN HANDLER
 // ==========================================================================
 
@@ -252,9 +331,13 @@ export default async function handler(req, res) {
         const fixes = await proofreadForAIPatterns(combined, GROQ_KEY);
         
         if (fixes.length > 0) {
-            console.log(`[Humanizer] Applying ${fixes.length} fixes`);
+            console.log(`[Humanizer] Applying ${fixes.length} AI-detected fixes`);
             combined = applyFixes(combined, fixes);
         }
+        
+        // Step 5: Fallback regex for patterns that ALWAYS slip through
+        console.log('[Humanizer] Applying fallback pattern fixes...');
+        combined = applyFallbackFixes(combined);
         
         // Final cleanup
         const finalOutput = combined.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
