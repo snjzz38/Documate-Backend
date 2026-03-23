@@ -79,93 +79,110 @@ function detectSections(text) {
 }
 
 // ==========================================================================
-// HUMANIZATION PROMPT
+// HUMANIZATION PROMPT - STRICT
 // ==========================================================================
 
 function buildHumanizePrompt(section, index, totalSections) {
     const position = index === 0 ? 'OPENING' : index === totalSections - 1 ? 'CLOSING' : 'MIDDLE';
 
-    return `Rewrite this ${position} section to sound naturally human-written.
+    return `Rewrite this ${position} section to sound human-written.
 
-REQUIREMENTS:
-1. Vary sentence lengths: mix short (5-8 words), medium (10-15), and longer (20-30)
-2. Vary sentence starters: don't repeat "It's", "This", "The" too often
-3. Use natural connectors: "and", "but", "so", "because", "which"
-4. Keep the same meaning and all facts
+ABSOLUTE BANS - YOU MUST NOT USE:
+1. "isn't just X, it's Y" - BANNED in any form
+2. "doesn't just X, it Y" - BANNED  
+3. "don't just X, they Y" - BANNED
+4. Participle phrases: ", forcing X", ", creating Y", ", pushing Z", ", turning X" - ALL BANNED
+5. Starting sentences with "It's" more than ONCE - BANNED
+6. "The goal/decision isn't X. It's Y" - BANNED
+7. ", which" clauses - BANNED
 
-AVOID THESE AI PATTERNS:
-- "isn't just X, it's Y" or any variation
-- "doesn't just X, it Y"  
-- "don't just X, they Y"
-- Participle chains: ", forcing X, creating Y"
-- "The decision/goal isn't X. It's Y"
-- Perfect three-part parallels
+HOW TO WRITE INSTEAD:
+- Short direct sentences: "Climate change is a security threat."
+- Simple connectors: "Droughts destroy crops and people leave."
+- "because" and "when": "When crops fail, people migrate."
+- Start with subjects: "Rising temperatures cause droughts."
+- Break long sentences into two shorter ones.
 
-TEXT TO REWRITE:
+GOOD:
+"Climate change threatens global security. Rising temperatures cause droughts and destroy crops. People lose their livelihoods and have to move somewhere else. This puts pressure on neighboring countries."
+
+BAD (never write like this):
+"Climate change isn't just environmental, it's a security crisis, forcing communities to compete, creating tensions, and pushing societies toward collapse."
+
+TEXT:
 "${section.content}"
 
-Write naturally:`;}
+Rewrite following the rules:`;}
 
 // ==========================================================================
-// AI PROOFREADER - Detects and fixes AI patterns dynamically
+// AI PROOFREADER - With detailed logging
 // ==========================================================================
 
 async function proofreadForAIPatterns(text, apiKey) {
-    const prompt = `You are an AI detection expert. Find sentences that sound AI-generated and rewrite them naturally.
+    const prompt = `You are an AI detection expert. Find sentences with AI patterns and rewrite them.
 
-TEXT TO ANALYZE:
+TEXT:
 "${text}"
 
-COMMON AI PATTERNS TO FIND AND FIX:
-1. "isn't just X, it's Y" - any variation of this contrast pattern
+PATTERNS TO FIND AND FIX:
+1. "isn't just X, it's Y" - any variation
 2. "doesn't just X, it Y" or "don't just X, they Y"
-3. Participle chains: ", forcing X", ", creating Y", ", pushing Z"
-4. Split contrasts: "The decision isn't X. It's Y."
-5. Triple parallels: "strains X, strains Y, and strains Z"
-6. Multiple sentences starting with "It's" or "This"
-7. "must balance X with Y" formal structures
-8. "between X and Y" perfect parallels at sentence end
+3. Participle phrases: ", forcing X", ", creating Y", ", pushing Z", ", turning X"
+4. "The goal/decision isn't X. It's Y."
+5. Multiple "It's" sentence starters
+6. ", which" clauses
 
-For each AI-sounding sentence, provide a natural human rewrite.
-
-RESPOND WITH ONLY THIS JSON FORMAT:
+RESPOND WITH ONLY JSON:
 {
   "fixes": [
-    {"original": "exact sentence to replace", "fixed": "natural rewrite"},
-    {"original": "another sentence", "fixed": "its rewrite"}
+    {"original": "exact sentence", "fixed": "rewrite"}
   ]
 }
 
-If text sounds human already, return: {"fixes": []}
-
-Rules for rewrites:
-- Keep the same meaning
-- Sound like natural human writing
-- Break up complex patterns into simpler sentences
-- Vary sentence structure`;
+Return {"fixes": []} if no issues found.`;
 
     const messages = [{ role: "user", content: prompt }];
     
     try {
         const response = await GroqAPI.chat(messages, apiKey, false);
         
+        // LOG THE RAW RESPONSE
+        console.log('[Proofreader] Raw AI response:');
+        console.log('---START---');
+        console.log(response);
+        console.log('---END---');
+        
         // Extract JSON from response
         let jsonStr = response.trim();
         
         // Handle markdown code blocks
         const codeMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (codeMatch) jsonStr = codeMatch[1].trim();
+        if (codeMatch) {
+            jsonStr = codeMatch[1].trim();
+            console.log('[Proofreader] Extracted from code block');
+        }
         
         // Find JSON object
         const objMatch = jsonStr.match(/\{[\s\S]*\}/);
-        if (objMatch) jsonStr = objMatch[0];
+        if (objMatch) {
+            jsonStr = objMatch[0];
+        }
+        
+        console.log('[Proofreader] Parsing JSON:', jsonStr.substring(0, 200) + '...');
         
         const parsed = JSON.parse(jsonStr);
-        console.log(`[Proofreader] Found ${parsed.fixes?.length || 0} patterns to fix`);
+        console.log(`[Proofreader] Found ${parsed.fixes?.length || 0} fixes:`);
+        if (parsed.fixes) {
+            parsed.fixes.forEach((f, i) => {
+                console.log(`  Fix ${i + 1}: "${f.original?.substring(0, 50)}..." -> "${f.fixed?.substring(0, 50)}..."`);
+            });
+        }
+        
         return parsed.fixes || [];
         
     } catch (e) {
         console.error('[Proofreader] Parse error:', e.message);
+        console.error('[Proofreader] This usually means the AI did not return valid JSON');
         return [];
     }
 }
@@ -297,8 +314,13 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { text, apiKey } = req.body;
+        const { text, apiKey, model } = req.body;
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
+        
+        // Model selection - can be passed in request body
+        // Options: 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768', 'llama-3.1-8b-instant'
+        const selectedModel = model || 'llama-3.1-70b-versatile';
+        console.log(`[Humanizer] Using model: ${selectedModel}`);
         
         if (!text) throw new Error("No text provided.");
         if (text.length < 10) throw new Error("Text too short.");
@@ -317,7 +339,14 @@ export default async function handler(req, res) {
             const prompt = buildHumanizePrompt(section, i, sections.length);
             const messages = [{ role: "user", content: prompt }];
             
-            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false);
+            console.log(`[Humanizer] Section ${i + 1}/${sections.length} - sending to Groq...`);
+            // NOTE: GroqAPI.chat needs to accept model as 4th parameter
+            // Update groqAPI.js to support: GroqAPI.chat(messages, apiKey, stream, model)
+            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false, selectedModel);
+            
+            console.log(`[Humanizer] Section ${i + 1} raw response (first 200 chars):`);
+            console.log(rawResult.substring(0, 200) + '...');
+            
             let processed = postProcess(rawResult, section.title);
             humanizedParts.push(processed);
         }
@@ -326,6 +355,9 @@ export default async function handler(req, res) {
         let combined = humanizedParts.join('\n\n');
         combined = killEmDashes(combined);
         
+        console.log('[Humanizer] Combined text before proofreader:');
+        console.log(combined.substring(0, 500) + '...');
+        
         // Step 4: AI Proofreader - detect and fix remaining AI patterns
         console.log('[Humanizer] Running AI proofreader...');
         const fixes = await proofreadForAIPatterns(combined, GROQ_KEY);
@@ -333,24 +365,40 @@ export default async function handler(req, res) {
         if (fixes.length > 0) {
             console.log(`[Humanizer] Applying ${fixes.length} AI-detected fixes`);
             combined = applyFixes(combined, fixes);
+        } else {
+            console.log('[Humanizer] Proofreader found no fixes (or failed)');
         }
         
         // Step 5: Fallback regex for patterns that ALWAYS slip through
         console.log('[Humanizer] Applying fallback pattern fixes...');
+        const beforeFallback = combined;
         combined = applyFallbackFixes(combined);
+        
+        if (beforeFallback !== combined) {
+            console.log('[Humanizer] Fallback fixes made changes');
+        } else {
+            console.log('[Humanizer] Fallback fixes made no changes');
+        }
         
         // Final cleanup
         const finalOutput = combined.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+        
+        console.log('[Humanizer] Final output (first 300 chars):');
+        console.log(finalOutput.substring(0, 300) + '...');
 
         return res.status(200).json({
             success: true,
             result: finalOutput,
             sections: sections.length,
-            fixes: fixes.length
+            fixes: fixes.length,
+            model: selectedModel
         });
 
     } catch (error) {
         console.error("Humanizer Error:", error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+}
         return res.status(500).json({ success: false, error: error.message });
     }
 }
