@@ -72,9 +72,14 @@ function detectProblems(sentence) {
         problems.push('which_clause');
     }
     
-    // Filler phrases
+    // Filler/transition phrases
     if (/^(To clarify|To be clear|In other words|Put simply|That is to say|It should be noted|It is important)[,:]/i.test(sentence)) {
         problems.push('filler_phrase');
+    }
+    
+    // ", in turn," and similar transitions
+    if (/,\s*(in turn|however|therefore|thus|hence|moreover|furthermore|additionally|consequently),/i.test(sentence)) {
+        problems.push('transition_phrase');
     }
     
     // "This is a critical/key issue" 
@@ -100,6 +105,21 @@ function detectProblems(sentence) {
     // Dramatic phrases
     if (/(unfolding|playing out|happening) (before our eyes|in plain sight|right now)/i.test(sentence)) {
         problems.push('dramatic_phrase');
+    }
+    
+    // "breeding ground for" - formal cliche
+    if (/breeding ground for/i.test(sentence)) {
+        problems.push('formal_cliche');
+    }
+    
+    // "rather than framing" / "rather than X-ing" at end
+    if (/rather than \w+ing/i.test(sentence)) {
+        problems.push('rather_than_ing');
+    }
+    
+    // "serves as" / "acts as" formal
+    if (/(serves|acts|functions) as\b/i.test(sentence)) {
+        problems.push('serves_as');
     }
     
     return problems;
@@ -139,6 +159,9 @@ async function fixSentence(sentence, problems, apiKey, logs) {
     if (problems.includes('filler_phrase')) {
         instructions.push('Remove "To clarify" or similar filler. Just state the point.');
     }
+    if (problems.includes('transition_phrase')) {
+        instructions.push('Remove ", in turn," or similar transition. Connect ideas more naturally.');
+    }
     if (problems.includes('this_is_critical')) {
         instructions.push('Remove "This is a critical issue" - just describe what happens');
     }
@@ -153,6 +176,15 @@ async function fixSentence(sentence, problems, apiKey, logs) {
     }
     if (problems.includes('dramatic_phrase')) {
         instructions.push('Remove dramatic phrasing like "unfolding in plain sight" - be more direct');
+    }
+    if (problems.includes('formal_cliche')) {
+        instructions.push('Replace "breeding ground for" with simpler phrasing like "leads to" or "causes"');
+    }
+    if (problems.includes('rather_than_ing')) {
+        instructions.push('Remove "rather than framing/viewing" - simplify the sentence');
+    }
+    if (problems.includes('serves_as')) {
+        instructions.push('Replace "serves as" / "acts as" with simpler phrasing');
     }
     
     const prompt = `Rewrite this sentence naturally:
@@ -189,9 +221,9 @@ function analyzeFlow(sentences) {
     
     let shortStreak = 0;
     for (let i = 0; i < lengths.length; i++) {
-        if (lengths[i] < 8) {
+        if (lengths[i] < 10) {  // Increased threshold
             shortStreak++;
-            if (shortStreak >= 3) {
+            if (shortStreak >= 2) {  // Lower threshold - combine even 2 short sentences
                 issues.push({ index: i, type: 'too_many_short' });
             }
         } else {
@@ -203,42 +235,33 @@ function analyzeFlow(sentences) {
 }
 
 // ==========================================================================
-// COMBINE SHORT SENTENCES
+// COMBINE SHORT SENTENCES - More aggressive combining
 // ==========================================================================
 
 async function combineShortSentences(sentences, apiKey, logs) {
-    const flowIssues = analyzeFlow(sentences);
-    
-    if (flowIssues.length === 0) {
-        return sentences;
-    }
-    
-    logs.push(`Found ${flowIssues.length} choppy sections to smooth out`);
-    
-    // Find runs of short sentences and combine them
+    // Find pairs of consecutive short sentences to combine
     const result = [...sentences];
     const processed = new Set();
     
-    for (const issue of flowIssues) {
-        const idx = issue.index;
-        if (processed.has(idx) || processed.has(idx - 1) || processed.has(idx - 2)) continue;
+    for (let i = 0; i < sentences.length - 1; i++) {
+        if (processed.has(i)) continue;
         
-        // Get 2-3 short sentences to combine
-        const start = Math.max(0, idx - 2);
-        const toMerge = sentences.slice(start, idx + 1).filter(s => s.split(/\s+/).length < 10);
+        const len1 = sentences[i].split(/\s+/).length;
+        const len2 = sentences[i + 1].split(/\s+/).length;
         
-        if (toMerge.length >= 2) {
-            const combined = toMerge.join(' ');
+        // If both sentences are short (under 12 words), combine them
+        if (len1 < 12 && len2 < 12) {
+            const combined = sentences[i] + ' ' + sentences[i + 1];
             
-            const prompt = `Combine these choppy sentences into one or two flowing sentences:
+            const prompt = `Combine these two sentences into one flowing sentence:
 
 "${combined}"
 
 Rules:
-- Keep all the information
-- Make it flow naturally
-- Use "and", "but", "because", "when" to connect ideas
-- Output ONLY the rewritten text`;
+- Use "and", "but", "because", "while", "since", or "which" to connect
+- Keep all information
+- Make it sound natural, like a human wrote it
+- Output ONLY the combined sentence`;
 
             try {
                 const response = await GroqAPI.chat([{ role: "user", content: prompt }], apiKey, false);
@@ -246,17 +269,12 @@ Rules:
                 fixed = fixed.trim().replace(/^["']|["']$/g, '');
                 fixed = applyWordSwaps(fixed);
                 
-                // Replace the sentences
-                result[start] = fixed;
-                for (let i = start + 1; i <= idx && i < result.length; i++) {
-                    if (toMerge.includes(sentences[i])) {
-                        result[i] = ''; // Mark for removal
-                        processed.add(i);
-                    }
-                }
-                processed.add(start);
+                result[i] = fixed;
+                result[i + 1] = ''; // Mark for removal
+                processed.add(i);
+                processed.add(i + 1);
                 
-                logs.push(`COMBINED ${toMerge.length} sentences at position ${start}`);
+                logs.push(`COMBINED: "${sentences[i].substring(0, 25)}..." + "${sentences[i+1].substring(0, 25)}..."`);
             } catch (e) {
                 logs.push(`Error combining: ${e.message}`);
             }
