@@ -1,316 +1,131 @@
 // api/features/humanizer.js
+// Sentence-by-sentence approach: only fix sentences with AI patterns
 import { GroqAPI } from '../utils/groqAPI.js';
 
 // ==========================================================================
-// CONSTANTS
+// PATTERN DETECTION - Check if a sentence has problems
 // ==========================================================================
 
-const BANNED_WORDS = [
-    "furthermore", "moreover", "additionally", "subsequently", "consequently",
-    "nevertheless", "utilize", "leverage", "facilitate", "optimize", "enhance",
-    "comprehensive", "multifaceted", "paradigm", "methodology", "underscore",
-    "delve", "realm", "landscape", "crucial", "pivotal", "myriad", "plethora"
-];
-
-const SIMPLE_SWAPS = {
-    "utilize": "use", "leverage": "use", "facilitate": "help", "optimize": "improve",
-    "enhance": "improve", "comprehensive": "full", "furthermore": "also",
-    "moreover": "and", "additionally": "also", "subsequently": "then",
-    "consequently": "so", "nevertheless": "but", "demonstrate": "show",
-    "significant": "major", "numerous": "many", "prior to": "before",
-    "in order to": "to", "due to the fact that": "because"
-};
-
-// ==========================================================================
-// UTILITY FUNCTIONS
-// ==========================================================================
-
-function killEmDashes(text) {
-    return text
-        .replace(/\u2014/g, ', ')
-        .replace(/\u2013/g, ', ')
-        .replace(/—/g, ', ')
-        .replace(/–/g, ', ')
-        .replace(/ - /g, ', ')
-        .replace(/,\s*,/g, ',')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
-}
-
-function applySwaps(text) {
-    let result = text;
-    for (const [bad, good] of Object.entries(SIMPLE_SWAPS)) {
-        result = result.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
-    }
-    return result;
-}
-
-function cleanOutput(text) {
-    let cleaned = text;
-    cleaned = cleaned.replace(/^(Here's|Here is|Below is|Sure|I've rewritten|Rewritten|I have rewritten)[^:.\n]*[:.]\s*/gi, '');
-    cleaned = cleaned.replace(/^["']|["']$/g, '');
-    return cleaned.trim();
-}
-
-// ==========================================================================
-// SECTION DETECTION
-// ==========================================================================
-
-function detectSections(text) {
-    const lines = text.split('\n');
-    const sections = [];
-    let currentSection = { title: '', content: [] };
+function detectProblems(sentence) {
+    const problems = [];
     
-    for (const line of lines) {
-        const trimmed = line.trim();
-        const isHeader = /^#{1,3}\s+/.test(trimmed) || 
-                        (/^[A-Z][^.!?]*$/.test(trimmed) && trimmed.length < 60 && trimmed.length > 3) ||
-                        /^(Introduction|Conclusion|Summary|Background|Causes?|Effects?|Impacts?|Solutions?)/i.test(trimmed);
-        
-        if (isHeader && trimmed.length > 0) {
-            if (currentSection.content.length > 0) {
-                sections.push({ title: currentSection.title, content: currentSection.content.join(' ').trim() });
-            }
-            currentSection = { title: trimmed.replace(/^#+\s*/, ''), content: [] };
-        } else if (trimmed.length > 0) {
-            currentSection.content.push(trimmed);
-        }
+    // "isn't just X, it's Y" pattern
+    if (/isn't just .+,\s*it's/i.test(sentence)) {
+        problems.push('isnt_just_its');
     }
     
-    if (currentSection.content.length > 0) {
-        sections.push({ title: currentSection.title, content: currentSection.content.join(' ').trim() });
+    // "doesn't just X, it Y" pattern
+    if (/doesn't just .+,\s*it\b/i.test(sentence)) {
+        problems.push('doesnt_just_it');
     }
     
-    return sections.length > 0 ? sections : [{ title: '', content: text.trim() }];
+    // "don't just X, they Y" pattern
+    if (/don't just .+,\s*they/i.test(sentence)) {
+        problems.push('dont_just_they');
+    }
+    
+    // Participle phrases: ", forcing X", ", creating Y", etc.
+    if (/,\s*(forcing|creating|causing|making|pushing|leaving|turning|requiring|demanding|driving|sparking|straining|depleting|weakening)\s+/i.test(sentence)) {
+        problems.push('participle');
+    }
+    
+    // Em dashes
+    if (/[—–]|(\s-\s)/.test(sentence)) {
+        problems.push('em_dash');
+    }
+    
+    // ", which" clauses
+    if (/,\s*which\s+/i.test(sentence)) {
+        problems.push('which_clause');
+    }
+    
+    // "The choice/decision isn't X, it's Y"
+    if (/(choice|decision|goal|point) isn't .+,\s*it's/i.test(sentence)) {
+        problems.push('choice_isnt_its');
+    }
+    
+    return problems;
 }
 
 // ==========================================================================
-// PLANNING REQUEST
+// FIX A SINGLE SENTENCE
 // ==========================================================================
 
-async function planEssay(sections, apiKey) {
-    if (sections.length <= 1) return {};
+async function fixSentence(sentence, problems, apiKey, logs) {
+    let instructions = [];
     
-    const sectionList = sections.map((s, i) => 
-        `${i + 1}. ${s.content.substring(0, 120)}...`
-    ).join('\n');
+    if (problems.includes('isnt_just_its')) {
+        instructions.push('Remove "isn\'t just X, it\'s Y" - split into two ideas');
+    }
+    if (problems.includes('doesnt_just_it')) {
+        instructions.push('Remove "doesn\'t just X, it Y" - use simpler phrasing');
+    }
+    if (problems.includes('dont_just_they')) {
+        instructions.push('Remove "don\'t just X, they Y" - split into two sentences');
+    }
+    if (problems.includes('participle')) {
+        instructions.push('Remove participle phrase (", forcing X" or ", creating Y") - make separate sentence');
+    }
+    if (problems.includes('em_dash')) {
+        instructions.push('Replace em dashes with periods or commas');
+    }
+    if (problems.includes('which_clause')) {
+        instructions.push('Remove ", which" clause - make separate sentence');
+    }
+    if (problems.includes('choice_isnt_its')) {
+        instructions.push('Remove "choice isn\'t X, it\'s Y" - state choice directly');
+    }
     
-    const prompt = `Summarize each section in 10 words or less:\n${sectionList}`;
-    const messages = [{ role: "user", content: prompt }];
-    
+    const prompt = `Fix this sentence:
+
+"${sentence}"
+
+Instructions:
+${instructions.join('\n')}
+
+Rules:
+- Keep same meaning
+- May split into 2 sentences if needed
+- Output ONLY the fixed text, nothing else`;
+
     try {
-        const plan = await GroqAPI.chat(messages, apiKey, false);
-        const summaries = {};
-        plan.split('\n').forEach((line, i) => {
-            const cleaned = line.replace(/^\d+[\.\)]\s*/, '').trim();
-            if (cleaned) summaries[i] = cleaned;
-        });
-        return summaries;
+        const response = await GroqAPI.chat(
+            [{ role: "user", content: prompt }],
+            apiKey,
+            false
+        );
+        
+        let fixed = typeof response === 'string' ? response : (response.content || response);
+        fixed = fixed.trim().replace(/^["']|["']$/g, '');
+        
+        logs.push(`FIXED: "${sentence.substring(0, 30)}..." → "${fixed.substring(0, 30)}..."`);
+        return fixed;
     } catch (e) {
-        return {};
+        logs.push(`ERROR fixing: ${e.message}`);
+        return sentence;
     }
 }
 
 // ==========================================================================
-// HUMANIZATION PROMPT - The key to beating detection
+// FIX MULTIPLE "IT'S" STARTERS (without AI)
 // ==========================================================================
 
-function buildPrompt(section, index, totalSections, prevSummary, nextSummary) {
-    const position = index === 0 ? 'OPENING' : index === totalSections - 1 ? 'CLOSING' : 'MIDDLE';
+function fixItsStarters(sentences, logs) {
+    let itsCount = 0;
     
-    let contextNote = '';
-    if (prevSummary) contextNote += `[Follows from: ${prevSummary}] `;
-    if (nextSummary) contextNote += `[Leads into: ${nextSummary}]`;
-
-    return `Rewrite this ${position} section in plain English.
-
-${contextNote}
-
-COMPLETELY BANNED - never use these patterns:
-- "isn't just X, it's Y" or "doesn't just X, it Y" - ANY variation of this
-- Starting sentences with "It's" more than once total
-- Starting sentences with "We're" more than once total  
-- ", which means" as a connector
-- "The real danger/problem/threat is/comes from"
-- Perfect parallels: "between X and Y" at the end
-- "To be clear" / "The reality is"
-- Semicolons
-
-VARY YOUR SENTENCE STARTERS - use different ones:
-"Climate...", "Rising...", "When...", "This...", "Countries...", "People...", "Droughts...", "The...", "A...", "Without..."
-
-USE SIMPLE CONNECTORS:
-"and", "but", "so", "because", "since", "as", "after", "before"
-
-GOOD EXAMPLE (varied starters, no banned patterns):
-"Climate change has moved beyond environmental concern into security territory. Rising temperatures dry out farmland and make storms more destructive, hitting poor countries hardest. When harvests fail repeatedly, families pack up and leave. That migration creates friction at borders and drains resources from host countries. Several regions are already dealing with this, and the pattern keeps accelerating."
-
-BAD EXAMPLE (repetitive starters, banned patterns):
-"It's a security crisis. It's causing problems. We're seeing this happen. We're not prepared. The real danger is instability. This isn't just about environment, it's about survival."
-
-TEXT TO REWRITE:
-"${section.content}"
-
-Write using varied sentence starters and no banned patterns:`;
-}
-
-// ==========================================================================
-// POST-PROCESSING - Maximum aggressive pattern breaking
-// ==========================================================================
-
-function postProcess(text, sectionTitle) {
-    let result = text;
-    
-    // Clean AI artifacts
-    result = cleanOutput(result);
-    
-    // Kill em dashes
-    result = killEmDashes(result);
-    
-    // Apply word swaps
-    result = applySwaps(result);
-    
-    // Remove fake casual/transition phrases
-    const fakePhrases = [
-        /Here's the thing[,:]\s*/gi,
-        /The thing is[,:]\s*/gi,
-        /To be clear[,:]\s*/gi,
-        /To be fair[,:]\s*/gi,
-        /Let's be honest[,:]\s*/gi,
-        /The reality is[,:]\s*/gi,
-        /The truth is[,:]\s*/gi,
-        /The fact is[,:]\s*/gi,
-    ];
-    fakePhrases.forEach(p => { result = result.replace(p, ''); });
-    
-    // ===========================================
-    // NUCLEAR: Kill ALL "just X, it's" patterns with broad regex
-    // ===========================================
-    
-    // Most common pattern: "isn't just [anything], it's [anything]"
-    // Using lazy match .*? to catch everything between
-    result = result.replace(/isn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'goes beyond $1 and actually $2$3');
-    result = result.replace(/isn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'goes beyond $1 and $2$3');
-    
-    // "doesn't just X, it's/it Y"
-    result = result.replace(/doesn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'does more than $1, actually $2$3');
-    result = result.replace(/doesn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'does more than $1 and $2$3');
-    
-    // "don't just X, they Y"
-    result = result.replace(/don't just (.*?),\s*they (.*?)([\.!\?])/gi, 'do more than $1 and $2$3');
-    
-    // "wasn't just X, it was Y"
-    result = result.replace(/wasn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'was more than $1 and $2$3');
-    
-    // Catch stragglers - any remaining "n't just" 
-    result = result.replace(/isn't just /gi, 'goes beyond ');
-    result = result.replace(/doesn't just /gi, 'does more than ');
-    result = result.replace(/don't just /gi, 'do more than ');
-    result = result.replace(/wasn't just /gi, 'was more than ');
-    result = result.replace(/aren't just /gi, 'are more than ');
-    result = result.replace(/weren't just /gi, 'were more than ');
-    
-    // Also catch "not just X, it's Y" without contraction
-    result = result.replace(/is not just (.*?),\s*it's/gi, 'goes beyond $1 and becomes');
-    result = result.replace(/is not just /gi, 'goes beyond ');
-    result = result.replace(/are not just /gi, 'are more than ');
-    result = result.replace(/do not just /gi, 'do more than ');
-    result = result.replace(/does not just /gi, 'does more than ');
-    
-    // "not just about X" patterns
-    result = result.replace(/not just about /gi, 'more than ');
-    result = result.replace(/more than just /gi, 'more than ');
-    
-    // ===========================================
-    // Fix "The bigger/real X" patterns
-    // ===========================================
-    result = result.replace(/The (bigger|real|main|true) (risk|threat|problem|danger|issue|concern) (is|isn't|comes from)/gi, 'What matters is');
-    result = result.replace(/What matters here is that how/gi, 'What matters is how'); // Fix awkward phrasing
-    
-    // ===========================================
-    // Fix ", which means" and similar connectors
-    // ===========================================
-    result = result.replace(/,\s*which means/gi, '. That means');
-    result = result.replace(/,\s*which is why/gi, '. That is why');
-    
-    // ===========================================
-    // Fix "It's" at start - replace ALL instances after first
-    // ===========================================
-    let sentences = result.split(/(?<=[.!?])\s+/);
-    let itsFound = false;
-    let thisCount = 0;
-    let theCount = 0;
-    
-    sentences = sentences.map((s) => {
-        // Handle "It's" - only first one allowed
-        if (/^It's /i.test(s)) {
-            if (itsFound) {
-                // Replace subsequent "It's"
-                s = s.replace(/^It's a /i, 'This represents a ');
-                s = s.replace(/^It's the /i, 'This becomes the ');
-                s = s.replace(/^It's about /i, 'The issue is ');
-                s = s.replace(/^It's /i, 'This is ');
-            }
-            itsFound = true;
-        }
-        
-        // Handle "This" - only two allowed
-        if (/^This /i.test(s)) {
-            thisCount++;
-            if (thisCount > 2) {
-                s = s.replace(/^This is /i, 'That is ');
-                s = s.replace(/^This /i, 'That ');
+    return sentences.map((s, i) => {
+        if (/^It's\s/i.test(s)) {
+            itsCount++;
+            if (itsCount > 1) {
+                logs.push(`Varied "It's" #${itsCount}: sentence ${i + 1}`);
+                if (/^It's a\s/i.test(s)) return s.replace(/^It's a\s/i, 'This is a ');
+                if (/^It's the\s/i.test(s)) return s.replace(/^It's the\s/i, 'This becomes the ');
+                if (/^It's about\s/i.test(s)) return s.replace(/^It's about\s/i, 'This concerns ');
+                return s.replace(/^It's\s/i, 'This ');
             }
         }
-        
-        // Handle "The" - only three allowed
-        if (/^The /i.test(s)) {
-            theCount++;
-            if (theCount > 3) {
-                s = s.replace(/^The /i, 'A ');
-            }
-        }
-        
         return s;
     });
-    result = sentences.join(' ');
-    
-    // ===========================================
-    // Fix parallel structures
-    // ===========================================
-    result = result.replace(/between ([\w\s]+) and ([\w\s]+)\.$/gi, 'between $1 or facing $2.');
-    result = result.replace(/,\s*but between /gi, '. The real choice is ');
-    result = result.replace(/scarcity into conflict and inequality into/gi, 'scarcity into conflict, while inequality turns to');
-    
-    // ===========================================
-    // Simplify formal language
-    // ===========================================
-    const formalWords = [
-        [/\bMass displacement\b/gi, 'Large-scale migration'],
-        [/\bweak societies\b/gi, 'struggling regions'],
-        [/\bequitable\b/gi, 'fair'],
-        [/\bvulnerable\b/gi, 'at risk'],
-        [/\bessential\b/gi, 'needed'],
-    ];
-    formalWords.forEach(([p, r]) => { result = result.replace(p, r); });
-    
-    // ===========================================
-    // Clean up
-    // ===========================================
-    result = result.replace(/;\s*/g, ', ');
-    result = result.replace(/\.\./g, '.');
-    result = result.replace(/,,/g, ',');
-    result = result.replace(/\s+,/g, ',');
-    result = result.replace(/\s{2,}/g, ' ');
-    result = result.replace(/\.\s+([a-z])/g, (m, c) => '. ' + c.toUpperCase());
-    
-    result = result.trim();
-    
-    if (sectionTitle) {
-        result = sectionTitle + '\n' + result;
-    }
-    
-    return result;
 }
 
 // ==========================================================================
@@ -323,57 +138,87 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
+    const logs = [];
+    
     try {
         const { text, apiKey } = req.body;
         const GROQ_KEY = apiKey || process.env.GROQ_API_KEY;
         
         if (!text) throw new Error("No text provided.");
-        if (text.length < 10) throw new Error("Text too short.");
-
-        const safeText = text.substring(0, 20000);
         
-        // Detect sections
-        const sections = detectSections(safeText);
-        console.log(`[Humanizer] Processing ${sections.length} sections`);
+        logs.push(`Input: ${text.length} chars`);
         
-        // Get section summaries for context
-        const summaries = await planEssay(sections, GROQ_KEY);
+        // Step 1: Split into sentences
+        const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+        logs.push(`Sentences: ${sentences.length}`);
         
-        // Process each section
+        // Step 2: Detect problems in each sentence
+        const analysis = sentences.map((s, i) => ({
+            index: i,
+            original: s.trim(),
+            problems: detectProblems(s)
+        }));
+        
+        const problemSentences = analysis.filter(a => a.problems.length > 0);
+        logs.push(`Problems found: ${problemSentences.length} sentences`);
+        
+        problemSentences.forEach(ps => {
+            logs.push(`  [${ps.index + 1}] ${ps.problems.join(', ')}: "${ps.original.substring(0, 40)}..."`);
+        });
+        
+        // Step 3: Fix only problematic sentences (one by one)
         const results = [];
-        
-        for (let i = 0; i < sections.length; i++) {
-            const section = sections[i];
-            const prevSummary = summaries[i - 1] || null;
-            const nextSummary = summaries[i + 1] || null;
-            
-            const prompt = buildPrompt(section, i, sections.length, prevSummary, nextSummary);
-            const messages = [{ role: "user", content: prompt }];
-            
-            let rawResult = await GroqAPI.chat(messages, GROQ_KEY, false);
-            let processed = postProcess(rawResult, section.title);
-            
-            results.push(processed);
+        for (const item of analysis) {
+            if (item.problems.length > 0) {
+                const fixed = await fixSentence(item.original, item.problems, GROQ_KEY, logs);
+                results.push(fixed);
+            } else {
+                results.push(item.original);
+            }
         }
         
-        // Assemble final output
-        let finalOutput = results.join('\n\n');
-        finalOutput = killEmDashes(finalOutput);
-        finalOutput = finalOutput.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+        // Step 4: Fix multiple "It's" starters
+        const finalSentences = fixItsStarters(results, logs);
+        
+        // Step 5: Join and clean
+        let finalText = finalSentences.join(' ').replace(/\s{2,}/g, ' ').trim();
+        
+        logs.push(`Output: ${finalText.length} chars`);
 
         return res.status(200).json({
             success: true,
-            result: finalOutput,
-            sections: sections.length
+            result: finalText,
+            stats: {
+                totalSentences: sentences.length,
+                fixedSentences: problemSentences.length,
+                problems: problemSentences.map(ps => ({
+                    sentence: ps.original.substring(0, 50) + '...',
+                    issues: ps.problems
+                }))
+            },
+            logs: logs
         });
 
     } catch (error) {
-        console.error("Humanizer Error:", error);
-        return res.status(500).json({ success: false, error: error.message });
+        logs.push(`ERROR: ${error.message}`);
+        return res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            logs: logs 
+        });
     }
 }
 
 // ==========================================================================
-// EXPORTS
+// EXPORTS (for agent.js compatibility)
 // ==========================================================================
-export { postProcess as PostProcessor, SIMPLE_SWAPS as AI_VOCAB_SWAPS, detectSections as dynamicChunking, killEmDashes };
+const SIMPLE_SWAPS = {
+    "utilize": "use", "leverage": "use", "furthermore": "also",
+    "moreover": "and", "additionally": "also", "consequently": "so"
+};
+
+function killEmDashes(text) {
+    return text.replace(/[—–]/g, ', ').replace(/\s-\s/g, ', ');
+}
+
+export { detectProblems as PostProcessor, SIMPLE_SWAPS as AI_VOCAB_SWAPS, killEmDashes };
