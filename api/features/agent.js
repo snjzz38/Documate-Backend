@@ -387,6 +387,19 @@ export default async function handler(req, res) {
         // Assemble final output
         let finalOutput = results.join('\n\n');
         finalOutput = killEmDashes(finalOutput);
+        
+        // SECOND PASS: Apply critical pattern fixes again on combined output
+        // These patterns keep slipping through
+        finalOutput = finalOutput.replace(/isn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'goes beyond $1 to $2$3');
+        finalOutput = finalOutput.replace(/doesn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'does more than $1 and $2$3');
+        finalOutput = finalOutput.replace(/don't just (.*?),\s*they (.*?)([\.!\?])/gi, 'do more than $1 and $2$3');
+        finalOutput = finalOutput.replace(/aren't just (.*?),\s*they're (.*?)([\.!\?])/gi, 'go beyond $1 to $2$3');
+        finalOutput = finalOutput.replace(/The (decision|choice) isn't about (.*?),\s*it's about (.*?)([\.!\?])/gi, 'This comes down to $3, not $2$4');
+        finalOutput = finalOutput.replace(/strains ([^,]+),\s*strains ([^,]+),\s*and/gi, 'strains $1 and $2, while also');
+        finalOutput = finalOutput.replace(/isn't just /gi, 'goes beyond ');
+        finalOutput = finalOutput.replace(/doesn't just /gi, 'does more than ');
+        finalOutput = finalOutput.replace(/don't just /gi, 'do more than ');
+        
         finalOutput = finalOutput.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 
         return res.status(200).json({
