@@ -197,7 +197,7 @@ function postProcess(text, sectionTitle) {
     result = result.replace(/isn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'goes beyond $1 to $2$3');
     result = result.replace(/isn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'goes beyond $1 and $2$3');
     
-    // Pattern: "aren't just X, they're Y" - THIS WAS MISSING
+    // Pattern: "aren't just X, they're Y"
     result = result.replace(/aren't just (.*?),\s*they're (.*?)([\.!\?])/gi, 'go beyond $1 to $2$3');
     result = result.replace(/aren't just (.*?),\s*they (.*?)([\.!\?])/gi, 'go beyond $1 and $2$3');
     
@@ -205,11 +205,15 @@ function postProcess(text, sectionTitle) {
     result = result.replace(/doesn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'does more than $1 and $2$3');
     result = result.replace(/doesn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'does more than $1 and $2$3');
     
-    // Pattern: "don't just X, they're Y" - THIS WAS MISSING  
+    // Pattern: "don't just X, they're Y"
     result = result.replace(/don't just (.*?),\s*they're (.*?)([\.!\?])/gi, 'do more than $1 and end up $2$3');
     result = result.replace(/don't just (.*?),\s*they (.*?)([\.!\?])/gi, 'do more than $1 and $2$3');
     
-    // Pattern: "aren't optional, they're" - specific case
+    // NEW: Pattern "isn't to X, it's to Y" (goal/point/aim isn't to)
+    result = result.replace(/(goal|point|aim|idea) isn't to (.*?),\s*it's to (.*?)([\.!\?])/gi, '$1 is to $3, rather than $2$4');
+    result = result.replace(/isn't to (.*?),\s*it's to/gi, 'is to');
+    
+    // Pattern: "aren't optional, they're"
     result = result.replace(/aren't optional,\s*they're/gi, 'are necessary and');
     
     // Pattern: "wasn't just X, it was Y"
@@ -232,6 +236,30 @@ function postProcess(text, sectionTitle) {
     // "not just about X" patterns
     result = result.replace(/not just about /gi, 'more than ');
     result = result.replace(/more than just /gi, 'more than ');
+    
+    // ===========================================
+    // Fix PARTICIPLE CHAINS - ", Xing Y" patterns
+    // ===========================================
+    result = result.replace(/,\s*forcing ([^,\.]+)([,\.])/gi, '. This forces $1$2');
+    result = result.replace(/,\s*creating ([^,\.]+)([,\.])/gi, '. This creates $1$2');
+    result = result.replace(/,\s*causing ([^,\.]+)([,\.])/gi, '. This causes $1$2');
+    result = result.replace(/,\s*making ([^,\.]+)([,\.])/gi, '. This makes $1$2');
+    result = result.replace(/,\s*leaving ([^,\.]+)([,\.])/gi, '. This leaves $1$2');
+    result = result.replace(/,\s*pushing ([^,\.]+)([,\.])/gi, '. This pushes $1$2');
+    result = result.replace(/,\s*turning ([^,\.]+)([,\.])/gi, '. This turns $1$2');
+    result = result.replace(/,\s*leading ([^,\.]+)([,\.])/gi, '. This leads $1$2');
+    result = result.replace(/,\s*straining ([^,\.]+)([,\.])/gi, '. This strains $1$2');
+    result = result.replace(/,\s*fueling ([^,\.]+)([,\.])/gi, '. This fuels $1$2');
+    result = result.replace(/,\s*driving ([^,\.]+)([,\.])/gi, '. This drives $1$2');
+    
+    // Double participle: ", Xing A and Ying B"
+    result = result.replace(/,\s*(\w+ing) ([^,]+) and (\w+ing) ([^\.]+)\./gi, '. This $1 $2 and $3 $4.');
+    
+    // ===========================================
+    // Fix "must balance X with Y" formal structure
+    // ===========================================
+    result = result.replace(/must balance (\w+ing) ([^,\.]+) with (\w+ing)/gi, 'needs to both $1 $2 and $3');
+    result = result.replace(/must balance ([^,\.]+) with ([^,\.]+)/gi, 'needs $1 along with $2');
     
     // ===========================================
     // Fix triple parallel structures "X, X, and Y"
@@ -389,7 +417,7 @@ export default async function handler(req, res) {
         finalOutput = killEmDashes(finalOutput);
         
         // SECOND PASS: Apply critical pattern fixes again on combined output
-        // These patterns keep slipping through
+        // "isn't just X, it's Y" patterns
         finalOutput = finalOutput.replace(/isn't just (.*?),\s*it's (.*?)([\.!\?])/gi, 'goes beyond $1 to $2$3');
         finalOutput = finalOutput.replace(/doesn't just (.*?),\s*it (.*?)([\.!\?])/gi, 'does more than $1 and $2$3');
         finalOutput = finalOutput.replace(/don't just (.*?),\s*they (.*?)([\.!\?])/gi, 'do more than $1 and $2$3');
@@ -399,6 +427,23 @@ export default async function handler(req, res) {
         finalOutput = finalOutput.replace(/isn't just /gi, 'goes beyond ');
         finalOutput = finalOutput.replace(/doesn't just /gi, 'does more than ');
         finalOutput = finalOutput.replace(/don't just /gi, 'do more than ');
+        
+        // "isn't to X, it's to Y" pattern
+        finalOutput = finalOutput.replace(/(goal|point|aim|idea) isn't to (.*?),\s*it's to (.*?)([\.!\?])/gi, '$1 is to $3, rather than $2$4');
+        finalOutput = finalOutput.replace(/isn't to (.*?),\s*it's to/gi, 'is to');
+        
+        // Participle chains
+        finalOutput = finalOutput.replace(/,\s*forcing ([^,\.]+)([,\.])/gi, '. This forces $1$2');
+        finalOutput = finalOutput.replace(/,\s*creating ([^,\.]+)([,\.])/gi, '. This creates $1$2');
+        finalOutput = finalOutput.replace(/,\s*causing ([^,\.]+)([,\.])/gi, '. This causes $1$2');
+        finalOutput = finalOutput.replace(/,\s*making ([^,\.]+)([,\.])/gi, '. This makes $1$2');
+        finalOutput = finalOutput.replace(/,\s*pushing ([^,\.]+)([,\.])/gi, '. This pushes $1$2');
+        finalOutput = finalOutput.replace(/,\s*turning ([^,\.]+)([,\.])/gi, '. This turns $1$2');
+        finalOutput = finalOutput.replace(/,\s*straining ([^,\.]+)([,\.])/gi, '. This strains $1$2');
+        finalOutput = finalOutput.replace(/,\s*(\w+ing) ([^,]+) and (\w+ing) ([^\.]+)\./gi, '. This $1 $2 and $3 $4.');
+        
+        // Balance structures
+        finalOutput = finalOutput.replace(/must balance (\w+ing) ([^,\.]+) with (\w+ing)/gi, 'needs to both $1 $2 and $3');
         
         finalOutput = finalOutput.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 
