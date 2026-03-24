@@ -17,7 +17,7 @@ export const GeminiAPI = {
         if (!apiKey) throw new Error("Missing Gemini API Key");
         let lastError = null;
         for (let attempt = 0; attempt < GEMINI_MODELS.length; attempt++) {
-            const currentModel = GEMINI_MODELS[0];
+            const currentModel = GEMINI_MODELS[attempt % GEMINI_MODELS.length];
             try {
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
                 const res = await fetch(url, {
