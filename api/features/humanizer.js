@@ -1,322 +1,9 @@
 // api/features/humanizer.js
-// Strategy: Fix AI patterns while maintaining natural sentence variety
+// Strategy: Inject human imperfections - the AI keeps sounding too polished
 import { GroqAPI } from '../utils/groqAPI.js';
 
 // ==========================================================================
-// BANNED WORDS
-// ==========================================================================
-
-const BANNED_WORDS = {
-    "utilize": "use", "leverage": "use", "facilitate": "help",
-    "optimize": "improve", "enhance": "improve", "furthermore": "also",
-    "moreover": "also", "additionally": "also", "consequently": "so",
-    "nevertheless": "but", "therefore": "so", "thus": "so",
-    "equitable": "fair", "vulnerable": "at risk", "exacerbate": "make worse",
-    "mitigate": "reduce", "paramount": "important", "imperative": "necessary",
-    "pivotal": "key", "crucial": "important", "essential": "needed",
-    "significant": "big", "substantial": "large", "numerous": "many",
-    "commenced": "started", "concluded": "ended", "prior to": "before",
-    "in order to": "to", "due to the fact that": "because",
-    "ensuing": "following", "escalating": "growing", "prudent": "smart",
-    "depletes": "uses up", "erodes": "weakens", "evident": "clear",
-    "accelerating": "speeding up", "exacerbation": "worsening",
-    "amplifies": "makes worse", "transforms": "turns"
-};
-
-function applyWordSwaps(text) {
-    let result = text;
-    for (const [bad, good] of Object.entries(BANNED_WORDS)) {
-        result = result.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
-    }
-    return result;
-}
-
-// ==========================================================================
-// DETECT STRUCTURAL PROBLEMS
-// ==========================================================================
-
-function detectProblems(sentence) {
-    const problems = [];
-    
-    // Punctuation issues
-    if (/;/.test(sentence)) problems.push('semicolon');
-    if (/:\s*[a-zA-Z]/.test(sentence)) problems.push('colon');
-    if (/[—–]/.test(sentence)) problems.push('em_dash');
-    
-    // "not simply/merely/just X, it is Y" patterns
-    if (/not (simply|merely|just) .+[,;]\s*(it is|it's|but)/i.test(sentence)) {
-        problems.push('contrast_pattern');
-    }
-    if (/is not (simply|merely|just)\b/i.test(sentence)) {
-        problems.push('is_not_simply');
-    }
-    if (/isn't (just|simply|merely) .+,\s*it's/i.test(sentence)) {
-        problems.push('isnt_just');
-    }
-    if (/(doesn't|don't|does not|do not) (just|simply|merely)/i.test(sentence)) {
-        problems.push('doesnt_just');
-    }
-    
-    // "The choice is not X, but Y"
-    if (/(choice|decision|question) is not .+,\s*but\b/i.test(sentence)) {
-        problems.push('choice_not_but');
-    }
-    
-    // Participle chains
-    if (/,\s*(forcing|creating|causing|making|pushing|leaving|turning|requiring|demanding|driving|sparking|straining|transforming|amplifying)\s+/i.test(sentence)) {
-        problems.push('participle');
-    }
-    
-    // ", which" clauses
-    if (/,\s*which\s+/i.test(sentence)) {
-        problems.push('which_clause');
-    }
-    
-    // Filler/transition phrases
-    if (/^(To clarify|To be clear|In other words|Put simply|That is to say|It should be noted|It is important)[,:]/i.test(sentence)) {
-        problems.push('filler_phrase');
-    }
-    
-    // ", in turn," and similar transitions
-    if (/,\s*(in turn|however|therefore|thus|hence|moreover|furthermore|additionally|consequently),/i.test(sentence)) {
-        problems.push('transition_phrase');
-    }
-    
-    // "This is a critical/key issue" 
-    if (/This is a (critical|key|major|important) (issue|point|matter)/i.test(sentence)) {
-        problems.push('this_is_critical');
-    }
-    
-    // "The true/real/main X lies/is/comes from"
-    if (/The (true|real|actual|core|main|primary) .+ (lies|is|comes from)\b/i.test(sentence)) {
-        problems.push('true_x_pattern');
-    }
-    
-    // "This isn't about X" at start
-    if (/^This isn't about/i.test(sentence)) {
-        problems.push('this_isnt_about');
-    }
-    
-    // Parallel structure: "X into Y and A into B"
-    if (/\w+ (into|to|from) \w+ and \w+ (into|to|from) \w+/i.test(sentence)) {
-        problems.push('parallel_structure');
-    }
-    
-    // Dramatic phrases
-    if (/(unfolding|playing out|happening) (before our eyes|in plain sight|right now)/i.test(sentence)) {
-        problems.push('dramatic_phrase');
-    }
-    
-    // "breeding ground for" - formal cliche
-    if (/breeding ground for/i.test(sentence)) {
-        problems.push('formal_cliche');
-    }
-    
-    // "rather than framing" / "rather than X-ing" at end
-    if (/rather than \w+ing/i.test(sentence)) {
-        problems.push('rather_than_ing');
-    }
-    
-    // "serves as" / "acts as" formal
-    if (/(serves|acts|functions) as\b/i.test(sentence)) {
-        problems.push('serves_as');
-    }
-    
-    return problems;
-}
-
-// ==========================================================================
-// FIX INDIVIDUAL SENTENCE
-// ==========================================================================
-
-async function fixSentence(sentence, problems, apiKey, logs) {
-    let instructions = [];
-    
-    if (problems.includes('semicolon')) {
-        instructions.push('Split at semicolon into two sentences');
-    }
-    if (problems.includes('colon')) {
-        instructions.push('Remove colon, rephrase naturally');
-    }
-    if (problems.includes('em_dash')) {
-        instructions.push('Replace em dash with period or comma');
-    }
-    if (problems.includes('contrast_pattern') || problems.includes('is_not_simply') || problems.includes('isnt_just')) {
-        instructions.push('Remove the "not simply X, it is Y" contrast. Just state the main point.');
-    }
-    if (problems.includes('choice_not_but')) {
-        instructions.push('Remove "The choice is not X, but Y" - just state what we should choose');
-    }
-    if (problems.includes('doesnt_just')) {
-        instructions.push('Remove "doesn\'t/don\'t just" - state directly what happens');
-    }
-    if (problems.includes('participle')) {
-        instructions.push('Remove participle phrase (like ", pushing X"). Make it a separate sentence.');
-    }
-    if (problems.includes('which_clause')) {
-        instructions.push('Remove ", which" clause. Make it a separate sentence.');
-    }
-    if (problems.includes('filler_phrase')) {
-        instructions.push('Remove "To clarify" or similar filler. Just state the point.');
-    }
-    if (problems.includes('transition_phrase')) {
-        instructions.push('Remove ", in turn," or similar transition. Connect ideas more naturally.');
-    }
-    if (problems.includes('this_is_critical')) {
-        instructions.push('Remove "This is a critical issue" - just describe what happens');
-    }
-    if (problems.includes('true_x_pattern')) {
-        instructions.push('Remove "The main/true danger comes from" - state the danger directly');
-    }
-    if (problems.includes('this_isnt_about')) {
-        instructions.push('Rephrase "This isn\'t about X" to state what it IS about');
-    }
-    if (problems.includes('parallel_structure')) {
-        instructions.push('Break up the parallel "X into Y and A into B" - make two separate statements');
-    }
-    if (problems.includes('dramatic_phrase')) {
-        instructions.push('Remove dramatic phrasing like "unfolding in plain sight" - be more direct');
-    }
-    if (problems.includes('formal_cliche')) {
-        instructions.push('Replace "breeding ground for" with simpler phrasing like "leads to" or "causes"');
-    }
-    if (problems.includes('rather_than_ing')) {
-        instructions.push('Remove "rather than framing/viewing" - simplify the sentence');
-    }
-    if (problems.includes('serves_as')) {
-        instructions.push('Replace "serves as" / "acts as" with simpler phrasing');
-    }
-    
-    const prompt = `Rewrite this sentence naturally:
-
-"${sentence}"
-
-Changes needed:
-${instructions.join('\n')}
-
-Important: Write like a human would. Vary your phrasing. Output ONLY the rewritten text.`;
-
-    try {
-        const response = await GroqAPI.chat([{ role: "user", content: prompt }], apiKey, false);
-        let fixed = typeof response === 'string' ? response : (response.content || response);
-        fixed = fixed.trim().replace(/^["']|["']$/g, '');
-        fixed = applyWordSwaps(fixed);
-        
-        logs.push(`FIXED: "${sentence.substring(0, 30)}..." → "${fixed.substring(0, 30)}..."`);
-        return fixed;
-    } catch (e) {
-        logs.push(`ERROR: ${e.message}`);
-        return sentence;
-    }
-}
-
-// ==========================================================================
-// ANALYZE SENTENCE LENGTH PATTERNS
-// ==========================================================================
-
-function analyzeFlow(sentences) {
-    // Check if too many short sentences in a row
-    const lengths = sentences.map(s => s.split(/\s+/).length);
-    const issues = [];
-    
-    let shortStreak = 0;
-    for (let i = 0; i < lengths.length; i++) {
-        if (lengths[i] < 10) {  // Increased threshold
-            shortStreak++;
-            if (shortStreak >= 2) {  // Lower threshold - combine even 2 short sentences
-                issues.push({ index: i, type: 'too_many_short' });
-            }
-        } else {
-            shortStreak = 0;
-        }
-    }
-    
-    return issues;
-}
-
-// ==========================================================================
-// COMBINE SHORT SENTENCES - More aggressive combining
-// ==========================================================================
-
-async function combineShortSentences(sentences, apiKey, logs) {
-    // Find pairs of consecutive short sentences to combine
-    const result = [...sentences];
-    const processed = new Set();
-    
-    for (let i = 0; i < sentences.length - 1; i++) {
-        if (processed.has(i)) continue;
-        
-        const len1 = sentences[i].split(/\s+/).length;
-        const len2 = sentences[i + 1].split(/\s+/).length;
-        
-        // If both sentences are short (under 12 words), combine them
-        if (len1 < 12 && len2 < 12) {
-            const combined = sentences[i] + ' ' + sentences[i + 1];
-            
-            const prompt = `Combine these two sentences into one flowing sentence:
-
-"${combined}"
-
-Rules:
-- Use "and", "but", "because", "while", "since", or "which" to connect
-- Keep all information
-- Make it sound natural, like a human wrote it
-- Output ONLY the combined sentence`;
-
-            try {
-                const response = await GroqAPI.chat([{ role: "user", content: prompt }], apiKey, false);
-                let fixed = typeof response === 'string' ? response : (response.content || response);
-                fixed = fixed.trim().replace(/^["']|["']$/g, '');
-                fixed = applyWordSwaps(fixed);
-                
-                result[i] = fixed;
-                result[i + 1] = ''; // Mark for removal
-                processed.add(i);
-                processed.add(i + 1);
-                
-                logs.push(`COMBINED: "${sentences[i].substring(0, 25)}..." + "${sentences[i+1].substring(0, 25)}..."`);
-            } catch (e) {
-                logs.push(`Error combining: ${e.message}`);
-            }
-        }
-    }
-    
-    return result.filter(s => s.length > 0);
-}
-
-// ==========================================================================
-// FIX REPEATED STARTERS
-// ==========================================================================
-
-function fixRepeatedStarters(sentences, logs) {
-    let counts = { 'It': 0, 'This': 0, 'The': 0, 'They': 0, 'We': 0 };
-    
-    return sentences.map((s, i) => {
-        for (const starter of Object.keys(counts)) {
-            const regex = new RegExp(`^${starter}\\s`, 'i');
-            if (regex.test(s)) {
-                counts[starter]++;
-                if (counts[starter] > 2) {
-                    logs.push(`Varied "${starter}" starter #${counts[starter]}`);
-                    // Simple variations
-                    if (starter === 'This') {
-                        return s.replace(/^This\s/i, 'That ');
-                    }
-                    if (starter === 'It') {
-                        return s.replace(/^It is\s/i, 'That is ').replace(/^It\s/i, 'That ');
-                    }
-                    if (starter === 'The') {
-                        return s.replace(/^The\s/i, 'A ');
-                    }
-                }
-            }
-        }
-        return s;
-    });
-}
-
-// ==========================================================================
-// MAIN HANDLER
+// MAIN HANDLER - Single prompt approach with strong humanization instructions
 // ==========================================================================
 
 export default async function handler(req, res) {
@@ -335,60 +22,69 @@ export default async function handler(req, res) {
         
         logs.push(`Input: ${text.length} chars`);
         
-        // Step 1: Word swaps
-        let processed = applyWordSwaps(text);
+        const prompt = `Rewrite this text so it sounds like a real human wrote it, not AI.
+
+ORIGINAL TEXT:
+"${text}"
+
+CRITICAL RULES - You MUST follow these:
+
+1. VARY SENTENCE LENGTH DRAMATICALLY:
+   - Include some very short sentences (3-5 words): "That's the problem." "It gets worse."
+   - Include some medium sentences (10-15 words)
+   - Include 1-2 longer sentences (20+ words) with natural flow
+
+2. USE CONTRACTIONS:
+   - "it is" → "it's"
+   - "does not" → "doesn't"  
+   - "that is" → "that's"
+   - "we are" → "we're"
+
+3. ADD HUMAN TOUCHES:
+   - Start one sentence with "And" or "But"
+   - Use "really" or "actually" once
+   - Include one rhetorical question like "What happens then?" or "And what about...?"
+   - Use "a lot" instead of "significantly" 
+   - Use "get" or "got" somewhere
+
+4. AVOID THESE AI PATTERNS:
+   - No semicolons
+   - No "This [verb]s" sentence starters (like "This strains", "This creates")
+   - No ", which" clauses
+   - No "furthermore", "moreover", "consequently"
+   - No "it is important to note"
+   - No perfect parallel structures
+
+5. MAKE IT SLIGHTLY MESSY:
+   - Don't make every sentence grammatically perfect
+   - Let some ideas flow into each other naturally
+   - It's okay to repeat a word occasionally
+
+6. SOUND LIKE YOU'RE EXPLAINING TO A FRIEND:
+   - Less formal, more conversational
+   - Like you're talking, not writing an essay
+
+EXAMPLE OF GOOD HUMAN WRITING:
+"Climate change isn't just about polar bears anymore. It's become a security issue, and honestly? It's getting worse fast. When droughts hit, crops fail. People lose everything and have to move somewhere else. That puts pressure on other countries who weren't expecting millions of refugees showing up. And we're not doing nearly enough about it."
+
+NOW REWRITE THE TEXT. Output ONLY the rewritten text, nothing else.`;
+
+        logs.push('Sending to Groq with humanization prompt...');
         
-        // Step 2: Split sentences
-        let sentences = processed.match(/[^.!?]+[.!?]+/g) || [processed];
-        sentences = sentences.map(s => s.trim());
-        logs.push(`Sentences: ${sentences.length}`);
+        const response = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
+        let result = typeof response === 'string' ? response : (response.content || response);
+        result = result.trim().replace(/^["']|["']$/g, '');
         
-        // Step 3: Detect and fix AI patterns
-        const analysis = sentences.map((s, i) => ({
-            index: i,
-            original: s,
-            problems: detectProblems(s)
-        }));
+        logs.push(`Raw response (first 200 chars): ${result.substring(0, 200)}...`);
         
-        const problemCount = analysis.filter(a => a.problems.length > 0).length;
-        logs.push(`Sentences with AI patterns: ${problemCount}`);
+        // Post-processing: catch any remaining AI patterns
+        result = postProcess(result, logs);
         
-        const fixed = [];
-        for (const item of analysis) {
-            if (item.problems.length > 0) {
-                logs.push(`[${item.index + 1}] Problems: ${item.problems.join(', ')}`);
-                const result = await fixSentence(item.original, item.problems, GROQ_KEY, logs);
-                fixed.push(result);
-            } else {
-                fixed.push(item.original);
-            }
-        }
-        
-        // Step 4: Combine choppy sentences for better flow
-        logs.push('Checking sentence flow...');
-        const smoothed = await combineShortSentences(fixed, GROQ_KEY, logs);
-        
-        // Step 5: Fix repeated starters
-        const varied = fixRepeatedStarters(smoothed, logs);
-        
-        // Step 6: Final assembly
-        let finalText = varied.join(' ')
-            .replace(/\s{2,}/g, ' ')
-            .replace(/[;]/g, '.')
-            .replace(/\.\./g, '.')
-            .trim();
-        
-        logs.push(`Output: ${finalText.length} chars`);
+        logs.push(`Final output: ${result.length} chars`);
 
         return res.status(200).json({
             success: true,
-            result: finalText,
-            stats: {
-                inputSentences: sentences.length,
-                outputSentences: varied.length,
-                patternsFixed: problemCount,
-                sentencesCombined: sentences.length - varied.length
-            },
+            result: result,
             logs: logs
         });
 
@@ -399,6 +95,77 @@ export default async function handler(req, res) {
 }
 
 // ==========================================================================
+// POST-PROCESSING - Catch patterns the AI ignores
+// ==========================================================================
+
+function postProcess(text, logs) {
+    let result = text;
+    let changes = 0;
+    
+    // Remove semicolons
+    if (/;/.test(result)) {
+        result = result.replace(/;/g, '.');
+        changes++;
+        logs.push('Removed semicolons');
+    }
+    
+    // Remove em dashes
+    if (/[—–]/.test(result)) {
+        result = result.replace(/[—–]/g, ',');
+        changes++;
+        logs.push('Removed em dashes');
+    }
+    
+    // Fix "This strains/creates/causes" patterns
+    result = result.replace(/\bThis (strains|creates|causes|leads|results|forces|pushes|makes|turns)\b/gi, (m, verb) => {
+        changes++;
+        logs.push(`Fixed "This ${verb}"`);
+        return `That ${verb}`;
+    });
+    
+    // Fix formal transitions
+    const transitions = ['furthermore', 'moreover', 'consequently', 'thus', 'hence', 'therefore', 'additionally'];
+    for (const t of transitions) {
+        const regex = new RegExp(`\\b${t}\\b[,]?`, 'gi');
+        if (regex.test(result)) {
+            result = result.replace(regex, '');
+            changes++;
+            logs.push(`Removed "${t}"`);
+        }
+    }
+    
+    // Fix ", which" clauses - break into separate sentences
+    if (/,\s*which\s+/i.test(result)) {
+        result = result.replace(/,\s*which\s+(\w+)/gi, '. That $1');
+        changes++;
+        logs.push('Fixed ", which" clauses');
+    }
+    
+    // Fix "is not" → "isn't" etc
+    result = result.replace(/\bis not\b/gi, "isn't");
+    result = result.replace(/\bare not\b/gi, "aren't");
+    result = result.replace(/\bdoes not\b/gi, "doesn't");
+    result = result.replace(/\bdo not\b/gi, "don't");
+    result = result.replace(/\bcannot\b/gi, "can't");
+    result = result.replace(/\bwill not\b/gi, "won't");
+    result = result.replace(/\bIt is\b/g, "It's");
+    result = result.replace(/\bThat is\b/g, "That's");
+    
+    // Fix "not X, but Y" patterns
+    result = result.replace(/not (.+),\s*but rather\b/gi, '$1, though also');
+    result = result.replace(/\brather than\b/gi, 'instead of');
+    
+    // Clean up
+    result = result.replace(/\.\./g, '.');
+    result = result.replace(/\s{2,}/g, ' ');
+    result = result.trim();
+    
+    logs.push(`Post-processing made ${changes} changes`);
+    
+    return result;
+}
+
+// ==========================================================================
 // EXPORTS
 // ==========================================================================
-export { detectProblems as PostProcessor, BANNED_WORDS as AI_VOCAB_SWAPS, applyWordSwaps as killEmDashes };
+export { postProcess as PostProcessor };
