@@ -12,7 +12,7 @@ const BANNED_WORDS = {
     "furthermore": "also", "moreover": "also", "additionally": "also",
     "consequently": "so", "nevertheless": "but", "therefore": "so",
     "thus": "so", "hence": "so", "whereby": "where",
-    "equitable": "fair", "vulnerable": "at risk", "paramount": "important",
+    "equitable": "fair", "vulnerable": "exposed", "paramount": "important",
     "imperative": "necessary", "pivotal": "key", "crucial": "important",
     "essential": "needed", "fundamental": "basic", "significant": "major",
     "substantial": "large", "numerous": "many", "prudent": "wise",
@@ -23,8 +23,8 @@ const BANNED_WORDS = {
     "resilience": "strength", "spiraling": "getting worse",
     "ensuing": "following", "evident": "clear", "escalating": "growing",
     "merely": "just", "amplifies": "increases", "transforms": "turns",
-    "withstand": "survive", "comprises": "includes", "constitutes": "is",
-    "represents": "is", "undermines": "weakens"
+    "transforming": "turning", "withstand": "survive", "comprises": "includes", 
+    "constitutes": "is", "represents": "is", "undermines": "weakens"
 };
 
 function applyWordSwaps(text) {
@@ -44,6 +44,9 @@ function postProcess(text, logs) {
     
     // Fix missing spaces
     result = result.replace(/,([a-zA-Z])/g, ', $1');
+    
+    // Fix lowercase letter after period (like ". it's" → ". It's")
+    result = result.replace(/\.\s+([a-z])/g, (m, letter) => `. ${letter.toUpperCase()}`);
     
     // Remove semicolons - split into sentences
     if (/;/.test(result)) {
@@ -71,6 +74,18 @@ function postProcess(text, logs) {
         result = result.replace(/,\s*which\s+(\w+)/gi, '. It $1');
         logs.push('Fixed: ", which" → ". It"');
     }
+    
+    // Fix split "isn't/is not X. It's/It is Y" pattern
+    result = result.replace(/isn't (just |simply |merely |)?([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi,
+        (m, mod, x, y) => {
+            logs.push('Fixed: split isn\'t. It\'s pattern');
+            return `is ${y}, not ${mod || ''}${x}.`;
+        });
+    result = result.replace(/is not (just |simply |merely |)?([^\.]+)\.\s*[Ii]t is ([^\.]+)\./gi,
+        (m, mod, x, y) => {
+            logs.push('Fixed: split is not. It is pattern');
+            return `is ${y}, not ${mod || ''}${x}.`;
+        });
     
     // Fix any remaining "isn't just X, it's Y" patterns
     result = result.replace(/isn't (just|simply|merely) ([^,]+),\s*it's ([^\.]+)\./gi,
