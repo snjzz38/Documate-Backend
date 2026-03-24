@@ -59,6 +59,48 @@ function postProcess(text, logs) {
     // Fix sentence starting with lowercase (at beginning of text)
     result = result.replace(/^([a-z])/, (m, letter) => letter.toUpperCase());
     
+    // ===========================================
+    // AGGRESSIVE: Remove "it's not X, it's Y" patterns
+    // ===========================================
+    
+    // "it's not X, it's Y" → "it's Y"
+    result = result.replace(/[Ii]t's not [^,]+,\s*it's ([^\.]+)\./g, (m, y) => {
+        logs.push('Fixed: it\'s not X, it\'s Y');
+        return `It's ${y}.`;
+    });
+    
+    // "it's not about X, it's about Y" → "it's about Y"
+    result = result.replace(/[Ii]t's not about [^,]+,\s*it's about ([^\.]+)\./g, (m, y) => {
+        logs.push('Fixed: it\'s not about X');
+        return `It's about ${y}.`;
+    });
+    
+    // "isn't just X, it's Y" → "is Y"
+    result = result.replace(/isn't just [^,]+,\s*it's ([^\.]+)\./gi, (m, y) => {
+        logs.push('Fixed: isn\'t just X, it\'s Y');
+        return `is ${y}.`;
+    });
+    
+    // "doesn't just X, it Y" → "does X and Y"
+    result = result.replace(/doesn't just ([^,]+),\s*it ([^\.]+)\./gi, (m, x, y) => {
+        logs.push('Fixed: doesn\'t just X, it Y');
+        return `${x} and ${y}.`;
+    });
+    
+    // Split pattern: "X isn't Y. It's Z" → "X is Z"
+    result = result.replace(/([A-Z][^\.]+) isn't [^\.]+\.\s*It's ([^\.]+)\./g, (m, subj, z) => {
+        logs.push('Fixed: split isn\'t/It\'s pattern');
+        return `${subj} is ${z}.`;
+    });
+    
+    // "not just X, it's Y" mid-sentence
+    result = result.replace(/not just [^,]+,\s*it's ([^\.]+)/gi, (m, y) => {
+        logs.push('Fixed: not just mid-sentence');
+        return y;
+    });
+    
+    // ===========================================
+    
     // Remove semicolons - split into sentences
     if (/;/.test(result)) {
         result = result.replace(/;/g, '.');
@@ -132,32 +174,31 @@ export default async function handler(req, res) {
         logs.push('Applied banned word replacements');
         
         // Step 2: Send to Gemini for natural rewriting
-        const prompt = `Rewrite this text to sound like a human wrote it. Keep the academic tone but make it less polished.
+        const prompt = `Rewrite this text to sound like a human wrote it. Keep the academic tone.
 
 TEXT:
 "${processed}"
 
-CRITICAL - AVOID THESE AI PATTERNS:
-1. "isn't just X, it's Y" or "is not merely X, it is Y" - any variation
-2. "doesn't just X, it Y" or "does not simply X, it Y"  
-3. "The choice is not X, but Y"
-4. Split contrasts: "X is not Y. It is Z."
-5. Semicolons and em dashes
-6. ", which" clauses
-7. Starting with "To clarify," or "This is a critical issue"
-8. "The danger/threat lies in"
-9. Participle phrases like ", forcing X" or ", creating Y"
+ABSOLUTE RULES - NEVER USE THESE PATTERNS:
+1. NEVER use "it's not X, it's Y" or any variation (this is the #1 AI tell)
+2. NEVER use "isn't just X, it's Y" 
+3. NEVER use "doesn't just X, it Y"
+4. NEVER use "not about X, it's about Y"
+5. NEVER split into "X isn't Y. It's Z." across two sentences
+6. NEVER use semicolons or em dashes
+7. NEVER use ", which" clauses
+
+When you want to emphasize something, DON'T contrast it. Just state what it IS:
+- BAD: "It's not just environmental, it's about security"
+- GOOD: "This is fundamentally a security issue"
+- BAD: "It's not about X, it's about Y"  
+- GOOD: "The core issue is Y"
 
 WRITING STYLE:
-- Include some SHORT sentences (3-6 words). Like this one.
-- Mix in longer ones that flow naturally with multiple clauses connected by "and" or "but"
-- Don't make every sentence perfect - humans aren't always grammatically ideal
-- Start a sentence with "And" or "But" occasionally
+- Vary sentence lengths naturally
 - Use contractions: "it's", "don't", "we're", "that's"
-- Vary your sentence starters - don't begin multiple sentences the same way
-
-GOOD EXAMPLE:
-"Climate change is a security crisis. It goes beyond melting ice. When temperatures rise, conflicts over water and food get worse, and countries already struggling get pushed to their limits. The nations least responsible? They often face the worst consequences."
+- Connect ideas with "and", "but", "because"
+- Start occasional sentences with "And" or "But"
 
 Output ONLY the rewritten text, nothing else.`;
 
