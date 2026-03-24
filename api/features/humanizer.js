@@ -161,37 +161,37 @@ export default async function handler(req, res) {
         let processed = applyWordSwaps(text);
         logs.push('Applied banned word replacements');
         
-        // Step 2: Send to AI for natural rewriting
-        const prompt = `Rewrite this academic text to sound more natural while keeping its serious tone.
+        // Step 2: Send to AI for natural rewriting with BETTER prompt
+        const prompt = `Rewrite this text naturally. Keep the academic tone but make it flow better.
 
-TEXT TO REWRITE:
+TEXT:
 "${processed}"
 
-RULES:
-1. Keep the academic/serious tone - this is for an essay, not a blog
-2. Vary sentence lengths naturally - mix short (8-10 words), medium (12-18 words), and occasional longer ones
-3. Use contractions where natural: "it is" → "it's", "does not" → "doesn't"
-4. Connect some related short sentences with "and" or "but"
-5. Start 1-2 sentences with "And" or "But" for natural flow
-6. Avoid starting multiple sentences with "This" - vary your sentence openers
+IMPORTANT RULES:
 
-DO NOT:
-- Use semicolons or em dashes
-- Use ", which" clauses (break into separate sentences)
-- Use "This [verb]s" pattern (like "This creates", "This leads to")
-- Use transitions like "furthermore", "moreover", "consequently"
-- Make it too casual or informal
-- Add rhetorical questions
-- Use slang or colloquialisms
+1. COMBINE related short sentences using "and", "but", "because", "while", "since":
+   BAD: "Climate change is a crisis. It affects everyone. We need action."
+   GOOD: "Climate change is a crisis that affects everyone, and we need action."
+
+2. VARY sentence lengths - mix short, medium, and longer sentences naturally
+
+3. Use contractions: "it is" → "it's", "does not" → "doesn't", "they are" → "they're"
+
+4. NEVER USE these AI patterns:
+   - "isn't just X, it's Y" or any variation
+   - "doesn't just X, it Y"
+   - "The choice isn't X. It's Y."
+   - Starting sentences with "This" repeatedly
+   - Semicolons or em dashes
+   - ", which" clauses
+
+5. When you want to contrast two things, DON'T use "isn't just X, it's Y". Instead:
+   - "X matters, but Y matters more"
+   - "Beyond X, there's Y"
+   - "X is important. Y is even more so."
 
 GOOD EXAMPLE:
-"Climate change has become a security crisis. It's not just about rising seas or melting ice anymore. When temperatures rise, conflicts over water and food get worse. Countries already struggling are pushed to their limits. And the people who did the least to cause this problem? They're often hit the hardest."
-
-BAD EXAMPLE (too casual):
-"Climate change is a total disaster, right? Like, it's not just polar bears anymore. Countries are freaking out over water and stuff."
-
-BAD EXAMPLE (too AI-like):
-"Climate change constitutes a significant security paradigm. This necessitates comprehensive policy frameworks. Furthermore, vulnerable populations face disproportionate impacts, which exacerbates existing inequalities."
+"Climate change has become a security crisis that goes beyond melting ice. Rising temperatures make conflicts over water and food worse, and countries already struggling get pushed to their limits. The nations least responsible often face the worst consequences. When droughts destroy crops, people lose everything and have to move, which strains borders and weakens trust between countries."
 
 Output ONLY the rewritten text.`;
 
@@ -203,11 +203,17 @@ Output ONLY the rewritten text.`;
         
         logs.push(`Groq response (first 150 chars): ${result.substring(0, 150)}...`);
         
-        // Step 3: Post-process to catch remaining issues
+        // Step 3: Post-process to catch remaining AI patterns
         result = postProcess(result, logs);
         
-        // Step 4: Apply word swaps again (AI might reintroduce banned words)
+        // Step 4: Combine short sentences
+        result = combineShortSentences(result, logs);
+        
+        // Step 5: Apply word swaps again (AI might reintroduce banned words)
         result = applyWordSwaps(result);
+        
+        // Step 6: Final cleanup
+        result = result.replace(/\s{2,}/g, ' ').trim();
         
         logs.push(`Final: ${result.length} chars`);
 
@@ -221,6 +227,67 @@ Output ONLY the rewritten text.`;
         logs.push(`ERROR: ${error.message}`);
         return res.status(500).json({ success: false, error: error.message, logs: logs });
     }
+}
+
+// ==========================================================================
+// COMBINE SHORT SENTENCES
+// ==========================================================================
+
+function combineShortSentences(text, logs) {
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+    if (sentences.length < 2) return text;
+    
+    const result = [];
+    let i = 0;
+    
+    while (i < sentences.length) {
+        const current = sentences[i].trim();
+        const next = sentences[i + 1]?.trim();
+        
+        const currentWords = current.split(/\s+/).length;
+        const nextWords = next ? next.split(/\s+/).length : 999;
+        
+        // If both sentences are short (under 10 words), try to combine
+        if (currentWords < 10 && nextWords < 10 && next) {
+            // Check if they can be naturally combined
+            const combined = tryCombine(current, next);
+            if (combined) {
+                result.push(combined);
+                logs.push(`Combined: "${current.substring(0, 20)}..." + "${next.substring(0, 20)}..."`);
+                i += 2;
+                continue;
+            }
+        }
+        
+        result.push(current);
+        i++;
+    }
+    
+    return result.join(' ');
+}
+
+function tryCombine(s1, s2) {
+    // Remove periods for combining
+    const a = s1.replace(/[.!?]+$/, '').trim();
+    const b = s2.replace(/[.!?]+$/, '').trim();
+    const bLower = b.charAt(0).toLowerCase() + b.slice(1);
+    
+    // Pattern: "X is Y. It Z" → "X is Y, and it Z"
+    if (/^(It|They|This|That|These|Those)\s/i.test(b)) {
+        return `${a}, and ${bLower}.`;
+    }
+    
+    // Pattern: "X happens. Y happens" → "X happens, and Y happens"
+    if (!b.startsWith('But') && !b.startsWith('However') && !b.startsWith('And')) {
+        // Check if subjects are different enough
+        const aSubject = a.split(/\s+/)[0];
+        const bSubject = b.split(/\s+/)[0];
+        if (aSubject !== bSubject) {
+            return `${a}, and ${bLower}.`;
+        }
+    }
+    
+    return null; // Don't combine
 }
 
 // ==========================================================================
@@ -287,14 +354,26 @@ function postProcess(text, logs) {
     
     // "The choice/real threat isn't X. It's Y" → combine differently
     result = result.replace(/The (choice|threat|issue|problem|question|answer) isn't ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi, (m, noun, x, y) => {
-        logs.push(`Fixed: split isn't/it's pattern`);
+        logs.push(`Fixed: The ${noun} isn't. It's pattern`);
         return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
+    });
+    
+    // Generic "X isn't Y. It's Z" split pattern
+    result = result.replace(/([A-Z][^\.]+) isn't ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./g, (m, subj, x, y) => {
+        logs.push(`Fixed: generic isn't. It's pattern`);
+        return `${subj} is ${y.trim()}, not ${x.trim()}.`;
     });
     
     // "The choice isn't X, but Y" → simplify
     result = result.replace(/The (choice|issue|question|decision) isn't ([^,]+),\s*but ([^\.]+)\./gi, (m, noun, x, y) => {
         logs.push(`Fixed: isn't X, but Y pattern`);
         return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
+    });
+    
+    // "isn't between X. It's between Y" pattern
+    result = result.replace(/isn't between ([^\.]+)\.\s*[Ii]t's between ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: isn't between. It's between pattern`);
+        return `is between ${y.trim()}, not ${x.trim()}.`;
     });
     
     // "The real X isn't Y. it's Z" (with lowercase it's after period)
