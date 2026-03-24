@@ -58,6 +58,12 @@ const BANNED_WORDS = {
     "multifaceted": "complex",
     "myriad": "many",
     "plethora": "many",
+    "prudent": "wise",
+    "gravest": "worst",
+    "grave": "serious",
+    "accelerating": "speeding up",
+    "depletes": "drains",
+    "erodes": "weakens",
     
     // Fancy verbs
     "exacerbate": "worsen",
@@ -259,8 +265,14 @@ function postProcess(text, logs) {
     
     // "doesn't just X, it Y" → split  
     result = result.replace(/doesn't just ([^,]+),\s*it ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: doesn't just pattern`);
+        logs.push(`Fixed: doesn't just comma pattern`);
         return `does more than ${x.trim()}. It also ${y.trim()}.`;
+    });
+    
+    // "doesn't just X. it Y" (with period, lowercase it) → split
+    result = result.replace(/doesn't just ([^\.]+)\.\s*it ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: doesn't just period pattern`);
+        return `does more than ${x.trim()}. It ${y.trim()}.`;
     });
     
     // "don't just X, they're Y" → split
@@ -279,6 +291,12 @@ function postProcess(text, logs) {
         return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
     });
     
+    // "The choice isn't X, but Y" → simplify
+    result = result.replace(/The (choice|issue|question|decision) isn't ([^,]+),\s*but ([^\.]+)\./gi, (m, noun, x, y) => {
+        logs.push(`Fixed: isn't X, but Y pattern`);
+        return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
+    });
+    
     // "The real X isn't Y. it's Z" (with lowercase it's after period)
     result = result.replace(/The real ([a-z]+) isn't ([^\.]+)\.\s*it's ([^\.]+)\./gi, (m, noun, x, y) => {
         logs.push(`Fixed: The real X isn't. it's pattern`);
@@ -288,6 +306,9 @@ function postProcess(text, logs) {
     // Catch any remaining "just X, it's/they're" patterns
     result = result.replace(/n't just ([^,]+),\s*it's/gi, " goes beyond $1. It's");
     result = result.replace(/n't just ([^,]+),\s*they're/gi, " go beyond $1. They're");
+    
+    // Fix lowercase "it" after period
+    result = result.replace(/\.\s*it\s+/g, '. It ');
     
     // ===========================================
     // Fix "This [verb]s" patterns
