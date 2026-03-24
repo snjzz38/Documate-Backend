@@ -53,74 +53,98 @@ function postProcess(text, logs) {
     // Fix missing spaces
     result = result.replace(/,([a-zA-Z])/g, ', $1');
     
-    // Fix lowercase letter after period (handles ". it's" and ".it's")
-    result = result.replace(/\.(\s*)([a-z])/g, (m, space, letter) => `.${space || ' '}${letter.toUpperCase()}`);
-    
-    // Fix sentence starting with lowercase (at beginning of text)
-    result = result.replace(/^([a-z])/, (m, letter) => letter.toUpperCase());
-    
     // ===========================================
-    // AGGRESSIVE: Remove "it's not X, it's Y" patterns
+    // AGGRESSIVE: Remove ALL "isn't X, it's/it is Y" patterns
     // ===========================================
     
-    // "it's not X, it's Y" → "it's Y"
+    // "isn't simply/just/merely X, it's Y" or "isn't simply X, it is Y"
+    result = result.replace(/isn't (simply |just |merely |)?([^,\.]+),\s*(it's|it is) ([^\.]+)\./gi, (m, mod, x, pronoun, y) => {
+        logs.push('Fixed: isn\'t X, it\'s/is Y');
+        return `is ${y}.`;
+    });
+    
+    // "isn't simply X. It's Y" or "isn't simply X. it's Y" (split with period)
+    result = result.replace(/isn't (simply |just |merely |)?([^\.]+)\.\s*[Ii]t'?s ([^\.]+)\./gi, (m, mod, x, y) => {
+        logs.push('Fixed: isn\'t X. It\'s Y (split)');
+        return `is ${y}.`;
+    });
+    
+    // "it's not X, it's Y"
     result = result.replace(/[Ii]t's not [^,]+,\s*it's ([^\.]+)\./g, (m, y) => {
         logs.push('Fixed: it\'s not X, it\'s Y');
         return `It's ${y}.`;
     });
     
-    // "it's not about X, it's about Y" → "it's about Y"
+    // "it's not about X, it's about Y"
     result = result.replace(/[Ii]t's not about [^,]+,\s*it's about ([^\.]+)\./g, (m, y) => {
         logs.push('Fixed: it\'s not about X');
         return `It's about ${y}.`;
     });
     
-    // "isn't just X, it's Y" → "is Y"
-    result = result.replace(/isn't just [^,]+,\s*it's ([^\.]+)\./gi, (m, y) => {
-        logs.push('Fixed: isn\'t just X, it\'s Y');
-        return `is ${y}.`;
+    // "doesn't just X, it Y"
+    result = result.replace(/doesn't (simply |just |merely )?([^,]+),\s*(it's|it is|it) ([^\.]+)\./gi, (m, mod, x, pronoun, y) => {
+        logs.push('Fixed: doesn\'t X, it Y');
+        return `does ${x} and ${y}.`;
     });
     
-    // "doesn't just X, it Y" → "does X and Y"
-    result = result.replace(/doesn't just ([^,]+),\s*it ([^\.]+)\./gi, (m, x, y) => {
-        logs.push('Fixed: doesn\'t just X, it Y');
-        return `${x} and ${y}.`;
+    // "aren't just X, but Y"
+    result = result.replace(/aren't (simply |just |merely |)?([^,]+),\s*(but|they) ([^\.]+)\./gi, (m, mod, x, conj, y) => {
+        logs.push('Fixed: aren\'t X, but Y');
+        return `are ${y}.`;
     });
     
-    // Split pattern: "X isn't Y. It's Z" → "X is Z"
-    result = result.replace(/([A-Z][^\.]+) isn't [^\.]+\.\s*It's ([^\.]+)\./g, (m, subj, z) => {
+    // Split pattern: "X isn't Y. It's Z" or "X isn't Y. it's Z"
+    result = result.replace(/([^\.]+) isn't ([^\.]+)\.\s*[Ii]t'?s ([^\.]+)\./g, (m, subj, x, z) => {
         logs.push('Fixed: split isn\'t/It\'s pattern');
         return `${subj} is ${z}.`;
     });
     
     // "not just X, it's Y" mid-sentence
-    result = result.replace(/not just [^,]+,\s*it's ([^\.]+)/gi, (m, y) => {
+    result = result.replace(/not (simply |just |merely )?[^,]+,\s*(it's|it is) /gi, (m) => {
         logs.push('Fixed: not just mid-sentence');
-        return y;
+        return '';
+    });
+    
+    // "The choice/question isn't X, but Y"
+    result = result.replace(/The (basic |real |fundamental )?(choice|question|issue) (isn't|is not) ([^,]+),\s*but ([^\.]+)\./gi, (m, adj, noun, neg, x, y) => {
+        logs.push('Fixed: The choice isn\'t X but Y');
+        return `The ${adj || ''}${noun} is ${y}.`;
     });
     
     // ===========================================
+    // Fix grammar errors
+    // ===========================================
+    result = result.replace(/\ba ([aeiou])/gi, 'an $1'); // "a important" → "an important"
     
-    // Remove semicolons - split into sentences
+    // ===========================================
+    // Fix lowercase after period
+    // ===========================================
+    result = result.replace(/\.(\s*)([a-z])/g, (m, space, letter) => `.${space || ' '}${letter.toUpperCase()}`);
+    
+    // Fix sentence starting with lowercase
+    result = result.replace(/^([a-z])/, (m, letter) => letter.toUpperCase());
+    
+    // ===========================================
+    // Remove filler phrases
+    // ===========================================
+    result = result.replace(/To be clear,\s*/gi, '');
+    result = result.replace(/This is an? important point because\s*/gi, '');
+    
+    // ===========================================
+    // Other fixes
+    // ===========================================
+    
+    // Remove semicolons
     if (/;/.test(result)) {
         result = result.replace(/;/g, '.');
         logs.push('Fixed: semicolons → periods');
     }
     
-    // Remove em dashes - replace with comma
+    // Remove em dashes
     if (/[—–]/.test(result)) {
         result = result.replace(/\s*[—–]\s*/g, ', ');
         logs.push('Fixed: em dashes → commas');
     }
-    
-    // Fix participle phrases: ", establishing X" → ". This establishes X"
-    result = result.replace(/,\s*(establishing|extending|addressing|creating|forcing|pushing|turning|making|causing|driving|putting)\s+/gi, 
-        (m, verb) => {
-            logs.push(`Fixed: participle "${verb}"`);
-            const base = verb.toLowerCase().replace(/ing$/, '');
-            const conjugated = base + (base.endsWith('e') ? 's' : 'es');
-            return `. This ${conjugated} `;
-        });
     
     // Fix ", which" clauses
     if (/,\s*which\s+/i.test(result)) {
@@ -180,25 +204,26 @@ TEXT:
 "${processed}"
 
 ABSOLUTE RULES - NEVER USE THESE PATTERNS:
-1. NEVER use "it's not X, it's Y" or any variation (this is the #1 AI tell)
-2. NEVER use "isn't just X, it's Y" 
-3. NEVER use "doesn't just X, it Y"
-4. NEVER use "not about X, it's about Y"
-5. NEVER split into "X isn't Y. It's Z." across two sentences
-6. NEVER use semicolons or em dashes
-7. NEVER use ", which" clauses
+1. NEVER "it's not X, it's Y" or "isn't X, it's Y" - ANY variation of this
+2. NEVER "isn't simply/just/merely X, it is Y"
+3. NEVER "doesn't just X, it Y"
+4. NEVER "not about X, it's about Y"
+5. NEVER split contrasts across sentences: "X isn't Y. It's Z."
+6. NEVER "The choice isn't X, but Y"
+7. NEVER semicolons or em dashes
+8. NEVER ", which" clauses
+9. NEVER "To be clear," or "This is an important point"
 
-When you want to emphasize something, DON'T contrast it. Just state what it IS:
-- BAD: "It's not just environmental, it's about security"
-- GOOD: "This is fundamentally a security issue"
-- BAD: "It's not about X, it's about Y"  
-- GOOD: "The core issue is Y"
+When emphasizing something, state what it IS directly:
+- BAD: "isn't simply wise, it is necessary"
+- GOOD: "is necessary" or "is essential"
 
-WRITING STYLE:
-- Vary sentence lengths naturally
-- Use contractions: "it's", "don't", "we're", "that's"
-- Connect ideas with "and", "but", "because"
-- Start occasional sentences with "And" or "But"
+WRITING REQUIREMENTS:
+- Vary vocabulary - don't repeat the same words
+- Vary sentence structure - mix simple, compound, and complex sentences
+- Use different sentence starters - don't begin multiple sentences the same way
+- Use contractions naturally: "it's", "don't", "we're"
+- Connect ideas with "and", "but", "because", "while", "since"
 
 Output ONLY the rewritten text, nothing else.`;
 
