@@ -105,23 +105,43 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
 
 const buildEssayHTML = text => {
     if (!text) return '<i>No output.</i>';
-    // Check if text already contains HTML tags (e.g. <sup> from citations)
+
+    // Check if it's primarily code
+    const hasCodeBlocks = /```[\w]*\n[\s\S]*?```/.test(text);
     const hasHtml = /<[a-z][\s\S]*>/i.test(text);
+
+    if (hasCodeBlocks) {
+        // Render markdown with code blocks
+        return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
+            text.split(/\n\n+/).map(p => {
+                if (p.startsWith('```')) {
+                    // Code block — preserve as preformatted
+                    const match = p.match(/```(\w*)\n([\s\S]*?)```/);
+                    if (match) {
+                        const lang = match[1] || 'text';
+                        const code = match[2].replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                        return `<div style="margin:12px 0;"><div style="background:#f5f5f5;padding:4px 8px;font-size:10px;font-family:monospace;border-top:1px solid #ddd;border-left:1px solid #ddd;border-right:1px solid #ddd;">${lang}</div><pre style="margin:0;padding:12px;background:#1e1e1e;color:#d4d4d4;font-family:monospace;font-size:11px;overflow-x:auto;border:1px solid #ddd;"><code>${code}</code></pre></div>`;
+                    }
+                }
+                return `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>`;
+            }).join('\n') +
+            `</div>`;
+    }
+
     if (hasHtml) {
-        // Already has HTML — just wrap in paragraphs without escaping
         return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
             text.split(/\n\n+/).map(p =>
                 `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/\n/g, '<br>')}</p>`
             ).join('\n') +
             `</div>`;
     }
-    // Plain text — safe to escape
+
     return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
         text.split(/\n\n+/).map(p =>
             `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>`
         ).join('\n') +
         `</div>`;
-};
+};;
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -134,17 +154,34 @@ export default async function handler(req, res) {
         const GEMINI = process.env.GEMINI_API_KEY;
 
         if (action === 'plan') {
+            const taskLower = (task || '').toLowerCase();
+            
+            // Detect task type
+            const isWriting = /essay|argue|argument|thesis|discuss|paragraph|write about|explain|analyze|analyse|compare|contrast|evaluate|assess|review|critique|response|reflection|opinion|position/i.test(task);
+            const isCoding = /code|program|function|script|implement|debug|fix|class|algorithm|html|css|javascript|python|java|sql|api|component/i.test(task);
+            const isQuestions = /\?\s*(\n|$)|\ba\)|b\)|c\)|\d+\.\s/i.test(task);
+        
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
             if (options.enableWrite !== false) {
-                steps.push({ tool: 'WRITE', action: 'Write essay' });
-                steps.push({ tool: 'REFINE', action: 'Strengthen argument' });
+                steps.push({ tool: 'WRITE', action: 'Write response' });
+                // Only refine for genuine writing tasks
+                if (isWriting && !isCoding && !isQuestions) {
+                    steps.push({ tool: 'REFINE', action: 'Strengthen argument' });
+                }
             }
             if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
             if (options.enableCite) steps.push({ tool: 'CITE', action: `Add ${options.citationType || 'in-text'} citations` });
             if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Insert quotes with transitions' });
-            steps.push({ tool: 'PROOFREAD', action: 'Polish and improve' });
+            // Only proofread writing tasks
+            if (isWriting && !isCoding) {
+                steps.push({ tool: 'PROOFREAD', action: 'Fix grammar errors' });
+            }
             if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Grade work' });
-            return res.status(200).json({ success: true, plan: { steps } });
+        
+            return res.status(200).json({ 
+                success: true, 
+                plan: { steps, taskType: isCoding ? 'code' : isQuestions ? 'questions' : isWriting ? 'writing' : 'general' } 
+            });
         }
 
         if (action === 'execute_step') {
@@ -179,8 +216,8 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                 case 'WRITE': {
-                    const { researchSources = [], task: userTask, uploadedFile, uploadedFiles = [] } = context;
+                case 'WRITE': {
+                    const { researchSources = [], task: userTask, uploadedFile, uploadedFiles = [], taskType } = context;
                 
                     const sourceInfo = researchSources.slice(0, 10).map((s, i) =>
                         `SOURCE ${i+1}:\nTitle: "${s.title}"\nKey info: ${s.text?.substring(0, 500) || 'N/A'}`
@@ -202,49 +239,51 @@ export default async function handler(req, res) {
                     const fileContext = otherFiles.length > 0
                         ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n` : '';
                 
-                    // Detect task type to avoid forcing essay format on everything
-                    const taskLower = userTask.toLowerCase();
-                    const isQuestions = /\?\s*$|\?\s*\n|questions?|answer|respond to|a\)|b\)|1\.|2\./i.test(userTask);
-                    const isList = /list|bullet|enumerate|summarize|outline/i.test(taskLower);
-                    const isEssay = /essay|argue|argument|thesis|discuss at length|write about/i.test(taskLower);
+                    // Detect task type
+                    const detectedType = taskType ||
+                        (/code|program|function|script|implement|debug|fix|class|algorithm|html|css|javascript|python|java|sql/i.test(userTask) ? 'code' :
+                        /\?\s*(\n|$)|\ba\)|b\)|c\)|\d+\.\s/i.test(userTask) ? 'questions' :
+                        /essay|argue|argument|thesis|discuss at length|write about/i.test(userTask) ? 'writing' : 'general');
                 
                     let formatInstructions = '';
-                    if (isQuestions) {
+                    if (detectedType === 'code') {
+                        formatInstructions = `FORMAT RULES:
+                - Return working, complete code
+                - Use proper code blocks with language specified: \`\`\`python, \`\`\`javascript etc.
+                - Add brief comments explaining key sections
+                - If multiple files are needed, clearly separate them with headers
+                - Include a brief explanation before and/or after the code if helpful`;
+                    } else if (detectedType === 'questions') {
                         formatInstructions = `FORMAT RULES:
                 - Answer each question directly and completely
-                - Keep the same question structure/numbering as given
+                - Keep the same question structure and numbering as given
                 - Answer each part (a, b, c etc.) separately and clearly labeled
-                - Do not turn this into an essay — answer each question as its own response
+                - Do not turn this into an essay
                 - Be thorough but concise for each answer
-                - Plain text only - no markdown, no bold, no headers beyond the question labels`;
-                    } else if (isList) {
-                        formatInstructions = `FORMAT RULES:
-                - Use clear, organized structure appropriate to the task
-                - Plain text only - no markdown
-                - Be concise and direct`;
-                    } else if (isEssay) {
-                        formatInstructions = `FORMAT RULES — ESSAY:
+                - Plain text only`;
+                    } else if (detectedType === 'writing') {
+                        formatInstructions = `FORMAT RULES — ACADEMIC ESSAY:
                 THESIS:
                 - Must take a STRONG position (not neutral)
                 - Must include 2-3 clear reasons
                 
                 STRUCTURE:
                 - Introduction: context + clear argumentative thesis as the last sentence
-                - Body Paragraphs: each paragraph = ONE main argument with topic sentence, evidence, and explanation of WHY it matters
+                - Body Paragraphs: each = ONE main argument with topic sentence, evidence, and explanation of WHY it matters
                 - Conclusion: reinforce the argument, do not just summarize
                 
                 STYLE:
-                - Be concise and direct — avoid filler phrases
+                - Concise and direct — avoid filler phrases
                 - Avoid vague phrases like "this highlights" without explanation
-                - Formal academic tone throughout`;
+                - Formal academic tone
+                - Define ALL acronyms on first use`;
                     } else {
                         formatInstructions = `FORMAT RULES:
                 - Follow the format most appropriate for this specific task
                 - If it asks questions, answer them directly
                 - If it asks for analysis, provide structured analysis
-                - If it asks for creative work, be creative
                 - Do not default to essay format unless explicitly asked
-                - Plain text only - no markdown`;
+                - Plain text only unless code is required`;
                     }
                 
                     const prompt = `Complete the following task accurately and appropriately.
@@ -259,7 +298,7 @@ export default async function handler(req, res) {
                 IMPORTANT:
                 - Do NOT include any citations, author names, or source references of ANY kind
                 - Do NOT include a bibliography
-                - Plain text only - no markdown, no bold, no headers unless the task requires them
+                ${detectedType !== 'code' ? '- Plain text only - no markdown, no bold, no headers unless the task requires them' : ''}
                 ${imageFiles.length > 0 ? '- Carefully analyze and describe the uploaded image(s) as part of the response.' : ''}
                 
                 Complete the task now:`;
@@ -267,7 +306,7 @@ export default async function handler(req, res) {
                     const rawText = imageFiles.length > 0
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
-                    const plainText = stripMarkdown(stripRefs(rawText));
+                    const plainText = detectedType === 'code' ? rawText : stripMarkdown(stripRefs(rawText));
                     result.output = plainText;
                     result.outputHtml = buildEssayHTML(plainText);
                     result.type = 'text';
@@ -559,9 +598,24 @@ Return the essay with quotes inserted:`;
                 case 'PROOFREAD': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
-
-                    const prompt = `Proofread and polish this academic essay. Fix grammar, spelling, punctuation. Improve awkward phrasing. Keep ALL existing content, citations, and quotes. Plain text only - no markdown.\n\nESSAY:\n${input}\n\nReturn the polished essay:`;
-                    const polished = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+                
+                    const proofPrompt = `Fix ONLY grammatical errors, typos, and spelling mistakes in this text.
+                
+                STRICT RULES:
+                - Do NOT rewrite any sentences
+                - Do NOT change word choice or phrasing
+                - Do NOT improve style or tone
+                - Do NOT restructure paragraphs
+                - Only fix: spelling errors, grammatical mistakes, punctuation errors
+                - Keep ALL citations, superscripts, footnote numbers exactly as they are
+                - Plain text only - no markdown
+                
+                TEXT:
+                ${input}
+                
+                Return the text with ONLY spelling/grammar/punctuation corrections:`;
+                
+                    const polished = stripMarkdown(stripRefs(await GeminiAPI.chat(proofPrompt, GEMINI)));
                     result.output = polished;
                     result.outputHtml = buildEssayHTML(polished);
                     result.type = 'text';
