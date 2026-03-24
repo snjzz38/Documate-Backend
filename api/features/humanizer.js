@@ -11,35 +11,65 @@ function getRandomTemperature() {
 }
 
 // ==========================================================================
-// BANNED WORDS
+// BANNED WORDS - Using stems to catch all conjugations
 // ==========================================================================
 
+const BANNED_STEMS = {
+    "utiliz": "use",           // utilize, utilizing, utilizes, utilization
+    "leverag": "use",          // leverage, leveraging, leverages
+    "facilitat": "help",       // facilitate, facilitating, facilitates
+    "optimiz": "improve",      // optimize, optimizing, optimizes
+    "comprehensiv": "complete", // comprehensive, comprehensively
+    "methodolog": "method",    // methodology, methodological
+    "fundament": "basic",      // fundamental, fundamentally, fundamentals
+    "necessitat": "require",   // necessitate, necessitates, necessitating
+    "intensif": "worsen",      // intensify, intensifies, intensified, intensifying
+    "exacerbat": "worsen",     // exacerbate, exacerbates, exacerbating
+    "mitigat": "reduce",       // mitigate, mitigates, mitigating
+    "escalat": "grow",         // escalate, escalates, escalating, escalation
+    "amplif": "increase",      // amplify, amplifies, amplifying
+    "transform": "change",     // transform, transforms, transforming
+    "burgeon": "grow",         // burgeoning, burgeons
+    "robust": "strong",        // robust, robustly
+    "viab": "workable",        // viable, viability
+    "pre-exist": "existing",   // pre-existing
+    "preexist": "existing",    // preexisting
+    "systemic": "system-wide", // systemic
+    "arable": "farmable",      // arable
+};
+
 const BANNED_WORDS = {
-    "utilize": "use", "leverage": "use", "facilitate": "help",
-    "optimize": "improve", "comprehensive": "complete", "methodology": "method",
     "furthermore": "also", "moreover": "also", "additionally": "also",
     "consequently": "so", "nevertheless": "but", "therefore": "so",
     "thus": "so", "hence": "so", "whereby": "where",
     "equitable": "fair", "vulnerable": "exposed", "paramount": "important",
     "imperative": "necessary", "pivotal": "key", "crucial": "important",
-    "essential": "needed", "fundamental": "basic", "significant": "major",
+    "essential": "needed", "significant": "major",
     "substantial": "large", "numerous": "many", "prudent": "wise",
-    "exacerbate": "worsen", "exacerbates": "worsens", "mitigate": "reduce",
     "commenced": "started", "concluded": "ended", "engenders": "creates",
     "gravest": "worst", "accelerating": "speeding up", "depletes": "drains",
-    "erodes": "weakens", "intensify": "increase", "intensifies": "increases",
-    "resilience": "strength", "spiraling": "getting worse",
-    "ensuing": "following", "evident": "clear", "escalating": "growing",
-    "merely": "just", "amplifies": "increases", "transforms": "turns",
-    "transforming": "turning", "withstand": "survive", "comprises": "includes", 
-    "constitutes": "is", "represents": "is", "undermines": "weakens"
+    "erodes": "weakens", "resilience": "strength", "spiraling": "getting worse",
+    "ensuing": "following", "evident": "clear", "merely": "just",
+    "withstand": "survive", "comprises": "includes", "constitutes": "is",
+    "represents": "is", "undermines": "weakens", "readily": "easily",
+    "considerable": "major", "apparent": "clear", "prolonged": "long"
 };
 
 function applyWordSwaps(text) {
     let result = text;
+    
+    // First apply stem-based replacements (catches conjugations)
+    for (const [stem, replacement] of Object.entries(BANNED_STEMS)) {
+        // Match the stem + any ending (ing, ed, es, ly, tion, etc.)
+        const regex = new RegExp(`\\b${stem}\\w*\\b`, 'gi');
+        result = result.replace(regex, replacement);
+    }
+    
+    // Then apply exact word replacements
     for (const [bad, good] of Object.entries(BANNED_WORDS)) {
         result = result.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
     }
+    
     return result;
 }
 
@@ -55,11 +85,18 @@ function postProcess(text, logs) {
     
     // ===========================================
     // AGGRESSIVE: Remove ALL "isn't X, it's/it is Y" patterns
+    // Handles all spacing variations
     // ===========================================
     
-    // "isn't simply/just/merely X, it's Y" or "isn't simply X, it is Y"
+    // "isn't simply/just/merely X, it's Y" or "isn't simply X, it is Y" (with or without space after comma)
     result = result.replace(/isn't (simply |just |merely |)?([^,\.]+),\s*(it's|it is) ([^\.]+)\./gi, (m, mod, x, pronoun, y) => {
         logs.push('Fixed: isn\'t X, it\'s/is Y');
+        return `is ${y}.`;
+    });
+    
+    // Same pattern but NO space after comma: "isn't just wise,it's"
+    result = result.replace(/isn't (simply |just |merely |)?([^,\.]+),(it's|it is) ([^\.]+)\./gi, (m, mod, x, pronoun, y) => {
+        logs.push('Fixed: isn\'t X,it\'s Y (no space)');
         return `is ${y}.`;
     });
     
@@ -69,19 +106,19 @@ function postProcess(text, logs) {
         return `is ${y}.`;
     });
     
-    // "it's not X, it's Y"
-    result = result.replace(/[Ii]t's not [^,]+,\s*it's ([^\.]+)\./g, (m, y) => {
+    // "it's not X, it's Y" - any spacing
+    result = result.replace(/[Ii]t's not [^,]+,\s*(it's|it is) ([^\.]+)\./g, (m, pronoun, y) => {
         logs.push('Fixed: it\'s not X, it\'s Y');
         return `It's ${y}.`;
     });
     
     // "it's not about X, it's about Y"
-    result = result.replace(/[Ii]t's not about [^,]+,\s*it's about ([^\.]+)\./g, (m, y) => {
+    result = result.replace(/[Ii]t's not about [^,]+,\s*(it's|it is) about ([^\.]+)\./g, (m, pronoun, y) => {
         logs.push('Fixed: it\'s not about X');
         return `It's about ${y}.`;
     });
     
-    // "doesn't just X, it Y"
+    // "doesn't just X, it Y" - any spacing
     result = result.replace(/doesn't (simply |just |merely )?([^,]+),\s*(it's|it is|it) ([^\.]+)\./gi, (m, mod, x, pronoun, y) => {
         logs.push('Fixed: doesn\'t X, it Y');
         return `does ${x} and ${y}.`;
@@ -99,16 +136,22 @@ function postProcess(text, logs) {
         return `${subj} is ${z}.`;
     });
     
-    // "not just X, it's Y" mid-sentence
+    // "not just X, it's Y" mid-sentence - any spacing
     result = result.replace(/not (simply |just |merely )?[^,]+,\s*(it's|it is) /gi, (m) => {
         logs.push('Fixed: not just mid-sentence');
         return '';
     });
     
     // "The choice/question isn't X, but Y"
-    result = result.replace(/The (basic |real |fundamental )?(choice|question|issue) (isn't|is not) ([^,]+),\s*but ([^\.]+)\./gi, (m, adj, noun, neg, x, y) => {
+    result = result.replace(/The (basic |real |fundamental )?(choice|question|issue|decision) (isn't|is not) ([^,]+),\s*but ([^\.]+)\./gi, (m, adj, noun, neg, x, y) => {
         logs.push('Fixed: The choice isn\'t X but Y');
         return `The ${adj || ''}${noun} is ${y}.`;
+    });
+    
+    // "We face a decision not between X, but between Y"
+    result = result.replace(/([Ww]e face a )(decision|choice) not between ([^,]+),\s*but between ([^\.]+)\./gi, (m, prefix, noun, x, y) => {
+        logs.push('Fixed: decision not between X but Y');
+        return `${prefix}${noun} between ${y}.`;
     });
     
     // ===========================================
