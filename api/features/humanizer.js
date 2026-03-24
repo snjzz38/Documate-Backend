@@ -1,140 +1,158 @@
 // api/features/humanizer.js
-// Strategy: Academic but natural tone - subtle humanization, not casual garbage
+// NEW APPROACH: Score sentences, only fix problematic ones, verify fixes
 import { GroqAPI } from '../utils/groqAPI.js';
 
 // ==========================================================================
-// BANNED WORDS - Replace with simpler alternatives
+// BANNED WORDS
 // ==========================================================================
 
 const BANNED_WORDS = {
-    // Formal academic words
-    "utilize": "use",
-    "leverage": "use", 
-    "facilitate": "help",
-    "optimize": "improve",
-    "enhance": "improve",
-    "comprehensive": "complete",
-    "methodology": "method",
-    "paradigm": "model",
-    "Subsequently": "Then",
-    "subsequently": "then",
-    "Consequently": "So",
-    "consequently": "so",
-    "Furthermore": "Also",
-    "furthermore": "also",
-    "Moreover": "Also",
-    "moreover": "also",
-    "Additionally": "Also",
-    "additionally": "also",
-    "Nevertheless": "But",
-    "nevertheless": "but",
-    "Nonetheless": "Still",
-    "nonetheless": "still",
-    "Therefore": "So",
-    "therefore": "so",
-    "Thus": "So",
-    "thus": "so",
-    "Hence": "So",
-    "hence": "so",
-    "Whereby": "where",
-    "whereby": "where",
-    "Thereof": "of it",
-    "thereof": "of it",
-    "Thereby": "by this",
-    "thereby": "by this",
-    
-    // Fancy adjectives
-    "equitable": "fair",
-    "vulnerable": "at risk",
-    "paramount": "important",
-    "imperative": "necessary",
-    "pivotal": "key",
-    "crucial": "important",
-    "essential": "needed",
-    "fundamental": "basic",
-    "significant": "major",
-    "substantial": "large",
-    "numerous": "many",
-    "multifaceted": "complex",
-    "myriad": "many",
-    "plethora": "many",
-    "prudent": "wise",
-    "gravest": "worst",
-    "grave": "serious",
-    "accelerating": "speeding up",
-    "depletes": "drains",
-    "erodes": "weakens",
-    
-    // Fancy verbs
-    "exacerbate": "worsen",
-    "exacerbates": "worsens",
-    "mitigate": "reduce",
-    "mitigates": "reduces",
-    "commenced": "started",
-    "concluded": "ended",
-    "endeavor": "try",
-    "ascertain": "find out",
-    "procure": "get",
-    "disseminate": "spread",
-    "elucidate": "explain",
-    "exemplify": "show",
-    "constitute": "make up",
-    "necessitate": "require",
-    "perpetuate": "continue",
-    "exacerbating": "worsening",
-    "intensifying": "growing",
-    "amplifies": "increases",
-    "amplifying": "increasing",
-    "diminishes": "reduces",
-    "precipitates": "causes",
-    "engenders": "creates",
-    
-    // Wordy phrases
-    "prior to": "before",
-    "in order to": "to",
-    "due to the fact that": "because",
-    "for the purpose of": "to",
-    "in the event that": "if",
-    "at this point in time": "now",
-    "in light of": "because of",
-    "with regard to": "about",
-    "in terms of": "for",
-    "on the other hand": "but",
-    "as a result": "so",
-    "in addition": "also",
-    "in conclusion": "finally",
-    "it is important to note that": "",
-    "it should be noted that": "",
-    "needless to say": "",
-    "it goes without saying": "",
-    
-    // AI-specific tells
-    "delve": "explore",
-    "delves": "explores",
-    "realm": "area",
-    "landscape": "situation",
-    "robust": "strong",
-    "leverage": "use",
-    "synergy": "cooperation",
-    "holistic": "complete",
-    "proactive": "active",
-    "streamline": "simplify",
-    "incentivize": "encourage"
+    "utilize": "use", "leverage": "use", "facilitate": "help",
+    "optimize": "improve", "comprehensive": "complete", "methodology": "method",
+    "furthermore": "also", "moreover": "also", "additionally": "also",
+    "consequently": "so", "nevertheless": "but", "therefore": "so",
+    "thus": "so", "hence": "so", "whereby": "where",
+    "equitable": "fair", "vulnerable": "at risk", "paramount": "important",
+    "imperative": "necessary", "pivotal": "key", "crucial": "important",
+    "essential": "needed", "fundamental": "basic", "significant": "major",
+    "substantial": "large", "numerous": "many", "prudent": "wise",
+    "exacerbate": "worsen", "exacerbates": "worsens", "mitigate": "reduce",
+    "commenced": "started", "concluded": "ended", "engenders": "creates",
+    "gravest": "worst", "accelerating": "speeding up", "depletes": "drains",
+    "erodes": "weakens", "intensify": "increase", "intensifies": "increases",
+    "resilience": "strength", "spiraling": "getting worse"
 };
 
 function applyWordSwaps(text) {
     let result = text;
     for (const [bad, good] of Object.entries(BANNED_WORDS)) {
-        const regex = new RegExp(`\\b${bad}\\b`, 'gi');
-        result = result.replace(regex, (match) => {
-            // Preserve capitalization
-            if (match[0] === match[0].toUpperCase()) {
-                return good.charAt(0).toUpperCase() + good.slice(1);
-            }
-            return good;
-        });
+        result = result.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
     }
     return result;
+}
+
+// ==========================================================================
+// PATTERN DETECTION WITH SCORING
+// ==========================================================================
+
+const AI_PATTERNS = [
+    { regex: /n't just [^,]+,\s*(it's|they're|it |they )/i, name: "isnt_just_its", score: 10 },
+    { regex: /n't just [^\.]+\.\s*(it's|it )/i, name: "isnt_just_period", score: 10 },
+    { regex: /n't (between|about|choosing) [^,]+,?\s*(but |it's)/i, name: "isnt_but", score: 10 },
+    { regex: /n't [^\.]+\.\s*[Ii]t's /i, name: "split_isnt_its", score: 9 },
+    { regex: /,\s*(forcing|creating|causing|pushing|turning|making)\s+/i, name: "participle", score: 7 },
+    { regex: /[;]/i, name: "semicolon", score: 5 },
+    { regex: /[—–]/i, name: "em_dash", score: 5 },
+    { regex: /,\s*which\s+/i, name: "which_clause", score: 6 },
+    { regex: /^This (strains|creates|causes|leads|forces)/i, name: "this_verbs", score: 4 },
+    { regex: /the (real|true|main|core) (threat|danger|issue|problem)/i, name: "the_real", score: 5 },
+];
+
+function scoreSentence(sentence) {
+    let totalScore = 0;
+    const matches = [];
+    
+    for (const pattern of AI_PATTERNS) {
+        if (pattern.regex.test(sentence)) {
+            totalScore += pattern.score;
+            matches.push(pattern.name);
+        }
+    }
+    
+    return { score: totalScore, matches };
+}
+
+// ==========================================================================
+// TARGETED SENTENCE FIXER
+// ==========================================================================
+
+async function fixSentence(sentence, matches, apiKey, logs, attempt = 1) {
+    if (attempt > 2) {
+        logs.push(`  Gave up after 2 attempts, using fallback`);
+        return fallbackFix(sentence, matches);
+    }
+    
+    const prompt = `Rewrite this sentence to remove AI patterns. Keep the meaning.
+
+SENTENCE: "${sentence}"
+
+PROBLEMS DETECTED: ${matches.join(', ')}
+
+RULES:
+- If it has "isn't just X, it's Y": Split into two simple sentences or rephrase completely
+- If it has "doesn't just X, it Y": Say "does more than X" or rephrase
+- If it has participle (", forcing X"): Make it a separate sentence
+- NO semicolons, NO em dashes, NO ", which"
+- Use contractions naturally
+- Keep it academic but natural
+
+BAD: "Climate change isn't just environmental, it's a security crisis."
+GOOD: "Climate change is a security crisis, not just an environmental one."
+
+BAD: "Delaying action doesn't just warm the planet, it risks instability."  
+GOOD: "Delaying action warms the planet and risks instability."
+
+Output ONLY the fixed sentence(s), nothing else.`;
+
+    try {
+        const response = await GroqAPI.chat([{ role: "user", content: prompt }], apiKey, false);
+        let fixed = typeof response === 'string' ? response : (response.content || response);
+        fixed = fixed.trim().replace(/^["']|["']$/g, '');
+        
+        // Verify the fix doesn't have the same patterns
+        const newScore = scoreSentence(fixed);
+        if (newScore.score >= 8) {
+            logs.push(`  Attempt ${attempt} still has patterns (score ${newScore.score}), retrying...`);
+            return fixSentence(sentence, matches, apiKey, logs, attempt + 1);
+        }
+        
+        logs.push(`  Fixed (score ${newScore.score}): "${fixed.substring(0, 50)}..."`);
+        return fixed;
+        
+    } catch (e) {
+        logs.push(`  Error: ${e.message}, using fallback`);
+        return fallbackFix(sentence, matches);
+    }
+}
+
+// ==========================================================================
+// FALLBACK REGEX FIXES (when AI fails)
+// ==========================================================================
+
+function fallbackFix(sentence, matches) {
+    let result = sentence;
+    
+    // Fix missing spaces
+    result = result.replace(/,([a-zA-Z])/g, ', $1');
+    
+    // Fix "n't just X, it's/they're Y" → split
+    result = result.replace(/(.+)n't just ([^,]+),\s*(it's|they're) ([^\.]+)\./gi, 
+        (m, subj, x, pronoun, y) => `${subj} does more than ${x}. ${pronoun === "it's" ? "It" : "They"} also ${y}.`);
+    
+    // Fix "n't just X. it's Y" (with period)
+    result = result.replace(/(.+)n't just ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi,
+        (m, subj, x, y) => `${subj} does more than ${x}. It ${y}.`);
+    
+    // Fix "isn't X, but Y" / "isn't X but Y"
+    result = result.replace(/(.+) isn't ([^,]+),?\s*but ([^\.]+)\./gi,
+        (m, subj, x, y) => `${subj} is ${y}, not ${x}.`);
+    
+    // Fix participles
+    result = result.replace(/,\s*(forcing|creating|causing|pushing|turning|making)\s+([^,\.]+)([,\.])/gi,
+        (m, verb, rest, punct) => `. This ${verb.replace(/ing$/, 'es')} ${rest}${punct}`);
+    
+    // Fix semicolons and em dashes
+    result = result.replace(/;/g, '.');
+    result = result.replace(/[—–]/g, ',');
+    
+    // Fix ", which"
+    result = result.replace(/,\s*which\s+(\w+)/gi, '. It $1');
+    
+    // Clean up
+    result = result.replace(/\.\./g, '.');
+    result = result.replace(/\s{2,}/g, ' ');
+    
+    return result.trim();
 }
 
 // ==========================================================================
@@ -157,69 +175,56 @@ export default async function handler(req, res) {
         
         logs.push(`Input: ${text.length} chars`);
         
-        // Step 1: Apply word swaps first
+        // Step 1: Apply word swaps
         let processed = applyWordSwaps(text);
-        logs.push('Applied banned word replacements');
         
-        // Step 2: Send to AI for natural rewriting with BETTER prompt
-        const prompt = `Rewrite this text naturally. Keep the academic tone but make it flow better.
-
-TEXT:
-"${processed}"
-
-IMPORTANT RULES:
-
-1. COMBINE related short sentences using "and", "but", "because", "while", "since":
-   BAD: "Climate change is a crisis. It affects everyone. We need action."
-   GOOD: "Climate change is a crisis that affects everyone, and we need action."
-
-2. VARY sentence lengths - mix short, medium, and longer sentences naturally
-
-3. Use contractions: "it is" → "it's", "does not" → "doesn't", "they are" → "they're"
-
-4. NEVER USE these AI patterns:
-   - "isn't just X, it's Y" or any variation
-   - "doesn't just X, it Y"
-   - "The choice isn't X. It's Y."
-   - Starting sentences with "This" repeatedly
-   - Semicolons or em dashes
-   - ", which" clauses
-
-5. When you want to contrast two things, DON'T use "isn't just X, it's Y". Instead:
-   - "X matters, but Y matters more"
-   - "Beyond X, there's Y"
-   - "X is important. Y is even more so."
-
-GOOD EXAMPLE:
-"Climate change has become a security crisis that goes beyond melting ice. Rising temperatures make conflicts over water and food worse, and countries already struggling get pushed to their limits. The nations least responsible often face the worst consequences. When droughts destroy crops, people lose everything and have to move, which strains borders and weakens trust between countries."
-
-Output ONLY the rewritten text.`;
-
-        logs.push('Sending to Groq...');
+        // Step 2: Split into sentences
+        const sentences = processed.match(/[^.!?]+[.!?]+/g) || [processed];
+        logs.push(`Found ${sentences.length} sentences`);
         
-        const response = await GroqAPI.chat([{ role: "user", content: prompt }], GROQ_KEY, false);
-        let result = typeof response === 'string' ? response : (response.content || response);
-        result = result.trim().replace(/^["']|["']$/g, '');
+        // Step 3: Score each sentence
+        const scored = sentences.map((s, i) => {
+            const { score, matches } = scoreSentence(s.trim());
+            return { index: i, text: s.trim(), score, matches };
+        });
         
-        logs.push(`Groq response (first 150 chars): ${result.substring(0, 150)}...`);
+        // Log scores
+        scored.forEach(s => {
+            if (s.score > 0) {
+                logs.push(`[${s.index + 1}] Score ${s.score}: ${s.matches.join(', ')} - "${s.text.substring(0, 40)}..."`);
+            }
+        });
         
-        // Step 3: Post-process to catch remaining AI patterns
-        result = postProcess(result, logs);
+        // Step 4: Fix sentences with score >= 5
+        const results = [];
+        for (const item of scored) {
+            if (item.score >= 5) {
+                logs.push(`Fixing sentence ${item.index + 1}...`);
+                const fixed = await fixSentence(item.text, item.matches, GROQ_KEY, logs);
+                results.push(fixed);
+            } else {
+                results.push(item.text);
+            }
+        }
         
-        // Step 4: Combine short sentences
-        result = combineShortSentences(result, logs);
+        // Step 5: Join and final cleanup
+        let finalText = results.join(' ');
+        finalText = applyWordSwaps(finalText); // Apply swaps again
+        finalText = finalText.replace(/,([a-zA-Z])/g, ', $1'); // Fix missing spaces
+        finalText = finalText.replace(/\s{2,}/g, ' ').trim();
         
-        // Step 5: Apply word swaps again (AI might reintroduce banned words)
-        result = applyWordSwaps(result);
+        // Step 6: Final score check
+        const finalScore = scoreSentence(finalText);
+        logs.push(`Final text score: ${finalScore.score}`);
         
-        // Step 6: Final cleanup
-        result = result.replace(/\s{2,}/g, ' ').trim();
-        
-        logs.push(`Final: ${result.length} chars`);
-
         return res.status(200).json({
             success: true,
-            result: result,
+            result: finalText,
+            stats: {
+                sentences: sentences.length,
+                fixed: scored.filter(s => s.score >= 5).length,
+                finalScore: finalScore.score
+            },
             logs: logs
         });
 
@@ -230,210 +235,6 @@ Output ONLY the rewritten text.`;
 }
 
 // ==========================================================================
-// COMBINE SHORT SENTENCES
+// EXPORTS
 // ==========================================================================
-
-function combineShortSentences(text, logs) {
-    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-    if (sentences.length < 2) return text;
-    
-    const result = [];
-    let i = 0;
-    
-    while (i < sentences.length) {
-        const current = sentences[i].trim();
-        const next = sentences[i + 1]?.trim();
-        
-        const currentWords = current.split(/\s+/).length;
-        const nextWords = next ? next.split(/\s+/).length : 999;
-        
-        // If both sentences are short (under 10 words), try to combine
-        if (currentWords < 10 && nextWords < 10 && next) {
-            // Check if they can be naturally combined
-            const combined = tryCombine(current, next);
-            if (combined) {
-                result.push(combined);
-                logs.push(`Combined: "${current.substring(0, 20)}..." + "${next.substring(0, 20)}..."`);
-                i += 2;
-                continue;
-            }
-        }
-        
-        result.push(current);
-        i++;
-    }
-    
-    return result.join(' ');
-}
-
-function tryCombine(s1, s2) {
-    // Remove periods for combining
-    const a = s1.replace(/[.!?]+$/, '').trim();
-    const b = s2.replace(/[.!?]+$/, '').trim();
-    const bLower = b.charAt(0).toLowerCase() + b.slice(1);
-    
-    // Pattern: "X is Y. It Z" → "X is Y, and it Z"
-    if (/^(It|They|This|That|These|Those)\s/i.test(b)) {
-        return `${a}, and ${bLower}.`;
-    }
-    
-    // Pattern: "X happens. Y happens" → "X happens, and Y happens"
-    if (!b.startsWith('But') && !b.startsWith('However') && !b.startsWith('And')) {
-        // Check if subjects are different enough
-        const aSubject = a.split(/\s+/)[0];
-        const bSubject = b.split(/\s+/)[0];
-        if (aSubject !== bSubject) {
-            return `${a}, and ${bLower}.`;
-        }
-    }
-    
-    return null; // Don't combine
-}
-
-// ==========================================================================
-// POST-PROCESSING
-// ==========================================================================
-
-function postProcess(text, logs) {
-    let result = text;
-    
-    // Fix missing spaces after commas (common AI error)
-    result = result.replace(/,([a-zA-Z])/g, ', $1');
-    
-    // Remove semicolons - split into sentences
-    result = result.replace(/;/g, '.');
-    
-    // Remove em dashes
-    result = result.replace(/[—–]/g, ',');
-    result = result.replace(/\s*,\s*,/g, ',');
-    
-    // ===========================================
-    // AGGRESSIVE: Fix "isn't just X, it's Y" patterns
-    // These are THE main AI tells - must eliminate
-    // ===========================================
-    
-    // "it's not just X, it's Y" → "it goes beyond X. It's also Y"
-    result = result.replace(/[Ii]t's not just ([^,]+),\s*it's ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: it's not just pattern`);
-        return `It goes beyond ${x.trim()}. It's also ${y.trim()}.`;
-    });
-    
-    // "isn't just X, it's Y" → split into two sentences
-    result = result.replace(/isn't just ([^,]+),\s*it's ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: isn't just pattern`);
-        return `goes beyond ${x.trim()}. It's also ${y.trim()}.`;
-    });
-    
-    // "aren't just X, they're Y" → split
-    result = result.replace(/aren't just ([^,]+),\s*they're ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: aren't just pattern`);
-        return `go beyond ${x.trim()}. They're also ${y.trim()}.`;
-    });
-    
-    // "doesn't just X, it Y" → split  
-    result = result.replace(/doesn't just ([^,]+),\s*it ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: doesn't just comma pattern`);
-        return `does more than ${x.trim()}. It also ${y.trim()}.`;
-    });
-    
-    // "doesn't just X. it Y" (with period, lowercase it) → split
-    result = result.replace(/doesn't just ([^\.]+)\.\s*it ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: doesn't just period pattern`);
-        return `does more than ${x.trim()}. It ${y.trim()}.`;
-    });
-    
-    // "don't just X, they're Y" → split
-    result = result.replace(/don't just ([^,]+),\s*they're ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: don't just they're pattern`);
-        return `do more than ${x.trim()}. They're ${y.trim()}.`;
-    });
-    result = result.replace(/don't just ([^,]+),\s*they ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: don't just they pattern`);
-        return `do more than ${x.trim()}. They ${y.trim()}.`;
-    });
-    
-    // "The choice/real threat isn't X. It's Y" → combine differently
-    result = result.replace(/The (choice|threat|issue|problem|question|answer) isn't ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi, (m, noun, x, y) => {
-        logs.push(`Fixed: The ${noun} isn't. It's pattern`);
-        return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
-    });
-    
-    // Generic "X isn't Y. It's Z" split pattern
-    result = result.replace(/([A-Z][^\.]+) isn't ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./g, (m, subj, x, y) => {
-        logs.push(`Fixed: generic isn't. It's pattern`);
-        return `${subj} is ${y.trim()}, not ${x.trim()}.`;
-    });
-    
-    // "The choice isn't X, but Y" → simplify
-    result = result.replace(/The (choice|issue|question|decision) isn't ([^,]+),\s*but ([^\.]+)\./gi, (m, noun, x, y) => {
-        logs.push(`Fixed: isn't X, but Y pattern`);
-        return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
-    });
-    
-    // "isn't between X. It's between Y" pattern
-    result = result.replace(/isn't between ([^\.]+)\.\s*[Ii]t's between ([^\.]+)\./gi, (m, x, y) => {
-        logs.push(`Fixed: isn't between. It's between pattern`);
-        return `is between ${y.trim()}, not ${x.trim()}.`;
-    });
-    
-    // "The real X isn't Y. it's Z" (with lowercase it's after period)
-    result = result.replace(/The real ([a-z]+) isn't ([^\.]+)\.\s*it's ([^\.]+)\./gi, (m, noun, x, y) => {
-        logs.push(`Fixed: The real X isn't. it's pattern`);
-        return `The real ${noun} is ${y.trim()}, not just ${x.trim()}.`;
-    });
-    
-    // Catch any remaining "just X, it's/they're" patterns
-    result = result.replace(/n't just ([^,]+),\s*it's/gi, " goes beyond $1. It's");
-    result = result.replace(/n't just ([^,]+),\s*they're/gi, " go beyond $1. They're");
-    
-    // Fix lowercase "it" after period
-    result = result.replace(/\.\s*it\s+/g, '. It ');
-    
-    // ===========================================
-    // Fix "This [verb]s" patterns
-    // ===========================================
-    result = result.replace(/^This (strains|creates|causes|leads|forces|pushes|makes|turns|means|requires|demands|puts|increases|worsens)/gim, 'That $1');
-    result = result.replace(/\. This (strains|creates|causes|leads|forces|pushes|makes|turns|means|requires|demands|puts|increases|worsens)/gi, '. That $1');
-    
-    // Fix ", which" clauses
-    result = result.replace(/,\s*which\s+(\w+)/gi, '. It $1');
-    
-    // Add contractions if missing
-    result = result.replace(/\bit is\b/gi, "it's");
-    result = result.replace(/\bthat is\b/gi, "that's");
-    result = result.replace(/\bdoes not\b/gi, "doesn't");
-    result = result.replace(/\bdo not\b/gi, "don't");
-    result = result.replace(/\bcannot\b/gi, "can't");
-    result = result.replace(/\bwill not\b/gi, "won't");
-    result = result.replace(/\bwould not\b/gi, "wouldn't");
-    result = result.replace(/\bshould not\b/gi, "shouldn't");
-    result = result.replace(/\bcould not\b/gi, "couldn't");
-    result = result.replace(/\bthey are\b/gi, "they're");
-    result = result.replace(/\bwe are\b/gi, "we're");
-    result = result.replace(/\bare not\b/gi, "aren't");
-    result = result.replace(/\bis not\b/gi, "isn't");
-    result = result.replace(/\bwas not\b/gi, "wasn't");
-    result = result.replace(/\bwere not\b/gi, "weren't");
-    result = result.replace(/\bhas not\b/gi, "hasn't");
-    result = result.replace(/\bhave not\b/gi, "haven't");
-    
-    // Fix double periods
-    result = result.replace(/\.\./g, '.');
-    result = result.replace(/\s{2,}/g, ' ');
-    
-    // Fix "not X, but Y" → simpler phrasing
-    result = result.replace(/not about (.+?),\s*but about/gi, 'about');
-    result = result.replace(/not (.+?),\s*but rather/gi, '$1. Instead,');
-    
-    // Trim
-    result = result.trim();
-    
-    logs.push('Post-processing complete');
-    
-    return result;
-}
-
-// ==========================================================================
-// EXPORTS (for agent.js compatibility)
-// ==========================================================================
-export { postProcess as PostProcessor, BANNED_WORDS as AI_VOCAB_SWAPS, applyWordSwaps as killEmDashes };
+export { scoreSentence as PostProcessor, BANNED_WORDS as AI_VOCAB_SWAPS, applyWordSwaps as killEmDashes };
