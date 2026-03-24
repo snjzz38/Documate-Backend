@@ -53,8 +53,11 @@ function postProcess(text, logs) {
     // Fix missing spaces
     result = result.replace(/,([a-zA-Z])/g, ', $1');
     
-    // Fix lowercase letter after period (like ". it's" → ". It's")
-    result = result.replace(/\.\s+([a-z])/g, (m, letter) => `. ${letter.toUpperCase()}`);
+    // Fix lowercase letter after period (handles ". it's" and ".it's")
+    result = result.replace(/\.(\s*)([a-z])/g, (m, space, letter) => `.${space || ' '}${letter.toUpperCase()}`);
+    
+    // Fix sentence starting with lowercase (at beginning of text)
+    result = result.replace(/^([a-z])/, (m, letter) => letter.toUpperCase());
     
     // Remove semicolons - split into sentences
     if (/;/.test(result)) {
@@ -129,13 +132,13 @@ export default async function handler(req, res) {
         logs.push('Applied banned word replacements');
         
         // Step 2: Send to Gemini for natural rewriting
-        const prompt = `Rewrite this text to sound naturally human-written while keeping its academic tone.
+        const prompt = `Rewrite this text to sound like a human wrote it. Keep the academic tone but make it less polished.
 
 TEXT:
 "${processed}"
 
 CRITICAL - AVOID THESE AI PATTERNS:
-1. "isn't just X, it's Y" or "is not merely X, it is Y" - any variation of this contrast
+1. "isn't just X, it's Y" or "is not merely X, it is Y" - any variation
 2. "doesn't just X, it Y" or "does not simply X, it Y"  
 3. "The choice is not X, but Y"
 4. Split contrasts: "X is not Y. It is Z."
@@ -145,12 +148,16 @@ CRITICAL - AVOID THESE AI PATTERNS:
 8. "The danger/threat lies in"
 9. Participle phrases like ", forcing X" or ", creating Y"
 
-INSTEAD, write like this:
-- "Climate change is a security crisis, more than just an environmental one."
-- "Delaying action warms the planet and risks instability."
-- "The real choice is between managed change and collapse."
-- Use "and", "but", "because" to connect ideas naturally
-- Vary sentence lengths - mix short and medium sentences
+WRITING STYLE:
+- Include some SHORT sentences (3-6 words). Like this one.
+- Mix in longer ones that flow naturally with multiple clauses connected by "and" or "but"
+- Don't make every sentence perfect - humans aren't always grammatically ideal
+- Start a sentence with "And" or "But" occasionally
+- Use contractions: "it's", "don't", "we're", "that's"
+- Vary your sentence starters - don't begin multiple sentences the same way
+
+GOOD EXAMPLE:
+"Climate change is a security crisis. It goes beyond melting ice. When temperatures rise, conflicts over water and food get worse, and countries already struggling get pushed to their limits. The nations least responsible? They often face the worst consequences."
 
 Output ONLY the rewritten text, nothing else.`;
 
