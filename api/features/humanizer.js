@@ -73,8 +73,14 @@ function applyWordSwaps(text) {
 function postProcess(text, logs) {
     let result = text;
     
+    // FIRST: Normalize all quote/apostrophe characters to standard ASCII
+    result = result.replace(/[''`´]/g, "'");  // Normalize apostrophes
+    result = result.replace(/[""„]/g, '"');   // Normalize quotes
+    
     // Fix missing spaces
     result = result.replace(/,([a-zA-Z])/g, ', $1');
+    
+    logs.push('Starting pattern removal...');
     
     // ===========================================
     // NUCLEAR OPTION: Remove ANY "isn't...it's" in same sentence
@@ -82,8 +88,9 @@ function postProcess(text, logs) {
     // ===========================================
     
     // Ultra-simple: any "isn't [words] it's [words]." pattern
+    const before1 = result;
     result = result.replace(/isn't [^\.]*it's [^\.]*\./gi, (m) => {
-        logs.push('NUCLEAR: Removed isn\'t...it\'s pattern');
+        logs.push('NUCLEAR: Removed isn\'t...it\'s pattern: ' + m.substring(0, 50));
         // Extract just the part after "it's" and make it the sentence
         const match = m.match(/it's (.+)\.$/i);
         if (match) {
@@ -91,16 +98,19 @@ function postProcess(text, logs) {
         }
         return m;
     });
+    if (before1 !== result) logs.push('Pattern 1 applied');
     
     // Also catch "isn't [words]. It's [words]." split across sentences
+    const before2 = result;
     result = result.replace(/isn't [^\.]*\.\s*[Ii]t's [^\.]*\./gi, (m) => {
-        logs.push('NUCLEAR: Removed split isn\'t. It\'s pattern');
+        logs.push('NUCLEAR: Removed split isn\'t. It\'s pattern: ' + m.substring(0, 50));
         const match = m.match(/[Ii]t's (.+)\.$/i);
         if (match) {
             return `is ${match[1]}.`;
         }
         return m;
     });
+    if (before2 !== result) logs.push('Pattern 2 applied');
     
     // ===========================================
     // Original patterns as backup
