@@ -77,8 +77,33 @@ function postProcess(text, logs) {
     result = result.replace(/,([a-zA-Z])/g, ', $1');
     
     // ===========================================
-    // AGGRESSIVE: Remove ALL "isn't X, it's/it is Y" patterns
-    // Handles all spacing variations
+    // NUCLEAR OPTION: Remove ANY "isn't...it's" in same sentence
+    // This catches ALL variations
+    // ===========================================
+    
+    // Ultra-simple: any "isn't [words] it's [words]." pattern
+    result = result.replace(/isn't [^\.]*it's [^\.]*\./gi, (m) => {
+        logs.push('NUCLEAR: Removed isn\'t...it\'s pattern');
+        // Extract just the part after "it's" and make it the sentence
+        const match = m.match(/it's (.+)\.$/i);
+        if (match) {
+            return `is ${match[1]}.`;
+        }
+        return m;
+    });
+    
+    // Also catch "isn't [words]. It's [words]." split across sentences
+    result = result.replace(/isn't [^\.]*\.\s*[Ii]t's [^\.]*\./gi, (m) => {
+        logs.push('NUCLEAR: Removed split isn\'t. It\'s pattern');
+        const match = m.match(/[Ii]t's (.+)\.$/i);
+        if (match) {
+            return `is ${match[1]}.`;
+        }
+        return m;
+    });
+    
+    // ===========================================
+    // Original patterns as backup
     // ===========================================
     
     // "isn't simply/just/merely X, it's Y" or "isn't simply X, it is Y" (with or without space after comma)
