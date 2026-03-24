@@ -83,37 +83,73 @@ function postProcess(text, logs) {
     logs.push('Starting pattern removal...');
     
     // ===========================================
-    // NUCLEAR OPTION: Remove ANY "isn't...it's" in same sentence
-    // This catches ALL variations
+    // SIMPLE STRING APPROACH: Split into sentences and fix each
     // ===========================================
     
-    // Ultra-simple: any "isn't [words] it's [words]." pattern
-    const before1 = result;
-    result = result.replace(/isn't [^\.]*it's [^\.]*\./gi, (m) => {
-        logs.push('NUCLEAR: Removed isn\'t...it\'s pattern: ' + m.substring(0, 50));
-        // Extract just the part after "it's" and make it the sentence
-        const match = m.match(/it's (.+)\.$/i);
-        if (match) {
-            return `is ${match[1]}.`;
-        }
-        return m;
-    });
-    if (before1 !== result) logs.push('Pattern 1 applied');
+    const sentences = result.split(/(?<=[.!?])\s+/);
+    const fixedSentences = [];
     
-    // Also catch "isn't [words]. It's [words]." split across sentences
-    const before2 = result;
-    result = result.replace(/isn't [^\.]*\.\s*[Ii]t's [^\.]*\./gi, (m) => {
-        logs.push('NUCLEAR: Removed split isn\'t. It\'s pattern: ' + m.substring(0, 50));
-        const match = m.match(/[Ii]t's (.+)\.$/i);
-        if (match) {
-            return `is ${match[1]}.`;
+    for (let sentence of sentences) {
+        const lowerSentence = sentence.toLowerCase();
+        
+        // Check for "isn't ... it's" pattern in same sentence
+        if (lowerSentence.includes("isn't") && lowerSentence.includes("it's")) {
+            logs.push('Found isn\'t...it\'s in: ' + sentence.substring(0, 40) + '...');
+            
+            // Find position of "it's" and keep only what comes after
+            const itsIndex = lowerSentence.lastIndexOf("it's");
+            if (itsIndex !== -1) {
+                const afterIts = sentence.substring(itsIndex + 5).trim(); // +5 for "it's "
+                // Find the subject (everything before "isn't")
+                const isntIndex = lowerSentence.indexOf("isn't");
+                const subject = sentence.substring(0, isntIndex).trim();
+                sentence = subject + " is " + afterIts;
+                logs.push('Fixed to: ' + sentence.substring(0, 40) + '...');
+            }
         }
-        return m;
-    });
-    if (before2 !== result) logs.push('Pattern 2 applied');
+        
+        // Check for "isn't simply/just" patterns
+        if (lowerSentence.includes("isn't simply") || lowerSentence.includes("isn't just") || lowerSentence.includes("isn't merely")) {
+            logs.push('Found isn\'t simply/just in: ' + sentence.substring(0, 40) + '...');
+            
+            // Similar fix - find "it's" or "it is" and restructure
+            const itsMatch = sentence.match(/it's (.+)$/i) || sentence.match(/it is (.+)$/i);
+            if (itsMatch) {
+                const isntIndex = lowerSentence.indexOf("isn't");
+                const subject = sentence.substring(0, isntIndex).trim();
+                sentence = subject + " is " + itsMatch[1];
+                logs.push('Fixed to: ' + sentence.substring(0, 40) + '...');
+            }
+        }
+        
+        fixedSentences.push(sentence);
+    }
+    
+    result = fixedSentences.join(' ');
     
     // ===========================================
-    // Original patterns as backup
+    // Also check for split patterns across sentences
+    // ===========================================
+    
+    // Handle "X isn't Y. It's Z." - combine into "X is Z."
+    for (let i = 0; i < fixedSentences.length - 1; i++) {
+        const current = fixedSentences[i].toLowerCase();
+        const next = fixedSentences[i + 1].toLowerCase();
+        
+        if (current.includes("isn't") && next.startsWith("it's ")) {
+            logs.push('Found split pattern across sentences');
+            const isntIndex = fixedSentences[i].toLowerCase().indexOf("isn't");
+            const subject = fixedSentences[i].substring(0, isntIndex).trim();
+            const afterIts = fixedSentences[i + 1].substring(5); // Remove "It's "
+            fixedSentences[i] = subject + " is " + afterIts;
+            fixedSentences[i + 1] = ''; // Mark for removal
+        }
+    }
+    
+    result = fixedSentences.filter(s => s.length > 0).join(' ');
+    
+    // ===========================================
+    // Other fixes
     // ===========================================
     
     // "isn't simply/just/merely X, it's Y" or "isn't simply X, it is Y" (with or without space after comma)
