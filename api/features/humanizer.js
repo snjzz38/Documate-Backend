@@ -28,6 +28,7 @@ const BANNED_WORDS = {
     "amplify": "increase", "amplifies": "increases", "amplifying": "increasing",
     "transform": "turn", "transforms": "turns", "transforming": "turning",
     "burgeon": "grow", "burgeons": "grows", "burgeoning": "growing",
+    "alterations": "changes", "alteration": "change",
     
     // Formal adjectives/adverbs
     "fundamental": "basic", "fundamentally": "basically",
@@ -306,6 +307,7 @@ export default async function handler(req, res) {
         
         // Step 2: Send to Gemini for natural rewriting
         const prompt = `Rewrite this text to sound like a human wrote it. Keep the academic tone.
+        IMPORTANT: Produce a UNIQUE rewrite. Do NOT use the same sentence structures or word choices as any previous version.
 
 TEXT:
 "${processed}"
