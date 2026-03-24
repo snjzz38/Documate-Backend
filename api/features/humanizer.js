@@ -20,7 +20,10 @@ const BANNED_WORDS = {
     "commenced": "started", "concluded": "ended", "engenders": "creates",
     "gravest": "worst", "accelerating": "speeding up", "depletes": "drains",
     "erodes": "weakens", "intensify": "increase", "intensifies": "increases",
-    "resilience": "strength", "spiraling": "getting worse"
+    "resilience": "strength", "spiraling": "getting worse",
+    "ensuing": "following", "evident": "clear", "escalating": "growing",
+    "merely": "just", "amplifies": "increases", "transforms": "turns",
+    "withstand": "survive", "comprises": "includes", "constitutes": "is"
 };
 
 function applyWordSwaps(text) {
@@ -36,16 +39,43 @@ function applyWordSwaps(text) {
 // ==========================================================================
 
 const AI_PATTERNS = [
-    { regex: /n't just [^,]+,\s*(it's|they're|it |they )/i, name: "isnt_just_its", score: 10 },
-    { regex: /n't just [^\.]+\.\s*(it's|it )/i, name: "isnt_just_period", score: 10 },
-    { regex: /n't (between|about|choosing) [^,]+,?\s*(but |it's)/i, name: "isnt_but", score: 10 },
-    { regex: /n't [^\.]+\.\s*[Ii]t's /i, name: "split_isnt_its", score: 9 },
-    { regex: /,\s*(forcing|creating|causing|pushing|turning|making)\s+/i, name: "participle", score: 7 },
+    // "isn't/doesn't/aren't just X, it's Y" patterns (contractions)
+    { regex: /n't just [^,]+,\s*(it's|they're|it |they )/i, name: "nt_just_its", score: 10 },
+    { regex: /n't just [^\.]+\.\s*(it's|it |It )/i, name: "nt_just_period", score: 10 },
+    
+    // "is not/does not/are not" patterns (no contractions)
+    { regex: /is not (just|merely|simply|only) [^,\.]+[,\.]\s*(it is|It is|it's|It's)/i, name: "is_not_just", score: 10 },
+    { regex: /does not (just|merely|simply|only) [^,\.]+[,\.]\s*(it |It )/i, name: "does_not_just", score: 10 },
+    { regex: /do not (just|merely|simply|only) [^,\.]+[,\.]\s*(but|they)/i, name: "do_not_just", score: 10 },
+    { regex: /are not (just|merely|simply|only) [^,\.]+[,\.]\s*(they|but)/i, name: "are_not_just", score: 10 },
+    
+    // "not X, but Y" patterns
+    { regex: /not (between|about|choosing) [^,]+,\s*but\b/i, name: "not_but", score: 10 },
+    { regex: /is not [^,]+,\s*but\b/i, name: "is_not_but", score: 10 },
+    
+    // Split across sentences: "X is not Y. It is Z"
+    { regex: /is not [^\.]+\.\s*It is\b/i, name: "split_is_not", score: 9 },
+    { regex: /n't [^\.]+\.\s*[Ii]t's?\b/i, name: "split_nt_it", score: 9 },
+    
+    // Filler phrases
+    { regex: /^To clarify[,:]/i, name: "to_clarify", score: 8 },
+    { regex: /^(In other words|Put simply|That is to say)[,:]/i, name: "filler", score: 8 },
+    { regex: /This is a (critical|key|important|major) (issue|point|matter)/i, name: "this_is_critical", score: 8 },
+    
+    // Formal phrasing
+    { regex: /The (danger|threat|problem|issue|risk) lies in/i, name: "danger_lies", score: 7 },
+    { regex: /The (real|true|main|core|fundamental) (threat|danger|issue)/i, name: "the_real", score: 6 },
+    
+    // Participles
+    { regex: /,\s*(forcing|creating|causing|pushing|turning|making|driving)\s+/i, name: "participle", score: 7 },
+    
+    // Punctuation
     { regex: /[;]/i, name: "semicolon", score: 5 },
     { regex: /[—–]/i, name: "em_dash", score: 5 },
     { regex: /,\s*which\s+/i, name: "which_clause", score: 6 },
-    { regex: /^This (strains|creates|causes|leads|forces)/i, name: "this_verbs", score: 4 },
-    { regex: /the (real|true|main|core) (threat|danger|issue|problem)/i, name: "the_real", score: 5 },
+    
+    // This + verb
+    { regex: /^This (strains|creates|causes|leads|forces|transforms|amplifies)/i, name: "this_verbs", score: 5 },
 ];
 
 function scoreSentence(sentence) {
@@ -125,20 +155,60 @@ function fallbackFix(sentence, matches) {
     // Fix missing spaces
     result = result.replace(/,([a-zA-Z])/g, ', $1');
     
-    // Fix "n't just X, it's/they're Y" → split
+    // ===== NON-CONTRACTION PATTERNS =====
+    
+    // "is not merely/simply/just X. It is Y" → combine
+    result = result.replace(/(.+) is not (merely|simply|just|only) ([^\.]+)\.\s*It is ([^\.]+)\./gi,
+        (m, subj, mod, x, y) => `${subj} is ${y}, not just ${x}.`);
+    
+    // "does not merely/simply X, it Y" / "does not merely X. It Y"
+    result = result.replace(/(.+) does not (merely|simply|just) ([^,\.]+)[,\.]\s*[Ii]t ([^\.]+)\./gi,
+        (m, subj, mod, x, y) => `${subj} does more than ${x}. It also ${y}.`);
+    
+    // "do not simply X, but Y"
+    result = result.replace(/(.+) do not (merely|simply|just) ([^,]+),\s*but ([^\.]+)\./gi,
+        (m, subj, mod, x, y) => `${subj} do more than ${x}. They also ${y}.`);
+    
+    // "is not X, but Y" / "is not between X, but between Y"
+    result = result.replace(/(.+) is not ([^,]+),\s*but ([^\.]+)\./gi,
+        (m, subj, x, y) => `${subj} is ${y}, not ${x}.`);
+    
+    // "The choice is not between X, but between Y"
+    result = result.replace(/The (choice|decision|question) is not between ([^,]+),\s*but between ([^\.]+)\./gi,
+        (m, noun, x, y) => `The ${noun} is between ${y}, not ${x}.`);
+    
+    // ===== CONTRACTION PATTERNS =====
+    
+    // "n't just X, it's/they're Y" → split
     result = result.replace(/(.+)n't just ([^,]+),\s*(it's|they're) ([^\.]+)\./gi, 
         (m, subj, x, pronoun, y) => `${subj} does more than ${x}. ${pronoun === "it's" ? "It" : "They"} also ${y}.`);
     
-    // Fix "n't just X. it's Y" (with period)
-    result = result.replace(/(.+)n't just ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi,
+    // "n't just X. it's Y" (with period)
+    result = result.replace(/(.+)n't just ([^\.]+)\.\s*[Ii]t's? ([^\.]+)\./gi,
         (m, subj, x, y) => `${subj} does more than ${x}. It ${y}.`);
     
-    // Fix "isn't X, but Y" / "isn't X but Y"
+    // "isn't X, but Y"
     result = result.replace(/(.+) isn't ([^,]+),?\s*but ([^\.]+)\./gi,
         (m, subj, x, y) => `${subj} is ${y}, not ${x}.`);
     
+    // ===== FILLER PHRASES =====
+    
+    // "To clarify," - just remove it
+    result = result.replace(/^To clarify,\s*/i, '');
+    result = result.replace(/^In other words,\s*/i, '');
+    result = result.replace(/^Put simply,\s*/i, '');
+    
+    // "This is a critical issue" → simpler
+    result = result.replace(/This is a (critical|key|important|major) (issue|point|matter)[,:]?\s*(because)?/gi, 
+        'The key point is that');
+    
+    // "The danger/threat lies in" → simpler
+    result = result.replace(/The (danger|threat|problem|risk) lies in\b/gi, 'The $1 is');
+    
+    // ===== OTHER PATTERNS =====
+    
     // Fix participles
-    result = result.replace(/,\s*(forcing|creating|causing|pushing|turning|making)\s+([^,\.]+)([,\.])/gi,
+    result = result.replace(/,\s*(forcing|creating|causing|pushing|turning|making|driving)\s+([^,\.]+)([,\.])/gi,
         (m, verb, rest, punct) => `. This ${verb.replace(/ing$/, 'es')} ${rest}${punct}`);
     
     // Fix semicolons and em dashes
@@ -147,6 +217,14 @@ function fallbackFix(sentence, matches) {
     
     // Fix ", which"
     result = result.replace(/,\s*which\s+(\w+)/gi, '. It $1');
+    
+    // Add contractions
+    result = result.replace(/\bIt is\b/g, "It's");
+    result = result.replace(/\bThey are\b/g, "They're");
+    result = result.replace(/\bdoes not\b/gi, "doesn't");
+    result = result.replace(/\bdo not\b/gi, "don't");
+    result = result.replace(/\bis not\b/gi, "isn't");
+    result = result.replace(/\bare not\b/gi, "aren't");
     
     // Clean up
     result = result.replace(/\.\./g, '.');
