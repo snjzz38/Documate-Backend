@@ -3,6 +3,14 @@
 import { GeminiAPI } from '../utils/geminiAPI.js';
 
 // ==========================================================================
+// RANDOM TEMPERATURE - Varies between 0.5 and 1.5 for each request
+// ==========================================================================
+
+function getRandomTemperature() {
+    return 0.5 + Math.random(); // Returns 0.5 to 1.5
+}
+
+// ==========================================================================
 // BANNED WORDS
 // ==========================================================================
 
@@ -148,8 +156,12 @@ Output ONLY the rewritten text, nothing else.`;
 
         logs.push('Sending to Gemini...');
         
+        // Random temperature for varied outputs
+        const temperature = getRandomTemperature();
+        logs.push(`Temperature: ${temperature.toFixed(2)}`);
+        
         // GeminiAPI.chat returns a string directly
-        const result_raw = await GeminiAPI.chat(prompt, GEMINI_KEY);
+        const result_raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
         let result = result_raw.trim().replace(/^["']|["']$/g, '');
         
         logs.push(`Gemini response (first 150 chars): ${result.substring(0, 150)}...`);
