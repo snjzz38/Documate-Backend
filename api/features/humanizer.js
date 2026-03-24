@@ -51,7 +51,7 @@ function postProcess(text, logs) {
         logs.push('Fixed: semicolons → periods');
     }
     
-    // Remove em dashes - replace with comma or period
+    // Remove em dashes - replace with comma
     if (/[—–]/.test(result)) {
         result = result.replace(/\s*[—–]\s*/g, ', ');
         logs.push('Fixed: em dashes → commas');
@@ -72,7 +72,7 @@ function postProcess(text, logs) {
         logs.push('Fixed: ", which" → ". It"');
     }
     
-    // Fix any remaining "isn't just X, it's Y" patterns (backup)
+    // Fix any remaining "isn't just X, it's Y" patterns
     result = result.replace(/isn't (just|simply|merely) ([^,]+),\s*it's ([^\.]+)\./gi,
         (m, mod, x, y) => {
             logs.push('Fixed: isn\'t just pattern');
@@ -120,7 +120,6 @@ export default async function handler(req, res) {
     
     try {
         const { text, apiKey } = req.body;
-        // Use Gemini API key - should be set in environment or passed in
         const GEMINI_KEY = apiKey || process.env.GEMINI_API_KEY;
         
         if (!text) throw new Error("No text provided.");
@@ -160,11 +159,11 @@ Output ONLY the rewritten text, nothing else.`;
 
         logs.push('Sending to Gemini...');
         
-        const response = await GeminiAPI.chat(prompt, GEMINI_KEY);
-        let result = response.content.trim().replace(/^["']|["']$/g, '');
+        // GeminiAPI.chat returns a string directly
+        const result_raw = await GeminiAPI.chat(prompt, GEMINI_KEY);
+        let result = result_raw.trim().replace(/^["']|["']$/g, '');
         
         logs.push(`Gemini response (first 150 chars): ${result.substring(0, 150)}...`);
-        logs.push(`Model used: ${response.model}`);
         
         // Step 3: Post-process to fix remaining patterns
         result = postProcess(result, logs);
