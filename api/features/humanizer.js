@@ -75,32 +75,6 @@ function postProcess(text, logs) {
         logs.push('Fixed: ", which" → ". It"');
     }
     
-    // Fix split "isn't/is not X. It's/It is Y" pattern
-    result = result.replace(/isn't (just |simply |merely |)?([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi,
-        (m, mod, x, y) => {
-            logs.push('Fixed: split isn\'t. It\'s pattern');
-            return `is ${y}, not ${mod || ''}${x}.`;
-        });
-    result = result.replace(/is not (just |simply |merely |)?([^\.]+)\.\s*[Ii]t is ([^\.]+)\./gi,
-        (m, mod, x, y) => {
-            logs.push('Fixed: split is not. It is pattern');
-            return `is ${y}, not ${mod || ''}${x}.`;
-        });
-    
-    // Fix any remaining "isn't just X, it's Y" patterns
-    result = result.replace(/isn't (just|simply|merely) ([^,]+),\s*it's ([^\.]+)\./gi,
-        (m, mod, x, y) => {
-            logs.push('Fixed: isn\'t just pattern');
-            return `is ${y}, not just ${x}.`;
-        });
-    
-    // Fix "is not X, but Y" patterns
-    result = result.replace(/is not ([^,]+),\s*but ([^\.]+)\./gi,
-        (m, x, y) => {
-            logs.push('Fixed: is not X, but Y');
-            return `is ${y}, not ${x}.`;
-        });
-    
     // Add contractions
     result = result.replace(/\bIt is\b/g, "It's");
     result = result.replace(/\bthat is\b/gi, "that's");
