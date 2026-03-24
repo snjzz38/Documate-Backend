@@ -13,7 +13,7 @@ const GEMINI_MODELS = [
 ];
 
 export const GeminiAPI = {
-    async chat(promptText, apiKey) {
+    async chat(promptText, apiKey, temperature = 0.7) {
         if (!apiKey) throw new Error("Missing Gemini API Key");
         let lastError = null;
         for (let attempt = 0; attempt < GEMINI_MODELS.length; attempt++) {
@@ -24,7 +24,8 @@ export const GeminiAPI = {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        contents: [{ parts: [{ text: promptText }] }]
+                        contents: [{ parts: [{ text: promptText }] }],
+                        generationConfig: { temperature }
                     })
                 });
                 if (!res.ok) {
@@ -44,8 +45,7 @@ export const GeminiAPI = {
         }
         throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
     },
-
-    async vision(promptText, apiKey, files = []) {
+    async vision(promptText, apiKey, files = [], temperature = 0.7) {
         if (!apiKey) throw new Error("Missing Gemini API Key");
         let lastError = null;
         const parts = [
@@ -62,7 +62,8 @@ export const GeminiAPI = {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        contents: [{ parts }]
+                        contents: [{ parts }],
+                        generationConfig: { temperature }
                     })
                 });
                 if (!res.ok) {
