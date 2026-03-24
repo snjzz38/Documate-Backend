@@ -11,37 +11,41 @@ function getRandomTemperature() {
 }
 
 // ==========================================================================
-// BANNED WORDS - Using stems to catch all conjugations
+// BANNED WORDS - Full words and common conjugations
 // ==========================================================================
 
-const BANNED_STEMS = {
-    "utiliz": "use",           // utilize, utilizing, utilizes, utilization
-    "leverag": "use",          // leverage, leveraging, leverages
-    "facilitat": "help",       // facilitate, facilitating, facilitates
-    "optimiz": "improve",      // optimize, optimizing, optimizes
-    "comprehensiv": "complete", // comprehensive, comprehensively
-    "methodolog": "method",    // methodology, methodological
-    "fundament": "basic",      // fundamental, fundamentally, fundamentals
-    "necessitat": "require",   // necessitate, necessitates, necessitating
-    "intensif": "worsen",      // intensify, intensifies, intensified, intensifying
-    "exacerbat": "worsen",     // exacerbate, exacerbates, exacerbating
-    "mitigat": "reduce",       // mitigate, mitigates, mitigating
-    "escalat": "grow",         // escalate, escalates, escalating, escalation
-    "amplif": "increase",      // amplify, amplifies, amplifying
-    "transform": "change",     // transform, transforms, transforming
-    "burgeon": "grow",         // burgeoning, burgeons
-    "robust": "strong",        // robust, robustly
-    "viab": "workable",        // viable, viability
-    "pre-exist": "existing",   // pre-existing
-    "preexist": "existing",    // preexisting
-    "systemic": "system-wide", // systemic
-    "arable": "farmable",      // arable
-};
-
 const BANNED_WORDS = {
+    // Formal verbs and conjugations
+    "utilize": "use", "utilizes": "uses", "utilizing": "using", "utilized": "used",
+    "leverage": "use", "leverages": "uses", "leveraging": "using", "leveraged": "used",
+    "facilitate": "help", "facilitates": "helps", "facilitating": "helping",
+    "optimize": "improve", "optimizes": "improves", "optimizing": "improving",
+    "necessitate": "require", "necessitates": "requires", "necessitating": "requiring",
+    "exacerbate": "worsen", "exacerbates": "worsens", "exacerbating": "worsening",
+    "mitigate": "reduce", "mitigates": "reduces", "mitigating": "reducing",
+    "intensify": "worsen", "intensifies": "worsens", "intensifying": "worsening", "intensified": "worsened",
+    "escalate": "grow", "escalates": "grows", "escalating": "growing", "escalation": "growth",
+    "amplify": "increase", "amplifies": "increases", "amplifying": "increasing",
+    "transform": "turn", "transforms": "turns", "transforming": "turning",
+    "burgeon": "grow", "burgeons": "grows", "burgeoning": "growing",
+    
+    // Formal adjectives/adverbs
+    "fundamental": "basic", "fundamentally": "basically",
+    "comprehensive": "complete", "comprehensively": "completely",
+    "robust": "strong", "robustly": "strongly",
+    "viable": "workable", "viability": "workability",
+    "systemic": "system-wide", "systemically": "throughout",
+    "readily": "easily", "considerable": "major", "considerably": "greatly",
+    "apparent": "clear", "apparently": "clearly",
+    "prolonged": "long", "arable": "farmable",
+    "pre-existing": "existing", "preexisting": "existing",
+    
+    // Transitions
     "furthermore": "also", "moreover": "also", "additionally": "also",
     "consequently": "so", "nevertheless": "but", "therefore": "so",
     "thus": "so", "hence": "so", "whereby": "where",
+    
+    // Other formal words
     "equitable": "fair", "vulnerable": "exposed", "paramount": "important",
     "imperative": "necessary", "pivotal": "key", "crucial": "important",
     "essential": "needed", "significant": "major",
@@ -51,25 +55,14 @@ const BANNED_WORDS = {
     "erodes": "weakens", "resilience": "strength", "spiraling": "getting worse",
     "ensuing": "following", "evident": "clear", "merely": "just",
     "withstand": "survive", "comprises": "includes", "constitutes": "is",
-    "represents": "is", "undermines": "weakens", "readily": "easily",
-    "considerable": "major", "apparent": "clear", "prolonged": "long"
+    "represents": "is", "undermines": "weakens"
 };
 
 function applyWordSwaps(text) {
     let result = text;
-    
-    // First apply stem-based replacements (catches conjugations)
-    for (const [stem, replacement] of Object.entries(BANNED_STEMS)) {
-        // Match the stem + any ending (ing, ed, es, ly, tion, etc.)
-        const regex = new RegExp(`\\b${stem}\\w*\\b`, 'gi');
-        result = result.replace(regex, replacement);
-    }
-    
-    // Then apply exact word replacements
     for (const [bad, good] of Object.entries(BANNED_WORDS)) {
         result = result.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
     }
-    
     return result;
 }
 
