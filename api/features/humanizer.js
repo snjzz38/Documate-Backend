@@ -224,6 +224,9 @@ Output ONLY the rewritten text.`;
 function postProcess(text, logs) {
     let result = text;
     
+    // Fix missing spaces after commas (common AI error)
+    result = result.replace(/,([a-zA-Z])/g, ', $1');
+    
     // Remove semicolons - split into sentences
     result = result.replace(/;/g, '.');
     
@@ -231,9 +234,66 @@ function postProcess(text, logs) {
     result = result.replace(/[—–]/g, ',');
     result = result.replace(/\s*,\s*,/g, ',');
     
+    // ===========================================
+    // AGGRESSIVE: Fix "isn't just X, it's Y" patterns
+    // These are THE main AI tells - must eliminate
+    // ===========================================
+    
+    // "it's not just X, it's Y" → "it goes beyond X. It's also Y"
+    result = result.replace(/[Ii]t's not just ([^,]+),\s*it's ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: it's not just pattern`);
+        return `It goes beyond ${x.trim()}. It's also ${y.trim()}.`;
+    });
+    
+    // "isn't just X, it's Y" → split into two sentences
+    result = result.replace(/isn't just ([^,]+),\s*it's ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: isn't just pattern`);
+        return `goes beyond ${x.trim()}. It's also ${y.trim()}.`;
+    });
+    
+    // "aren't just X, they're Y" → split
+    result = result.replace(/aren't just ([^,]+),\s*they're ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: aren't just pattern`);
+        return `go beyond ${x.trim()}. They're also ${y.trim()}.`;
+    });
+    
+    // "doesn't just X, it Y" → split  
+    result = result.replace(/doesn't just ([^,]+),\s*it ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: doesn't just pattern`);
+        return `does more than ${x.trim()}. It also ${y.trim()}.`;
+    });
+    
+    // "don't just X, they're Y" → split
+    result = result.replace(/don't just ([^,]+),\s*they're ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: don't just they're pattern`);
+        return `do more than ${x.trim()}. They're ${y.trim()}.`;
+    });
+    result = result.replace(/don't just ([^,]+),\s*they ([^\.]+)\./gi, (m, x, y) => {
+        logs.push(`Fixed: don't just they pattern`);
+        return `do more than ${x.trim()}. They ${y.trim()}.`;
+    });
+    
+    // "The choice/real threat isn't X. It's Y" → combine differently
+    result = result.replace(/The (choice|threat|issue|problem|question|answer) isn't ([^\.]+)\.\s*[Ii]t's ([^\.]+)\./gi, (m, noun, x, y) => {
+        logs.push(`Fixed: split isn't/it's pattern`);
+        return `The real ${noun} is ${y.trim()}, not ${x.trim()}.`;
+    });
+    
+    // "The real X isn't Y. it's Z" (with lowercase it's after period)
+    result = result.replace(/The real ([a-z]+) isn't ([^\.]+)\.\s*it's ([^\.]+)\./gi, (m, noun, x, y) => {
+        logs.push(`Fixed: The real X isn't. it's pattern`);
+        return `The real ${noun} is ${y.trim()}, not just ${x.trim()}.`;
+    });
+    
+    // Catch any remaining "just X, it's/they're" patterns
+    result = result.replace(/n't just ([^,]+),\s*it's/gi, " goes beyond $1. It's");
+    result = result.replace(/n't just ([^,]+),\s*they're/gi, " go beyond $1. They're");
+    
+    // ===========================================
     // Fix "This [verb]s" patterns
-    result = result.replace(/^This (strains|creates|causes|leads|forces|pushes|makes|turns|means|requires|demands|puts)/gim, 'That $1');
-    result = result.replace(/\. This (strains|creates|causes|leads|forces|pushes|makes|turns|means|requires|demands|puts)/gi, '. That $1');
+    // ===========================================
+    result = result.replace(/^This (strains|creates|causes|leads|forces|pushes|makes|turns|means|requires|demands|puts|increases|worsens)/gim, 'That $1');
+    result = result.replace(/\. This (strains|creates|causes|leads|forces|pushes|makes|turns|means|requires|demands|puts|increases|worsens)/gi, '. That $1');
     
     // Fix ", which" clauses
     result = result.replace(/,\s*which\s+(\w+)/gi, '. It $1');
