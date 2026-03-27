@@ -358,34 +358,24 @@ export default async function handler(req, res) {
         logs.push('Applied banned word replacements');
         
         // Step 2: Send to Gemini for natural rewriting
-        const prompt = `Rewrite this text to sound like a human wrote it. Keep the academic tone.
+        const prompt = `You are a college student rewriting an essay to avoid plagiarism detection. Rewrite this text in your own words.
 
 TEXT:
 "${processed}"
 
-ABSOLUTE RULES - NEVER USE THESE PATTERNS:
-1. NEVER "it's not X, it's Y" or "isn't X, it's Y" - ANY variation of this
-2. NEVER "isn't simply/just/merely X, it is Y"
-3. NEVER "doesn't just X, it Y"
-4. NEVER "not about X, it's about Y"
-5. NEVER split contrasts across sentences: "X isn't Y. It's Z."
-6. NEVER "The choice isn't X, but Y"
-7. NEVER semicolons or em dashes
-8. NEVER ", which" clauses
-9. NEVER "To be clear," or "This is an important point"
+IMPORTANT:
+- Write like a real person, not a formal essay
+- Mix up sentence lengths - some short, some longer
+- Don't be perfectly structured - real writing has some roughness
+- Use casual academic tone - smart but not robotic
+- Start sentences differently - vary between "The", "This", "When", "Because", subject-first, etc.
+- Combine some ideas, split others
+- Add small transitions like "And" or "But" at sentence starts occasionally
+- Use contractions naturally
+- NO semicolons, NO dashes
+- Avoid any "isn't X, it's Y" or "not just X, but Y" type contrasts
 
-When emphasizing something, state what it IS directly:
-- BAD: "isn't simply wise, it is necessary"
-- GOOD: "is necessary" or "is essential"
-
-WRITING REQUIREMENTS:
-- Vary vocabulary - don't repeat the same words
-- Vary sentence structure - mix simple, compound, and complex sentences
-- Use different sentence starters - don't begin multiple sentences the same way
-- Use contractions naturally: "it's", "don't", "we're"
-- Connect ideas with "and", "but", "because", "while", "since"
-
-Output ONLY the rewritten text, nothing else.`;
+Just rewrite it naturally. Output ONLY the rewritten text.`;
 
         logs.push('Sending to Gemini...');
         
