@@ -486,6 +486,15 @@ function postProcess(text, logs) {
     result = result.replace(/To be clear,\s*/gi, '');
     result = result.replace(/This is an? important point because\s*/gi, '');
     
+    // Fix broken "Because X." sentences (Because without a main clause)
+    result = result.replace(/Because ([^,\.]+)\.\s*/gi, (m, clause) => {
+        logs.push('Fixed: broken Because sentence');
+        return `${clause.charAt(0).toUpperCase() + clause.slice(1)}. `;
+    });
+    
+    // Fix awkward "is so needed" → "is urgently needed"
+    result = result.replace(/is so needed/gi, 'is urgently needed');
+    
     // ===========================================
     // Other fixes
     // ===========================================
