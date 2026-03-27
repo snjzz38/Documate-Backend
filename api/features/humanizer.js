@@ -75,23 +75,33 @@ function splitIntoSentences(text) {
 // ==========================================================================
 
 function buildSentencePrompt(sentence, context) {
+    // Randomly pick a style hint to encourage variation
+    const styleHints = [
+        "Try starting with the subject directly.",
+        "Try starting with 'When', 'Because', 'Since', or 'Although'.",
+        "Try making this sentence shorter and punchier.",
+        "Try combining ideas with 'and' or 'but'.",
+        "Try a straightforward declarative structure.",
+    ];
+    const randomHint = styleHints[Math.floor(Math.random() * styleHints.length)];
+    
     return `Rewrite this single sentence so it sounds like a human wrote it. Keep the exact same meaning. Keep an academic tone.
 
-CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow awareness):
+CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow):
 "${context}"
 
 SENTENCE TO REWRITE:
 "${sentence}"
 
 RULES:
-1. Output ONE sentence only — no extra commentary, no quotation marks around it
-2. Keep the same meaning exactly — don't add or remove facts
-3. NEVER use "it's not X, it's Y" or "isn't X, it's Y" or "not just X, but Y" constructions
+1. Output ONE sentence only — no commentary, no quotes around it
+2. Keep the same meaning — don't add or remove facts
+3. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
 4. NEVER use semicolons or em dashes
 5. NEVER use ", which" relative clauses
-6. Use contractions naturally where they fit: it's, don't, we're, that's
-7. Vary sentence structure — try different openers
-8. Use plain, direct vocabulary
+6. NEVER use filler like "as a matter of course", "it should be noted", "essentially"
+7. Use contractions naturally: it's, don't, we're, that's
+8. ${randomHint}
 
 Output ONLY the rewritten sentence.`;
 }
@@ -122,6 +132,12 @@ function postProcess(text, logs) {
         return `${x} and ${y}`;
     });
     
+    // "don't only X, but also Y" → "X and Y"
+    result = result.replace(/don't only ([^,]+),\s*but also (in )?([^\.]+)/gi, (m, x, inWord, y) => {
+        logs.push('Fixed: don\'t only X, but also Y');
+        return `${x} and ${y}`;
+    });
+    
     // "doesn't just X, but also Y" → "X and Y"
     result = result.replace(/doesn't just ([^,]+),\s*but also ([^\.]+)/gi, (m, x, y) => {
         logs.push('Fixed: doesn\'t just X, but also Y');
@@ -145,6 +161,24 @@ function postProcess(text, logs) {
         logs.push('Fixed: not between X, but between Y');
         return `between ${y}`;
     });
+    
+    // "rather than X over Y" at end of sentence - remove
+    result = result.replace(/,\s*rather than [^\.]+\./gi, (m) => {
+        logs.push('Fixed: removed trailing "rather than"');
+        return '.';
+    });
+    
+    // ===========================================
+    // AI FILLER PHRASES
+    // ===========================================
+    result = result.replace(/,?\s*as a matter of course\.?/gi, '.');
+    result = result.replace(/\bWe're essentially\b/gi, "We're");
+    result = result.replace(/\bessentially\b/gi, '');
+    result = result.replace(/\bIt's worth noting that\b/gi, '');
+    result = result.replace(/\bIt should be noted that\b/gi, '');
+    result = result.replace(/\bmore than simply\b/gi, 'more than');
+    result = result.replace(/\bthe sole workable\b/gi, 'the only');
+    result = result.replace(/\bas this approach is\b/gi, 'and this is');
 
     // Sentence-level isn't/it's fixes
     const sentences = result.split(/(?<=[.!?])\s+/);
