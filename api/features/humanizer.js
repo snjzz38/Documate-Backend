@@ -33,7 +33,7 @@ const BANNED_WORDS = {
     
     // Formal adjectives/adverbs
     "fundamental": "basic", "fundamentally": "basically",
-    "comprehensive": "complete", "comprehensively": "completely",
+    "comprehensive": "full", "comprehensively": "fully",
     "robust": "strong", "robustly": "strongly",
     "viable": "workable", "viability": "workability",
     "systemic": "system-wide", "systemically": "throughout",
@@ -41,7 +41,8 @@ const BANNED_WORDS = {
     "apparent": "clear", "apparently": "clearly",
     "prolonged": "long", "arable": "farmable",
     "pre-existing": "existing", "preexisting": "existing",
-    "unmistakable": "clear", "proactively": "early",
+    "unmistakable": "obvious",
+    "proactively": "actively",
     
     // Transitions
     "furthermore": "also", "moreover": "also", "additionally": "also",
@@ -208,10 +209,16 @@ function postProcess(text, logs) {
         return `is ${y}.`;
     });
     
-    // "isn't just to X, but rather to Y" → "is to Y"
-    result = result.replace(/isn't (simply |just |merely |)?to ([^,]+),\s*but rather to ([^\.]+)\./gi, (m, mod, x, y) => {
+    // "isn't just to X, but rather to Y" → "means Y" (better grammar)
+    result = result.replace(/isn't (simply |just |merely |)?to ([^,]+),\s*but (rather )?to ([^\.]+)\./gi, (m, mod, x, rather, y) => {
         logs.push('Fixed: isn\'t to X, but rather to Y');
-        return `is to ${y}.`;
+        return `means ${y}.`;
+    });
+    
+    // "To X isn't just to Y, but rather to Z" → "X means Z"
+    result = result.replace(/To ([^\s]+) isn't (simply |just |merely |)?to ([^,]+),\s*but (rather )?to ([^\.]+)\./gi, (m, verb, mod, x, rather, y) => {
+        logs.push('Fixed: To X isn\'t to Y, but to Z');
+        return `${verb.charAt(0).toUpperCase() + verb.slice(1)}ing means ${y}.`;
     });
     
     // "don't just X, but also Y" → "X and also Y"
