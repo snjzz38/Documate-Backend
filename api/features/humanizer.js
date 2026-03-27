@@ -408,6 +408,12 @@ function postProcess(text, logs) {
         return `the ${adj || ''}${noun} is between ${y}.`;
     });
     
+    // "the choice isn't between X, but rather between Y" → "the choice is between Y"
+    result = result.replace(/the (critical |basic |real |fundamental )?(choice|decision) isn't between ([^,]+),\s*but rather between ([^\.]+)\./gi, (m, adj, noun, x, y) => {
+        logs.push('Fixed: the choice isn\'t between X but rather between Y');
+        return `the ${adj || ''}${noun} is between ${y}.`;
+    });
+    
     // ===========================================
     
     // Split pattern: "X isn't Y. It's Z" or "X isn't Y. it's Z"
@@ -440,7 +446,8 @@ function postProcess(text, logs) {
     result = result.replace(/\ba ([aeiou])/gi, 'an $1'); // "a important" → "an important"
     
     // ===========================================
-    // Fix participial phrases: ", extending X" → ". This extends X"
+    // Fix participial phrases: ", extending far beyond" → ". This extends far beyond"
+    // Only match when participle is followed by content (not mid-sentence)
     // ===========================================
     const participials = ['extending', 'establishing', 'creating', 'forcing', 'pushing', 
                           'turning', 'making', 'causing', 'driving', 'putting', 'leaving',
@@ -448,19 +455,19 @@ function postProcess(text, logs) {
                           'leading', 'resulting', 'producing', 'generating', 'sparking'];
     
     for (const verb of participials) {
-        const pattern = new RegExp(`,\\s*${verb}\\s+`, 'gi');
+        // Only match: ", [verb] [words until end of sentence]" - true dangling participles
+        const pattern = new RegExp(`,\\s*${verb}\\s+([^,\\.]+)\\.$`, 'gim');
         if (pattern.test(result)) {
             const base = verb.replace(/ing$/, '');
-            // Proper conjugation: extend→extends, create→creates, push→pushes
             let conjugated;
             if (base.endsWith('e')) {
-                conjugated = base + 's'; // create → creates
+                conjugated = base + 's';
             } else if (base.endsWith('sh') || base.endsWith('ch') || base.endsWith('ss') || base.endsWith('x')) {
-                conjugated = base + 'es'; // push → pushes
+                conjugated = base + 'es';
             } else {
-                conjugated = base + 's'; // turn → turns
+                conjugated = base + 's';
             }
-            result = result.replace(pattern, `. This ${conjugated} `);
+            result = result.replace(pattern, `. This ${conjugated} $1.`);
             logs.push(`Fixed: participial "${verb}"`);
         }
     }
