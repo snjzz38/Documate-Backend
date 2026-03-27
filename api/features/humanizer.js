@@ -403,15 +403,9 @@ function postProcess(text, logs) {
     });
     
     // "the choice isn't between X, but between Y" → "the choice is between Y"
-    result = result.replace(/the (critical |basic |real |fundamental )?(choice|decision) isn't between ([^,]+),\s*but between ([^\.]+)\./gi, (m, adj, noun, x, y) => {
-        logs.push('Fixed: the choice isn\'t between X but between Y');
-        return `the ${adj || ''}${noun} is between ${y}.`;
-    });
-    
-    // "the choice isn't between X, but rather between Y" → "the choice is between Y"
-    result = result.replace(/the (critical |basic |real |fundamental )?(choice|decision) isn't between ([^,]+),\s*but rather between ([^\.]+)\./gi, (m, adj, noun, x, y) => {
-        logs.push('Fixed: the choice isn\'t between X but rather between Y');
-        return `the ${adj || ''}${noun} is between ${y}.`;
+    result = result.replace(/(choice|decision) isn't between ([^,]+),\s*but (between )?([^\.]+)\./gi, (m, noun, x, bw, y) => {
+        logs.push('Fixed: choice isn\'t between X but Y');
+        return `${noun} is between ${y}.`;
     });
     
     // ===========================================
@@ -446,31 +440,14 @@ function postProcess(text, logs) {
     result = result.replace(/\ba ([aeiou])/gi, 'an $1'); // "a important" → "an important"
     
     // ===========================================
-    // Fix participial phrases: ", extending far beyond" → ". This extends far beyond"
-    // Only match when participle is followed by content (not mid-sentence)
+    // Fix participial phrases: ", extending far" → ". This extends far"
     // ===========================================
-    const participials = ['extending', 'establishing', 'creating', 'forcing', 'pushing', 
-                          'turning', 'making', 'causing', 'driving', 'putting', 'leaving',
-                          'placing', 'weakening', 'strengthening', 'increasing', 'reducing',
-                          'leading', 'resulting', 'producing', 'generating', 'sparking'];
-    
-    for (const verb of participials) {
-        // Only match: ", [verb] [words until end of sentence]" - true dangling participles
-        const pattern = new RegExp(`,\\s*${verb}\\s+([^,\\.]+)\\.$`, 'gim');
-        if (pattern.test(result)) {
-            const base = verb.replace(/ing$/, '');
-            let conjugated;
-            if (base.endsWith('e')) {
-                conjugated = base + 's';
-            } else if (base.endsWith('sh') || base.endsWith('ch') || base.endsWith('ss') || base.endsWith('x')) {
-                conjugated = base + 'es';
-            } else {
-                conjugated = base + 's';
-            }
-            result = result.replace(pattern, `. This ${conjugated} $1.`);
-            logs.push(`Fixed: participial "${verb}"`);
-        }
-    }
+    result = result.replace(/,\s*(extending|establishing|creating|forcing|pushing|turning|making|causing|driving|putting|leaving|placing|weakening|strengthening|increasing|reducing|leading|resulting|producing|generating|sparking)\s+/gi, (m, verb) => {
+        const base = verb.toLowerCase().replace(/ing$/, '');
+        const conjugated = base.endsWith('e') ? base + 's' : base + 's';
+        logs.push(`Fixed: participial "${verb}"`);
+        return `. This ${conjugated} `;
+    });
     
     // ===========================================
     // Fix lowercase after period
