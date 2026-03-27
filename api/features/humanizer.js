@@ -57,7 +57,7 @@ const WORD_ALTERNATIVES = {
     "subsequently": { 1: "then", 2: "later", 3: "afterward" },
     "consequently": { 1: "so", 2: "as a result", 3: "therefore" },
     "additionally": { 1: "also", 2: "plus", 3: "moreover" },
-    "proactively": { 1: "ahead of time", 2: "in advance", 3: "preventively" },
+    "proactively": { 1: "early on", 2: "in advance", 3: "preemptively" },
     "readily": { 1: "easily", 2: "quickly", 3: "promptly" },
     
     // Nouns
@@ -433,6 +433,24 @@ function postProcess(text, logs) {
     // Fix grammar errors
     // ===========================================
     result = result.replace(/\ba ([aeiou])/gi, 'an $1'); // "a important" → "an important"
+    
+    // ===========================================
+    // Fix participial phrases: ", extending X" → ". This extends X"
+    // ===========================================
+    const participials = ['extending', 'establishing', 'creating', 'forcing', 'pushing', 
+                          'turning', 'making', 'causing', 'driving', 'putting', 'leaving',
+                          'placing', 'weakening', 'strengthening', 'increasing', 'reducing',
+                          'leading', 'resulting', 'producing', 'generating', 'sparking'];
+    
+    for (const verb of participials) {
+        const pattern = new RegExp(`,\\s*${verb}\\s+`, 'gi');
+        if (pattern.test(result)) {
+            const base = verb.replace(/ing$/, '');
+            const conjugated = base.endsWith('e') ? base + 's' : base + 'es';
+            result = result.replace(pattern, `. This ${conjugated} `);
+            logs.push(`Fixed: participial "${verb}"`);
+        }
+    }
     
     // ===========================================
     // Fix lowercase after period
