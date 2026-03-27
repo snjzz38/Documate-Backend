@@ -67,9 +67,14 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
 
     const isApa = style.includes('apa');
     const isMla = style.includes('mla');
-    const title = type === 'footnotes' ? 'Notes' : isMla ? 'Works Cited' : isApa ? 'References' : 'Bibliography';
+    const isFootnotes = type === 'footnotes';
 
-    const sorted = type === 'footnotes'
+    const title = isFootnotes ? 'Notes'
+        : isMla ? 'Works Cited'
+        : isApa ? 'References'
+        : 'Bibliography';
+
+    const sorted = isFootnotes
         ? (insertionOrder || sources)
         : [...sources].sort((a, b) => {
             const ka = (a.authors?.[0]?.family || a.author || 'zzz').toLowerCase();
@@ -89,8 +94,8 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
         const citationPlain = s.citation || `${s.author || 'Unknown'} (${s.year || 'n.d.'}). ${s.title || 'Untitled'}.`;
         const citationHtml = renderEntry(citationPlain, s);
         const num = i + 1;
-    
-        if (type === 'footnotes') {
+
+        if (isFootnotes) {
             html += `<p style="${entryStyle}">${num}. ${citationHtml}</p>`;
             plain += `${num}. ${citationPlain}\n\n`;
         } else {
@@ -505,8 +510,9 @@ Return the corrected essay only:`;
     result.output = finalText;
     result.outputHtml = buildEssayHTML(finalText);
     result.citedSources = sources;
-
-    const bib = buildBibliographyHTML(sources, style, type, insertionOrder);
+    
+    // Always build references — 'in-text' and 'bibliography' both need a references list
+    const bib = buildBibliographyHTML(sources, style, type === 'footnotes' ? 'footnotes' : 'bibliography', insertionOrder);
     result.bibliographyHtml = bib.html;
     result.bibliographyPlain = bib.plain;
     result.type = 'cited';
