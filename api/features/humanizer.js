@@ -11,6 +11,164 @@ function getRandomTemperature() {
 }
 
 // ==========================================================================
+// WORD SELECTION ALGORITHM
+// Selects words based on temperature, complexity targets, and context
+// ==========================================================================
+
+// Word complexity tiers (1 = simple, 2 = medium, 3 = complex)
+const WORD_ALTERNATIVES = {
+    // Verbs
+    "utilize": { 1: "use", 2: "use", 3: "employ" },
+    "facilitate": { 1: "help", 2: "enable", 3: "support" },
+    "necessitate": { 1: "need", 2: "require", 3: "demand" },
+    "exacerbate": { 1: "worsen", 2: "intensify", 3: "aggravate" },
+    "exacerbates": { 1: "worsens", 2: "intensifies", 3: "aggravates" },
+    "exacerbated": { 1: "worsened", 2: "intensified", 3: "aggravated" },
+    "mitigate": { 1: "reduce", 2: "lessen", 3: "diminish" },
+    "encompasses": { 1: "includes", 2: "covers", 3: "spans" },
+    "prioritizing": { 1: "focusing on", 2: "emphasizing", 3: "prioritizing" },
+    "destabilize": { 1: "weaken", 2: "disrupt", 3: "undermine" },
+    "intensify": { 1: "worsen", 2: "increase", 3: "heighten" },
+    "intensifies": { 1: "worsens", 2: "increases", 3: "heightens" },
+    "encompasses": { 1: "includes", 2: "covers", 3: "involves" },
+    "undermines": { 1: "weakens", 2: "hurts", 3: "erodes" },
+    "constitutes": { 1: "is", 2: "makes up", 3: "forms" },
+    "comprises": { 1: "includes", 2: "contains", 3: "consists of" },
+    
+    // Adjectives
+    "comprehensive": { 1: "full", 2: "broad", 3: "thorough" },
+    "fundamental": { 1: "basic", 2: "core", 3: "central" },
+    "significant": { 1: "big", 2: "major", 3: "notable" },
+    "substantial": { 1: "large", 2: "major", 3: "considerable" },
+    "crucial": { 1: "key", 2: "vital", 3: "critical" },
+    "essential": { 1: "needed", 2: "necessary", 3: "vital" },
+    "vulnerable": { 1: "at risk", 2: "exposed", 3: "susceptible" },
+    "viable": { 1: "possible", 2: "workable", 3: "feasible" },
+    "robust": { 1: "strong", 2: "solid", 3: "sturdy" },
+    "paramount": { 1: "key", 2: "top", 3: "chief" },
+    "imperative": { 1: "needed", 2: "urgent", 3: "pressing" },
+    "prevalent": { 1: "common", 2: "widespread", 3: "pervasive" },
+    "catastrophic": { 1: "terrible", 2: "devastating", 3: "disastrous" },
+    "unprecedented": { 1: "new", 2: "unmatched", 3: "historic" },
+    
+    // Adverbs
+    "fundamentally": { 1: "basically", 2: "at its core", 3: "inherently" },
+    "significantly": { 1: "greatly", 2: "notably", 3: "markedly" },
+    "subsequently": { 1: "then", 2: "later", 3: "afterward" },
+    "consequently": { 1: "so", 2: "as a result", 3: "therefore" },
+    "additionally": { 1: "also", 2: "plus", 3: "moreover" },
+    "proactively": { 1: "ahead of time", 2: "in advance", 3: "preventively" },
+    "readily": { 1: "easily", 2: "quickly", 3: "promptly" },
+    
+    // Nouns
+    "methodology": { 1: "method", 2: "approach", 3: "framework" },
+    "paradigm": { 1: "model", 2: "pattern", 3: "framework" },
+    "infrastructure": { 1: "systems", 2: "structures", 3: "foundations" },
+    "ramifications": { 1: "effects", 2: "consequences", 3: "implications" },
+    "implications": { 1: "effects", 2: "results", 3: "consequences" },
+    
+    // Transitions (always simplify)
+    "furthermore": { 1: "also", 2: "and", 3: "in addition" },
+    "moreover": { 1: "also", 2: "and", 3: "besides" },
+    "nevertheless": { 1: "still", 2: "but", 3: "however" },
+    "nonetheless": { 1: "still", 2: "yet", 3: "even so" },
+    "hence": { 1: "so", 2: "thus", 3: "therefore" },
+    "whereby": { 1: "where", 2: "by which", 3: "through which" },
+};
+
+// Words to always replace (too AI-sounding regardless of complexity)
+const ALWAYS_REPLACE = {
+    "utilize": "use",
+    "utilizes": "uses",
+    "utilizing": "using",
+    "leverage": "use",
+    "leveraging": "using",
+    "burgeoning": "growing",
+    "myriad": "many",
+    "plethora": "many",
+    "delve": "explore",
+    "pivotal": "key",
+    "multifaceted": "complex",
+    "holistic": "complete",
+    "synergy": "cooperation",
+    "paradigm": "model",
+    "whereby": "where",
+    "thereof": "of it",
+    "thereby": "by this",
+    "henceforth": "from now on",
+};
+
+// Calculate target complexity based on temperature and position in text
+function getTargetComplexity(temperature, sentenceIndex, totalSentences) {
+    // Base complexity from temperature (0.5-1.5 → 1-3)
+    const tempComplexity = Math.min(3, Math.max(1, Math.round(temperature * 2)));
+    
+    // Add variation based on position (every 3rd sentence can be more complex)
+    const positionBonus = (sentenceIndex % 3 === 0) ? 0.5 : 0;
+    
+    // Random variation (-0.5 to +0.5)
+    const randomVariation = (Math.random() - 0.5);
+    
+    // Final complexity (1-3)
+    const final = Math.min(3, Math.max(1, Math.round(tempComplexity + positionBonus + randomVariation)));
+    
+    return final;
+}
+
+// Select best word based on complexity target
+function selectWord(word, targetComplexity) {
+    const lowerWord = word.toLowerCase();
+    
+    // Always replace these
+    if (ALWAYS_REPLACE[lowerWord]) {
+        return ALWAYS_REPLACE[lowerWord];
+    }
+    
+    // Check if we have alternatives
+    if (WORD_ALTERNATIVES[lowerWord]) {
+        const alternatives = WORD_ALTERNATIVES[lowerWord];
+        const selected = alternatives[targetComplexity] || alternatives[2];
+        
+        // Preserve original capitalization
+        if (word[0] === word[0].toUpperCase()) {
+            return selected.charAt(0).toUpperCase() + selected.slice(1);
+        }
+        return selected;
+    }
+    
+    return word;
+}
+
+// Apply word selection algorithm to text
+function applyWordSelection(text, temperature, logs) {
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    const totalSentences = sentences.length;
+    
+    const processedSentences = sentences.map((sentence, index) => {
+        const targetComplexity = getTargetComplexity(temperature, index, totalSentences);
+        
+        // Replace words based on target complexity
+        let processed = sentence;
+        
+        // First, always replace banned words
+        for (const [bad, good] of Object.entries(ALWAYS_REPLACE)) {
+            processed = processed.replace(new RegExp(`\\b${bad}\\b`, 'gi'), good);
+        }
+        
+        // Then apply complexity-based selection
+        for (const [word, alternatives] of Object.entries(WORD_ALTERNATIVES)) {
+            const selected = alternatives[targetComplexity] || alternatives[2];
+            processed = processed.replace(new RegExp(`\\b${word}\\b`, 'gi'), selected);
+        }
+        
+        return processed;
+    });
+    
+    logs.push(`Applied word selection with temperature ${temperature.toFixed(2)}`);
+    return processedSentences.join(' ');
+}
+
+// ==========================================================================
 // BANNED WORDS - Full words and common conjugations
 // ==========================================================================
 
@@ -353,46 +511,46 @@ export default async function handler(req, res) {
         
         logs.push(`Input: ${text.length} chars`);
         
-        // Step 1: Apply word swaps first
+        // Step 1: Apply initial word swaps
         let processed = applyWordSwaps(text);
         logs.push('Applied banned word replacements');
         
-        // Step 2: Send to Gemini for natural rewriting
-        const prompt = `You are a college student rewriting an essay to avoid plagiarism detection. Rewrite this text in your own words.
+        // Step 2: Random temperature for this request
+        const temperature = getRandomTemperature();
+        logs.push(`Temperature: ${temperature.toFixed(2)}`);
+        
+        // Step 3: Send to Gemini for natural rewriting
+        const prompt = `Rewrite this academic text while maintaining its meaning and scholarly tone.
 
 TEXT:
 "${processed}"
 
-IMPORTANT:
-- Write like a real person, not a formal essay
-- Mix up sentence lengths - some short, some longer
-- Don't be perfectly structured - real writing has some roughness
-- Use casual academic tone - smart but not robotic
-- Start sentences differently - vary between "The", "This", "When", "Because", subject-first, etc.
-- Combine some ideas, split others
-- Add small transitions like "And" or "But" at sentence starts occasionally
-- Use contractions naturally
-- NO semicolons, NO dashes
-- Avoid any "isn't X, it's Y" or "not just X, but Y" type contrasts
+REWRITING RULES:
+1. Keep the academic register but make it flow naturally
+2. Vary sentence structure - mix short (8-12 words) with medium (15-20 words) and occasional longer ones
+3. Use different sentence openers - rotate between subject-first, "When...", "Because...", "This...", etc.
+4. Use contractions where natural: "it's", "don't", "can't", "won't"
+5. Connect ideas with: and, but, because, while, since, although, as
+6. NO semicolons or em dashes
+7. NO patterns like "isn't X, it's Y" or "not just X, but Y" or "doesn't just X, it Y"
+8. When making a point, state it directly without contrasting what it "isn't"
 
-Just rewrite it naturally. Output ONLY the rewritten text.`;
+Output ONLY the rewritten text, nothing else.`;
 
         logs.push('Sending to Gemini...');
         
-        // Random temperature for varied outputs
-        const temperature = getRandomTemperature();
-        logs.push(`Temperature: ${temperature.toFixed(2)}`);
-        
-        // GeminiAPI.chat returns a string directly
         const result_raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
         let result = result_raw.trim().replace(/^["']|["']$/g, '');
         
         logs.push(`Gemini response (first 150 chars): ${result.substring(0, 150)}...`);
         
-        // Step 3: Post-process to fix remaining patterns
+        // Step 4: Apply word selection algorithm based on temperature
+        result = applyWordSelection(result, temperature, logs);
+        
+        // Step 5: Post-process to fix remaining patterns
         result = postProcess(result, logs);
         
-        // Step 4: Apply word swaps again (AI might reintroduce some)
+        // Step 6: Final word swap pass (catch anything AI reintroduced)
         result = applyWordSwaps(result);
         
         logs.push(`Final: ${result.length} chars`);
