@@ -52,12 +52,11 @@ const WORD_ALTERNATIVES = {
     "unprecedented": { 1: "new", 2: "unmatched", 3: "historic" },
     
     // Adverbs
-    "fundamentally": { 1: "basically", 2: "at its core", 3: "inherently" },
+    "fundamentally": { 1: "basically", 2: "really", 3: "inherently" },
     "significantly": { 1: "greatly", 2: "notably", 3: "markedly" },
     "subsequently": { 1: "then", 2: "later", 3: "afterward" },
     "consequently": { 1: "so", 2: "as a result", 3: "therefore" },
     "additionally": { 1: "also", 2: "plus", 3: "moreover" },
-    "proactively": { 1: "early on", 2: "in advance", 3: "preemptively" },
     "readily": { 1: "easily", 2: "quickly", 3: "promptly" },
     
     // Nouns
@@ -403,6 +402,12 @@ function postProcess(text, logs) {
         return `${noun} between ${y}.`;
     });
     
+    // "the choice isn't between X, but between Y" → "the choice is between Y"
+    result = result.replace(/the (critical |basic |real |fundamental )?(choice|decision) isn't between ([^,]+),\s*but between ([^\.]+)\./gi, (m, adj, noun, x, y) => {
+        logs.push('Fixed: the choice isn\'t between X but between Y');
+        return `the ${adj || ''}${noun} is between ${y}.`;
+    });
+    
     // ===========================================
     
     // Split pattern: "X isn't Y. It's Z" or "X isn't Y. it's Z"
@@ -446,7 +451,15 @@ function postProcess(text, logs) {
         const pattern = new RegExp(`,\\s*${verb}\\s+`, 'gi');
         if (pattern.test(result)) {
             const base = verb.replace(/ing$/, '');
-            const conjugated = base.endsWith('e') ? base + 's' : base + 'es';
+            // Proper conjugation: extend→extends, create→creates, push→pushes
+            let conjugated;
+            if (base.endsWith('e')) {
+                conjugated = base + 's'; // create → creates
+            } else if (base.endsWith('sh') || base.endsWith('ch') || base.endsWith('ss') || base.endsWith('x')) {
+                conjugated = base + 'es'; // push → pushes
+            } else {
+                conjugated = base + 's'; // turn → turns
+            }
             result = result.replace(pattern, `. This ${conjugated} `);
             logs.push(`Fixed: participial "${verb}"`);
         }
