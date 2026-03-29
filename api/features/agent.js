@@ -83,8 +83,10 @@ const detectTaskFormat = userTask => {
     if (/\?\s*$|\?\s*\n|(?:^|\n)\s*(?:a\)|b\)|1\.|2\.)|\banswer\b|\brespond to\b/im.test(userTask)) return 'questions';
     // List tasks
     if (/\b(?:list|bullet|enumerate|outline)\b/i.test(userTask) && !/essay/i.test(userTask)) return 'list';
+    // Paragraph/short-form tasks
+    if (/\b(?:paragraph|short answer|in one sentence|in a sentence|briefly explain|brief explanation|brief response|short paragraph)\b/i.test(userTask) && !/essay/i.test(userTask)) return 'paragraph';
     // Essay only when explicitly requested
-    if (/\b(?:essay|argue|argument|thesis|discuss at length|write about)\b/i.test(userTask)) return 'essay';
+    if (/\b(?:essay|argue|argument|thesis|discuss at length)\b/i.test(userTask)) return 'essay';
     // Contains a structured rubric/expectation table — treat as structured assignment
     if (/\bexpectation\b|\brubric\b|\bL1\b|\bL2\b|\bL3\b|\bL4\b/i.test(userTask)) return 'structured';
     return 'general';
@@ -295,6 +297,13 @@ This task has specific sections or steps. Output each section with its label, in
 - Clear, organized structure
 - Plain text only — no markdown`;
 
+                    } else if (fmt === 'paragraph') {
+                        formatInstructions = `FORMAT — PARAGRAPH RESPONSE:
+- Write a single well-developed paragraph (or the number of paragraphs the task specifies)
+- Do NOT expand into a multi-section essay with introduction/body/conclusion headings
+- Do NOT add a title or section labels unless the task asks for them
+- Plain text only — no markdown`;
+
                     } else if (fmt === 'essay') {
                         formatInstructions = `FORMAT — ACADEMIC ESSAY (apply all of these):
 STRUCTURE:
@@ -310,11 +319,17 @@ WRITING QUALITY:
 
                     } else {
                         // General: mirror the exact structure of the task
-                        formatInstructions = `FORMAT:
-- Carefully read the task and identify what format/structure it expects
-- Replicate that structure exactly — do NOT default to essay format
-- If the task has labeled sections, use those same labels
-- If it asks for a table or columns, present the information in those columns
+                        formatInstructions = `FORMAT — MATCH THE TASK EXACTLY:
+STEP 1: Identify what output format the task is asking for (e.g. a letter, a list, Q&A, a paragraph, a table, a short answer).
+STEP 2: Produce ONLY that format.
+
+STRICT RULES:
+- If the task asks for 1 paragraph — write 1 paragraph, NOT an essay
+- If the task asks for a letter — write a letter
+- If the task asks for Q&A or numbered questions — answer each question directly and separately
+- If the task has labeled sections — use those exact labels
+- NEVER write a multi-section academic essay (no Introduction/Body/Conclusion structure) unless the task explicitly uses the word "essay"
+- Do NOT add titles, headers, or extra sections the task did not ask for
 - Plain text — no markdown unless the task specifically requires it`;
                     }
 
@@ -423,7 +438,7 @@ Complete the task now:`;
                         citationFormat = `Superscript footnotes numbered sequentially (¹²³…). New number for each use.`;
                     }
 
-                    const prompt = `Insert APA in-text citations into the essay below using ONLY the sources listed.
+                    const prompt = `Insert citations into the text below using ONLY the sources listed.
 
 ESSAY:
 ${input}
