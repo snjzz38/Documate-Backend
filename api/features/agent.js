@@ -156,15 +156,41 @@ const buildEssayHTML = text => {
     if (!text) return '<i>No output.</i>';
     const base = `font-family:'Times New Roman',Times,serif;font-size:12pt;line-height:2;color:#000;`;
     const hasHtml = /<[a-z][\s\S]*>/i.test(text);
-    if (hasHtml) {
-        return `<div style="${base}">` +
-            text.split(/\n\n+/).map(p => `<p style="margin:0;text-indent:36px;">${p.replace(/\n/g,'<br>')}</p>`).join('\n') +
-            `</div>`;
-    }
+    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // All-caps line (optional trailing colon), e.g. "ARGUMENTS FOR (EMBRACE):" or "DECISION"
+    const isHeader = s => /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/.test(s.trim()) && s.trim().length < 80;
+    // Bullet/dash list item
+    const isBullet = s => /^\s*[-•]\s+/.test(s);
+
+    const renderBlock = block => {
+        const lines = block.split(/\n/);
+        // Single-line header
+        if (lines.length === 1 && isHeader(lines[0])) {
+            const content = hasHtml ? lines[0] : esc(lines[0]);
+            return `<p style="margin:20px 0 4px 0;font-weight:bold;text-indent:0;">${content}</p>`;
+        }
+        // Block where every non-empty line is a bullet
+        if (lines.every(l => !l.trim() || isBullet(l))) {
+            return lines.filter(l => l.trim()).map(l => {
+                const content = hasHtml ? l : esc(l);
+                return `<p style="margin:0;text-indent:0;padding-left:24px;">${content}</p>`;
+            }).join('\n');
+        }
+        // Multi-line block starting with a header, rest is content
+        if (isHeader(lines[0]) && lines.length > 1) {
+            const header = hasHtml ? lines[0] : esc(lines[0]);
+            const rest = lines.slice(1).join('\n');
+            const content = hasHtml ? rest : esc(rest);
+            return `<p style="margin:20px 0 4px 0;font-weight:bold;text-indent:0;">${header}</p>` +
+                   `<p style="margin:0;text-indent:36px;">${content.replace(/\n/g,'<br>')}</p>`;
+        }
+        // Regular essay paragraph
+        const content = hasHtml ? block.replace(/\n/g,'<br>') : esc(block).replace(/\n/g,'<br>');
+        return `<p style="margin:0;text-indent:36px;">${content}</p>`;
+    };
+
     return `<div style="${base}">` +
-        text.split(/\n\n+/).map(p =>
-            `<p style="margin:0;text-indent:36px;">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>`
-        ).join('\n') +
+        text.split(/\n\n+/).map(renderBlock).join('\n') +
         `</div>`;
 };
 
@@ -253,27 +279,29 @@ export default async function handler(req, res) {
                     let formatInstructions = '';
 
                     if (fmt === 'table') {
-                        formatInstructions = `FORMAT — THIS IS A STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these labeled sections:
+                        formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. You MUST output these EXACT header lines, each on their own line, in this order:
 
 ARGUMENTS FOR (EMBRACE):
-[4-6 distinct arguments in favour, each 2-3 sentences. Cover: health benefits, scientific progress, economic benefits, parental rights, reduced suffering. Each argument on its own line starting with a dash.]
+- [argument 1, 2-3 sentences]
+- [argument 2, 2-3 sentences]
+- [argument 3, 2-3 sentences]
+- [argument 4, 2-3 sentences]
 
 ARGUMENTS AGAINST (PANIC):
-[4-6 distinct arguments against, each 2-3 sentences. Cover: ethical concerns, safety/off-target effects, social inequality, eugenics risk, unknown long-term effects, commodification of life. Each argument on its own line starting with a dash.]
+- [argument 1, 2-3 sentences]
+- [argument 2, 2-3 sentences]
+- [argument 3, 2-3 sentences]
+- [argument 4, 2-3 sentences]
 
 DECISION:
-Panic.
-[or: Embrace. — choose one and write it clearly as the first word]
+[Write ONLY "Panic." or "Embrace." as the first word, then one sentence explaining the choice]
 
 JUSTIFICATION:
-[Write a well-structured justification with:
- - Opening sentence that EXPLICITLY states your decision: "I choose to [panic/embrace] regarding designer babies because..."
- - 3-4 paragraphs, each with a clear topic sentence
- - Cover multiple dimensions: health/safety risks, ethical concerns, societal impact, economic factors
- - Each paragraph: topic sentence → specific evidence/reasoning → connection to decision
- - Final paragraph: synthesis of why the risks/benefits tip the scale toward your decision
- - Do NOT include citations — they will be added in the next step
- - Do NOT include a references section]`;
+[3-4 paragraphs. First sentence must explicitly state: "I choose to [panic/embrace] because..."
+Each paragraph: topic sentence → evidence/reasoning → link back to decision.
+Do NOT include citations or a reference section here.]
+
+CRITICAL: The four header lines (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim in your output. Do NOT skip them, rename them, or merge the sections into prose.`;
 
                     } else if (fmt === 'steps' || fmt === 'structured') {
                         // Parse what each step actually asks for and replicate the structure
@@ -367,16 +395,21 @@ Complete the task now:`;
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
 
+                    // Detect if input has structured section headers (all-caps lines like "ARGUMENTS FOR (EMBRACE):")
+                    const hasStructuredHeaders = /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/m.test(input);
+
                     const mockReq = { method: 'POST', body: { text: input, tone: 'Academic' } };
                     let humanizedResult = '';
                     const mockRes = { setHeader:()=>{}, status:()=>({ end:()=>{}, json:d=>{ humanizedResult=d; } }) };
                     await humanizerHandler(mockReq, mockRes);
 
+                    const fallbackPrompt = hasStructuredHeaders
+                        ? `Rewrite the text below naturally with academic quality. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge sections into prose. Plain text only.\n\n${input}`
+                        : `Rewrite naturally while keeping academic quality. Plain text only.\n\n${input}`;
+
                     const humanized = (humanizedResult.success && humanizedResult.result)
                         ? humanizedResult.result
-                        : stripMarkdown(await GeminiAPI.chat(
-                            `Rewrite naturally while keeping academic quality. Plain text only.\n\n${input}`, GEMINI
-                        ));
+                        : stripMarkdown(await GeminiAPI.chat(fallbackPrompt, GEMINI));
 
                     result.output = humanized;
                     result.outputHtml = buildEssayHTML(humanized);
@@ -438,9 +471,11 @@ Complete the task now:`;
                         citationFormat = `Superscript footnotes numbered sequentially (¹²³…). New number for each use.`;
                     }
 
+                    const hasStructuredHeadersCite = /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/m.test(input);
+
                     const prompt = `Insert citations into the text below using ONLY the sources listed.
 
-ESSAY:
+TEXT:
 ${input}
 
 SOURCES — copy the CITE-AS key verbatim. Do not invent or modify author names:
@@ -456,8 +491,9 @@ RULES:
 5. After citing, ensure the paragraph ends with your own analytical sentence — never a bare citation
 6. Do NOT add a references section, bibliography, or source list at the end
 7. Do NOT cite sources not in the list above
+${hasStructuredHeadersCite ? '8. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge or rename sections' : ''}
 
-Return ONLY the essay with citations inserted:`;
+Return ONLY the text with citations inserted:`;
 
                     let citedText = await GeminiAPI.chat(prompt, GEMINI);
                     citedText = stripMarkdown(stripRefs(stripSourceAppendix(citedText)));
