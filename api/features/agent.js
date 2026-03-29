@@ -142,12 +142,10 @@ export default async function handler(req, res) {
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
             if (options.enableWrite !== false) {
                 steps.push({ tool: 'WRITE', action: 'Write essay' });
-                steps.push({ tool: 'REFINE', action: 'Strengthen argument' });
             }
             if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
             if (options.enableCite) steps.push({ tool: 'CITE', action: `Add ${options.citationType || 'in-text'} citations` });
             if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Insert quotes with transitions' });
-            steps.push({ tool: 'PROOFREAD', action: 'Polish and improve' });
             if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Grade work' });
             return res.status(200).json({ success: true, plan: { steps } });
         }
@@ -279,51 +277,6 @@ export default async function handler(req, res) {
                     break;
                 }
 
-             case 'REFINE': {
-                const input = context.previousOutput || '';
-                if (!input) { result.output = ''; result.outputHtml = ''; break; }
-            
-                const taskLower = (context.task || '').toLowerCase();
-                const isQuestions = /\?\s*$|\?\s*\n|questions?|answer|a\)|b\)|1\.|2\./i.test(context.task || '');
-            
-                const refinePrompt = isQuestions
-                    ? `Review these question answers and improve them.
-            
-            ANSWERS:
-            ${input}
-            
-            FOCUS:
-            1. Make each answer more complete and specific
-            2. Ensure each part (a, b, etc.) is clearly addressed
-            3. Add relevant detail or analysis where answers are thin
-            4. Keep the same question structure and labels
-            5. Plain text only - no markdown
-            
-            Return the improved answers:`
-                    : `Improve this academic writing's argument quality.
-            
-            ESSAY:
-            ${input}
-            
-            FOCUS:
-            1. Strengthen the thesis — clear strong position, not just describing the issue
-            2. Each body paragraph develops ONE argument only — eliminate repetition
-            3. Replace vague phrases like "this shows", "this highlights" with specific explanations of WHY the evidence matters
-            4. Every piece of evidence must connect explicitly to the thesis
-            5. Transitions must show logical progression
-            6. Conclusion must synthesize — not restate the introduction
-            7. Keep ALL original content and ideas — only sharpen logic and language
-            8. Plain text only - no markdown, no bold, no headers
-            
-            Return the improved writing:`;
-            
-                const refined = stripMarkdown(stripRefs(await GeminiAPI.chat(refinePrompt, GEMINI)));
-                result.output = refined;
-                result.outputHtml = buildEssayHTML(refined);
-                result.type = 'text';
-                break;
-            }
-                    
                 case 'HUMANIZE': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
@@ -406,7 +359,7 @@ case 'CITE': {
         citationFormat = `Use superscript numbers at end of cited sentences. Each citation occurrence gets its OWN unique sequential number even if the same source is cited again. Number every citation sequentially from 1 upward — so if source [3] appears 3 times it gets three different numbers like ³ ⁷ ¹¹.`;
     }
 
-    const prompt = `Add scholarly citations to this essay with strong signposting.
+    const prompt = `Add scholarly citations to this essay, integrating them with varied, natural academic prose.
 
 ESSAY:
 ${input}
@@ -416,25 +369,29 @@ ${sourceList}
 
 CITATION FORMAT: ${citationFormat}
 
-INSTRUCTIONS:
-1. Add citations ONLY where claims genuinely need evidence
-2. Each citation must directly support the SPECIFIC claim it follows — not just be topically related
-3. After each citation, explain in ONE specific sentence HOW this source proves your point
-4. NEVER mention an author's name in the text without immediately following it with a citation number
-5. If you reference a source by name (e.g. "Smith argues"), you MUST add the superscript right after that sentence
-6. Do NOT drop citations into sentences that already make the point clearly
-7. Distribute citations naturally — frontload evidence in argumentative paragraphs
-8. Use varied signposting: "As X argues,", "X's research confirms that,", "X found that,"
-9. Do NOT add a bibliography section
-10. Ensure format matches: ${citationFormat}
+CITATION INTEGRATION RULES:
+1. Add citations ONLY where claims genuinely need evidence — not every sentence
+2. Each citation must directly support the SPECIFIC claim it follows
+3. VARY how you introduce citations — rotate through these patterns and never repeat the same opener in consecutive paragraphs:
+   - Paraphrase the finding, then cite: "Research shows X (Author, Year)."
+   - Author as subject: "Author (Year) found that..."
+   - Author + verb variety: "Author (Year) demonstrated / established / confirmed / argued / observed..."
+   - Embedded citation mid-sentence: "...a phenomenon that Author (Year) attributes to..."
+   - Comparative framing: "Building on this, Author (Year) showed..."
+4. PARAPHRASE by default — synthesize findings in your own words. Only use a direct quote when the original wording is uniquely precise or carries specific technical meaning that paraphrasing would lose
+5. When a direct quote IS used, keep it short (under 20 words) and follow it with a sentence of your own analysis explaining what it means and why it matters to the argument
+6. NEVER end a paragraph with a direct quote or a bare citation — always close with your own analytical sentence that connects the evidence back to the paragraph's main claim
+7. Ensure each paragraph ends by advancing the argument forward, not restating what was just said
+8. Do NOT add a bibliography section
+9. Ensure format matches: ${citationFormat}
 
 Return ONLY the essay with citations inserted:`;
 
     let citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
 
-    // Second pass: fix any author mentions missing a superscript
+    // Second pass: fix any author mentions missing a superscript (footnotes only)
     if (type === 'footnotes') {
-        const prompt = `Review this essay and fix any author mentions that are missing a footnote superscript number.
+        const fixPrompt = `Review this essay and fix any author mentions that are missing a footnote superscript number.
 
 ESSAY:
 ${citedText}
@@ -451,7 +408,7 @@ RULES:
 
 Return the corrected essay only:`;
 
-        citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+        citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(fixPrompt, GEMINI)));
     }
 
     // For footnotes: extract insertion order and rebuild sequential numbering
@@ -558,18 +515,6 @@ Return the essay with quotes inserted:`;
                     const withQuotes = stripMarkdown(await GeminiAPI.chat(prompt, GEMINI));
                     result.output = withQuotes;
                     result.outputHtml = buildEssayHTML(withQuotes);
-                    result.type = 'text';
-                    break;
-                }
-
-                case 'PROOFREAD': {
-                    const input = context.previousOutput || '';
-                    if (!input) { result.output = ''; result.outputHtml = ''; break; }
-
-                    const prompt = `Proofread and polish this academic essay. Fix grammar, spelling, punctuation. Improve awkward phrasing. Keep ALL existing content, citations, and quotes. Plain text only - no markdown.\n\nESSAY:\n${input}\n\nReturn the polished essay:`;
-                    const polished = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
-                    result.output = polished;
-                    result.outputHtml = buildEssayHTML(polished);
                     result.type = 'text';
                     break;
                 }
