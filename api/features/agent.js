@@ -279,29 +279,37 @@ export default async function handler(req, res) {
                     let formatInstructions = '';
 
                     if (fmt === 'table') {
-                        formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. You MUST output these EXACT header lines, each on their own line, in this order:
+                        formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these four sections with their headers on their own lines:
 
 ARGUMENTS FOR (EMBRACE):
-- [argument 1, 2-3 sentences]
-- [argument 2, 2-3 sentences]
-- [argument 3, 2-3 sentences]
-- [argument 4, 2-3 sentences]
+- [argument 1: 2-3 sentences making a distinct case. Cover ONE of: health/disease prevention, scientific progress, economic savings, parental rights, reduced suffering]
+- [argument 2: different angle from above]
+- [argument 3: different angle from above]
+- [argument 4: different angle from above]
 
 ARGUMENTS AGAINST (PANIC):
-- [argument 1, 2-3 sentences]
-- [argument 2, 2-3 sentences]
-- [argument 3, 2-3 sentences]
-- [argument 4, 2-3 sentences]
+- [argument 1: 2-3 sentences making a distinct case. Cover ONE of: off-target safety risks, ethical/eugenics concerns, social inequality, unknown long-term effects, commodification of life]
+- [argument 2: different angle from above]
+- [argument 3: different angle from above]
+- [argument 4: different angle from above]
 
 DECISION:
-[Write ONLY "Panic." or "Embrace." as the first word, then one sentence explaining the choice]
+[Write "Panic." or "Embrace." as the FIRST word. Then one sentence stating why this side outweighs the other.]
 
 JUSTIFICATION:
-[3-4 paragraphs. First sentence must explicitly state: "I choose to [panic/embrace] because..."
-Each paragraph: topic sentence → evidence/reasoning → link back to decision.
-Do NOT include citations or a reference section here.]
+[Write 3-4 paragraphs. Requirements:
+ - First sentence: "I choose to [panic/embrace] because..." — state the decision explicitly
+ - Each paragraph: one clear topic sentence, then reasoning, then tie back to the decision
+ - Final paragraph: strong synthesis — explain WHY the risks/benefits tip the scale, not just that "it warrants further study"
+ - Do NOT include citations or a reference section]
 
-CRITICAL: The four header lines (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim in your output. Do NOT skip them, rename them, or merge the sections into prose.`;
+WRITING QUALITY (apply to ALL sections above):
+- Vary sentence openings — NEVER start two consecutive sentences with "Because", "Since", "Although", or the same word
+- Mix sentence lengths: some short and direct, some longer and analytical
+- In the justification, SHOW how the arguments interconnect — don't just list them in sequence
+- Avoid weak filler endings like "warrants consideration" or "requires further exploration"
+
+CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim in your output on their own lines. Do NOT skip, rename, or merge them into prose.`;
 
                     } else if (fmt === 'steps' || fmt === 'structured') {
                         // Parse what each step actually asks for and replicate the structure
@@ -395,22 +403,59 @@ Complete the task now:`;
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
 
-                    // Detect if input has structured section headers (all-caps lines like "ARGUMENTS FOR (EMBRACE):")
-                    const hasStructuredHeaders = /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/m.test(input);
+                    // Run text through humanizerHandler
+                    const runHumanizer = async text => {
+                        if (!text.trim()) return text;
+                        let out = '';
+                        const mockReq = { method: 'POST', body: { text } };
+                        const mockRes = { setHeader:()=>{}, status:()=>({ end:()=>{}, json:d=>{ out=d; } }) };
+                        await humanizerHandler(mockReq, mockRes);
+                        return (out.success && out.result) ? out.result : text;
+                    };
 
-                    const mockReq = { method: 'POST', body: { text: input, tone: 'Academic' } };
-                    let humanizedResult = '';
-                    const mockRes = { setHeader:()=>{}, status:()=>({ end:()=>{}, json:d=>{ humanizedResult=d; } }) };
-                    await humanizerHandler(mockReq, mockRes);
+                    // Split into {header, lines[]} pairs so headers are never passed to the humanizer
+                    const isHdr = s => /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/.test(s.trim()) && s.trim().length < 80;
+                    const inputLines = input.split('\n');
+                    const sections = [];
+                    let cur = null;
+                    for (const line of inputLines) {
+                        if (isHdr(line)) {
+                            if (cur) sections.push(cur);
+                            cur = { header: line.trim(), lines: [] };
+                        } else {
+                            if (!cur) cur = { header: '', lines: [] };
+                            cur.lines.push(line);
+                        }
+                    }
+                    if (cur) sections.push(cur);
 
-                    const fallbackPrompt = hasStructuredHeaders
-                        ? `Rewrite the text below naturally with academic quality. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge sections into prose. Plain text only.\n\n${input}`
-                        : `Rewrite naturally while keeping academic quality. Plain text only.\n\n${input}`;
+                    // Humanize each section's body independently
+                    const humanizedSections = await Promise.all(sections.map(async section => {
+                        const bodyText = section.lines.join('\n').trim();
+                        if (!bodyText) return section.header;
 
-                    const humanized = (humanizedResult.success && humanizedResult.result)
-                        ? humanizedResult.result
-                        : stripMarkdown(await GeminiAPI.chat(fallbackPrompt, GEMINI));
+                        const bodyLines = section.lines.filter(l => l.trim());
+                        const isBulletSection = bodyLines.length > 0 && bodyLines.every(l => /^\s*[-•]\s+/.test(l));
 
+                        let humanizedBody;
+                        if (isBulletSection) {
+                            // Humanize each bullet individually, restore the dash prefix
+                            const humanizedBullets = await Promise.all(
+                                bodyLines.map(async l => {
+                                    const bulletText = l.replace(/^\s*[-•]\s+/, '');
+                                    const h = await runHumanizer(bulletText);
+                                    return `- ${h}`;
+                                })
+                            );
+                            humanizedBody = humanizedBullets.join('\n');
+                        } else {
+                            humanizedBody = await runHumanizer(bodyText);
+                        }
+
+                        return section.header ? `${section.header}\n${humanizedBody}` : humanizedBody;
+                    }));
+
+                    const humanized = humanizedSections.join('\n\n');
                     result.output = humanized;
                     result.outputHtml = buildEssayHTML(humanized);
                     result.type = 'text';
@@ -471,7 +516,8 @@ Complete the task now:`;
                         citationFormat = `Superscript footnotes numbered sequentially (¹²³…). New number for each use.`;
                     }
 
-                    const hasStructuredHeadersCite = /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/m.test(input);
+                    const citeFmt = detectTaskFormat(context.task || '');
+                    const hasStructuredHeadersCite = citeFmt === 'table' || citeFmt === 'steps' || citeFmt === 'structured';
 
                     const prompt = `Insert citations into the text below using ONLY the sources listed.
 
