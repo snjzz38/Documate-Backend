@@ -19,12 +19,27 @@ const extractTopic = text => {
     return (text.toLowerCase().match(/\b[a-z]{4,}\b/g)||[]).filter(w=>!skip.has(w)).slice(0,5).join(' ') || text.substring(0,80);
 };
 
+// Extracts last name(s) only — handles "First Last", structured authors array, or plain strings
 const fmtAuthor = (s, style = 'apa') => {
     if (s.authors?.length && s.authors[0].family) {
         if (style === 'mla') return s.authors.length > 2 ? `${s.authors[0].family} et al.` : s.authors.map(a=>a.family).join(' and ');
         return s.authors.length > 2 ? `${s.authors[0].family} et al.` : s.authors.map(a=>a.family).join(' & ');
     }
-    return s.author || s.displayName || 'Unknown';
+    // Fall back to plain author string — extract last name(s)
+    const raw = s.author || s.displayName || '';
+    if (!raw) return 'Unknown';
+    // Handle "Last, First" or "First Last" — take last token as surname
+    const extractLast = name => {
+        const parts = name.trim().split(/\s+/);
+        return parts[parts.length - 1];
+    };
+    // Handle "Author A, Author B" or "Author A & Author B"
+    const names = raw.split(/,\s*(?=[A-Z])|(?:\s+&\s+|\s+and\s+)/i).map(n => n.trim()).filter(Boolean);
+    if (names.length === 0) return 'Unknown';
+    if (names.length === 1) return extractLast(names[0]);
+    if (names.length > 2) return `${extractLast(names[0])} et al.`;
+    const sep = style === 'mla' ? ' and ' : ' & ';
+    return names.map(extractLast).join(sep);
 };
 
 const renderEntry = (plainCitation, source) => {
@@ -34,25 +49,21 @@ const renderEntry = (plainCitation, source) => {
 
     let text = plainCitation;
 
-    // 1. Mark journal for italics before escaping
     if (journal) {
         const ej = journal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         text = text.replace(new RegExp(`(${ej})`), '\x00I\x00$1\x00/I\x00');
     }
 
-    // 2. Mark DOI URL — keep the URL text inside the placeholder
     if (doiUrl) {
         const eu = doiUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         text = text.replace(new RegExp(eu), '\x00A\x00' + doiUrl + '\x00/A\x00');
     }
 
-    // 3. Escape HTML
     text = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
-    // 4. Restore tags
     text = text
         .replace(/\x00I\x00/g, '<i>')
         .replace(/\x00\/I\x00/g, '</i>')
@@ -110,17 +121,14 @@ const buildBibliographyHTML = (sources, style, type, insertionOrder = null) => {
 
 const buildEssayHTML = text => {
     if (!text) return '<i>No output.</i>';
-    // Check if text already contains HTML tags (e.g. <sup> from citations)
     const hasHtml = /<[a-z][\s\S]*>/i.test(text);
     if (hasHtml) {
-        // Already has HTML — just wrap in paragraphs without escaping
         return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
             text.split(/\n\n+/).map(p =>
                 `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/\n/g, '<br>')}</p>`
             ).join('\n') +
             `</div>`;
     }
-    // Plain text — safe to escape
     return `<div style="font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #000;">` +
         text.split(/\n\n+/).map(p =>
             `<p style="margin:0 0 0 0; text-indent:36px;">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>`
@@ -182,7 +190,7 @@ export default async function handler(req, res) {
                     break;
                 }
 
-                 case 'WRITE': {
+                case 'WRITE': {
                     const { researchSources = [], task: userTask, uploadedFile, uploadedFiles = [] } = context;
                 
                     const sourceInfo = researchSources.slice(0, 10).map((s, i) =>
@@ -205,7 +213,6 @@ export default async function handler(req, res) {
                     const fileContext = otherFiles.length > 0
                         ? `\nUSER FILES: ${otherFiles.map(f => f.name).join(', ')} - consider this context.\n` : '';
                 
-                    // Detect task type to avoid forcing essay format on everything
                     const taskLower = userTask.toLowerCase();
                     const isQuestions = /\?\s*$|\?\s*\n|questions?|answer|respond to|a\)|b\)|1\.|2\./i.test(userTask);
                     const isList = /list|bullet|enumerate|summarize|outline/i.test(taskLower);
@@ -235,6 +242,17 @@ export default async function handler(req, res) {
                 - Introduction: context + clear argumentative thesis as the last sentence
                 - Body Paragraphs: each paragraph = ONE main argument with topic sentence, evidence, and explanation of WHY it matters
                 - Conclusion: reinforce the argument, do not just summarize
+                
+                SENTENCE VARIETY:
+                - Vary sentence openings — do NOT repeatedly begin with "Author (Year) found/note/argue"
+                - Mix simple, compound, and complex sentences
+                - Integrate evidence fluidly rather than always using "Author found X"
+                - Each paragraph's closing sentence must advance to the next idea or broaden the implication — NOT restate the paragraph's main point
+                
+                EVIDENCE USE:
+                - Paraphrase at least 75% of source material in your own words
+                - Use direct quotes sparingly, only when the exact wording is uniquely important
+                - After citing evidence, explain in concrete terms WHY it matters to the argument
                 
                 STYLE:
                 - Be concise and direct — avoid filler phrases
@@ -276,7 +294,7 @@ export default async function handler(req, res) {
                     result.type = 'text';
                     break;
                 }
-
+                    
                 case 'HUMANIZE': {
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
@@ -296,75 +314,81 @@ export default async function handler(req, res) {
                     break;
                 }
 
-case 'CITE': {
-    const input = context.previousOutput || '';
-    const sources = context.researchSources || [];
-    const style = options.citationStyle || 'apa7';
-    const type = options.citationType || 'in-text';
+                case 'CITE': {
+                    const sources = context.researchSources || [];
+                    const style = options.citationStyle || 'apa7';
+                    const type = options.citationType || 'in-text';
 
-    if (!sources.length) {
-        result.output = input;
-        result.outputHtml = buildEssayHTML(input);
-        result.citedSources = [];
-        result.bibliographyHtml = '';
-        result.type = 'cited';
-        break;
-    }
+                    // FIX: fall back to task text when previousOutput is empty (e.g. user pasted essay with Write disabled)
+                    const input = (context.previousOutput || '').trim() || (context.task || '').trim();
 
-    if (!input) {
-        const earlyBib = buildBibliographyHTML(sources, style, type);
-        result.output = '';
-        result.outputHtml = '';
-        result.citedSources = sources;
-        result.bibliographyHtml = earlyBib.html;
-        result.bibliographyPlain = earlyBib.plain;
-        result.type = 'cited';
-        break;
-    }
+                    // No sources at all — return input unchanged, still show bibliography (even if empty)
+                    if (!sources.length) {
+                        result.output = input;
+                        result.outputHtml = buildEssayHTML(input);
+                        result.citedSources = [];
+                        result.bibliographyHtml = '';
+                        result.bibliographyPlain = '';
+                        result.type = 'cited';
+                        break;
+                    }
 
-    const isApa = style.includes('apa');
-    const isMla = style.includes('mla');
+                    // No essay text — just return the bibliography alone
+                    if (!input) {
+                        const earlyBib = buildBibliographyHTML(sources, style, type);
+                        result.output = '';
+                        result.outputHtml = '';
+                        result.citedSources = sources;
+                        result.bibliographyHtml = earlyBib.html;
+                        result.bibliographyPlain = earlyBib.plain;
+                        result.type = 'cited';
+                        break;
+                    }
 
-    const needsCitation = sources.filter(s => s.doi && s.citationSource !== 'crossref');
-    if (needsCitation.length > 0) {
-        console.log('[Agent] CITE: fetching', needsCitation.length, 'missing citations');
-        const updated = await SourceFinderAPI.fetchAllCitations(needsCitation, style);
-        updated.forEach(u => {
-            if (u.citationSource !== 'crossref') return;
-            const orig = sources.find(s => s.doi === u.doi);
-            if (orig) {
-                orig.citation = u.citation;
-                orig.citationSource = 'crossref';
-                orig.volume = u.volume;
-                orig.issue = u.issue;
-                orig.pages = u.pages;
-                if (u.authors?.length) orig.authors = u.authors;
-            }
-        });
-    }
+                    const isApa = style.includes('apa');
+                    const isMla = style.includes('mla');
 
-    console.log('[Agent] CITE:', sources.filter(s => s.citationSource === 'crossref').length, '/', sources.length, 'Crossref');
+                    const needsCitation = sources.filter(s => s.doi && s.citationSource !== 'crossref');
+                    if (needsCitation.length > 0) {
+                        console.log('[Agent] CITE: fetching', needsCitation.length, 'missing citations');
+                        const updated = await SourceFinderAPI.fetchAllCitations(needsCitation, style);
+                        updated.forEach(u => {
+                            if (u.citationSource !== 'crossref') return;
+                            const orig = sources.find(s => s.doi === u.doi);
+                            if (orig) {
+                                orig.citation = u.citation;
+                                orig.citationSource = 'crossref';
+                                orig.volume = u.volume;
+                                orig.issue = u.issue;
+                                orig.pages = u.pages;
+                                if (u.authors?.length) orig.authors = u.authors;
+                            }
+                        });
+                    }
 
-    const sourceList = sources.slice(0, 12).map((s, i) => {
-        const author = fmtAuthor(s, isMla ? 'mla' : 'apa');
-        return `[${i+1}] ${author} (${s.year})\n   Title: "${s.title}"\n   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
-    }).join('\n\n');
+                    console.log('[Agent] CITE:', sources.filter(s => s.citationSource === 'crossref').length, '/', sources.length, 'Crossref');
 
-    let citationFormat = '';
-    if (type === 'in-text') {
-        if (isApa) citationFormat = `APA 7th: (Author, Year) or Author (Year)`;
-        else if (isMla) citationFormat = `MLA 9th: (Author) - no year`;
-        else citationFormat = `Chicago: (Author Year)`;
-    } else if (type === 'footnotes') {
-        citationFormat = `Use superscript numbers at end of cited sentences. Each citation occurrence gets its OWN unique sequential number even if the same source is cited again. Number every citation sequentially from 1 upward — so if source [3] appears 3 times it gets three different numbers like ³ ⁷ ¹¹.`;
-    }
+                    // Build source list showing LAST-NAME ONLY for correct in-text format
+                    const sourceList = sources.slice(0, 12).map((s, i) => {
+                        const lastName = fmtAuthor(s, isMla ? 'mla' : 'apa');
+                        return `[${i+1}] In-text key: ${lastName} | Full: ${s.author || s.displayName || lastName} (${s.year})\n   Title: "${s.title}"\n   Key findings: ${s.text?.substring(0, 300) || 'N/A'}`;
+                    }).join('\n\n');
 
-    const prompt = `Add scholarly citations to this essay, integrating them with varied, natural academic prose.
+                    let citationFormat = '';
+                    if (type === 'in-text') {
+                        if (isApa) citationFormat = `APA 7th in-text: use (LastName, Year) parenthetical OR "LastName (Year) verb..." — use ONLY the last name shown as "In-text key" in the source list above`;
+                        else if (isMla) citationFormat = `MLA 9th in-text: (LastName) — no year, use ONLY the last name shown as "In-text key"`;
+                        else citationFormat = `Chicago in-text: (LastName Year) — use ONLY the last name shown as "In-text key"`;
+                    } else if (type === 'footnotes') {
+                        citationFormat = `Use superscript numbers at end of cited sentences. Each citation occurrence gets its OWN unique sequential number even if the same source is cited again. Number every citation sequentially from 1 upward — so if source [3] appears 3 times it gets three different numbers like ³ ⁷ ¹¹.`;
+                    }
+
+                    const prompt = `Add scholarly citations to this essay, integrating them with varied, natural academic prose.
 
 ESSAY:
 ${input}
 
-AVAILABLE SOURCES:
+AVAILABLE SOURCES (use the "In-text key" as the author name in all citations):
 ${sourceList}
 
 CITATION FORMAT: ${citationFormat}
@@ -372,26 +396,25 @@ CITATION FORMAT: ${citationFormat}
 CITATION INTEGRATION RULES:
 1. Add citations ONLY where claims genuinely need evidence — not every sentence
 2. Each citation must directly support the SPECIFIC claim it follows
-3. VARY how you introduce citations — rotate through these patterns and never repeat the same opener in consecutive paragraphs:
-   - Paraphrase the finding, then cite: "Research shows X (Author, Year)."
-   - Author as subject: "Author (Year) found that..."
-   - Author + verb variety: "Author (Year) demonstrated / established / confirmed / argued / observed..."
-   - Embedded citation mid-sentence: "...a phenomenon that Author (Year) attributes to..."
-   - Comparative framing: "Building on this, Author (Year) showed..."
-4. PARAPHRASE by default — synthesize findings in your own words. Only use a direct quote when the original wording is uniquely precise or carries specific technical meaning that paraphrasing would lose
-5. When a direct quote IS used, keep it short (under 20 words) and follow it with a sentence of your own analysis explaining what it means and why it matters to the argument
-6. NEVER end a paragraph with a direct quote or a bare citation — always close with your own analytical sentence that connects the evidence back to the paragraph's main claim
+3. VARY how you introduce citations — rotate through these patterns:
+   - Paraphrase the finding, then cite: "Research shows X (LastName, Year)."
+   - Author as subject: "LastName (Year) found that..."
+   - Author + verb variety: "LastName (Year) demonstrated / established / confirmed / argued..."
+   - Embedded citation: "...a phenomenon that LastName (Year) attributes to..."
+4. PARAPHRASE by default — only use a direct quote when the original wording is uniquely precise
+5. When a direct quote IS used, keep it under 20 words and follow with your own analysis sentence
+6. NEVER end a paragraph with a direct quote or bare citation — always close with your own analytical sentence
 7. Ensure each paragraph ends by advancing the argument forward, not restating what was just said
 8. Do NOT add a bibliography section
 9. Ensure format matches: ${citationFormat}
 
 Return ONLY the essay with citations inserted:`;
 
-    let citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
+                    let citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(prompt, GEMINI)));
 
-    // Second pass: fix any author mentions missing a superscript (footnotes only)
-    if (type === 'footnotes') {
-        const fixPrompt = `Review this essay and fix any author mentions that are missing a footnote superscript number.
+                    // Second pass: fix any author mentions missing a superscript (footnotes only)
+                    if (type === 'footnotes') {
+                        const fixPrompt = `Review this essay and fix any author mentions that are missing a footnote superscript number.
 
 ESSAY:
 ${citedText}
@@ -408,73 +431,67 @@ RULES:
 
 Return the corrected essay only:`;
 
-        citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(fixPrompt, GEMINI)));
-    }
+                        citedText = stripMarkdown(stripRefs(await GeminiAPI.chat(fixPrompt, GEMINI)));
+                    }
 
-    // For footnotes: extract insertion order and rebuild sequential numbering
-    let insertionOrder = null;
-    let finalText = citedText;
+                    // For footnotes: extract insertion order and rebuild sequential numbering
+                    let insertionOrder = null;
+                    let finalText = citedText;
 
-    if (type === 'footnotes') {
-        const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
-        const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
+                    if (type === 'footnotes') {
+                        const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
+                        const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
 
-        // Normalize <sup>N</sup> to unicode
-        let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
+                        let normalized = citedText.replace(/<sup>(\d+)<\/sup>/gi, (_, n) => toSuper(parseInt(n)));
+                        const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
 
-        // Find all superscript sequences in order of appearance
-        const allMatches = [...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+                        const parseSuper = (str) => {
+                            const chars = str.split('');
+                            const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
+                            if (num > 0 && num <= sources.length) return [num];
+                            return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
+                        };
 
-        // Parse a superscript sequence into source indices
-        const parseSuper = (str) => {
-            const chars = str.split('');
-            const num = parseInt(chars.map(c => superToNum[c] ?? 0).join(''));
-            if (num > 0 && num <= sources.length) return [num];
-            return chars.map(c => superToNum[c]).filter(n => n > 0 && n <= sources.length);
-        };
+                        const noteEntries = [];
+                        const matchToNewNums = new Map();
 
-        // Build footnote list — every occurrence gets a NEW sequential number
-        const noteEntries = [];
-        const matchToNewNums = new Map();
+                        allMatches.forEach((m, matchIdx) => {
+                            const sourceNums = parseSuper(m[0]);
+                            const newNums = sourceNums.map(sNum => {
+                                const source = sources[sNum - 1];
+                                if (!source) return null;
+                                noteEntries.push(source);
+                                return noteEntries.length;
+                            }).filter(Boolean);
+                            if (newNums.length > 0) matchToNewNums.set(matchIdx, newNums);
+                        });
 
-        allMatches.forEach((m, matchIdx) => {
-            const sourceNums = parseSuper(m[0]);
-            const newNums = sourceNums.map(sNum => {
-                const source = sources[sNum - 1];
-                if (!source) return null;
-                noteEntries.push(source);
-                return noteEntries.length;
-            }).filter(Boolean);
-            if (newNums.length > 0) matchToNewNums.set(matchIdx, newNums);
-        });
+                        let rewritten = normalized;
+                        let offset = 0;
+                        allMatches.forEach((m, matchIdx) => {
+                            const newNums = matchToNewNums.get(matchIdx);
+                            if (!newNums?.length) return;
+                            const newSuper = newNums.map(toSuper).join('');
+                            const pos = m.index + offset;
+                            rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
+                            offset += newSuper.length - m[0].length;
+                        });
 
-        // Rewrite text replacing each superscript with new sequential number(s)
-        let rewritten = normalized;
-        let offset = 0;
-        allMatches.forEach((m, matchIdx) => {
-            const newNums = matchToNewNums.get(matchIdx);
-            if (!newNums?.length) return;
-            const newSuper = newNums.map(toSuper).join('');
-            const pos = m.index + offset;
-            rewritten = rewritten.slice(0, pos) + newSuper + rewritten.slice(pos + m[0].length);
-            offset += newSuper.length - m[0].length;
-        });
+                        finalText = rewritten;
+                        insertionOrder = noteEntries;
+                    }
 
-        finalText = rewritten;
-        insertionOrder = noteEntries;
-    }
+                    result.output = finalText;
+                    result.outputHtml = buildEssayHTML(finalText);
+                    result.citedSources = sources;
 
-    result.output = finalText;
-    result.outputHtml = buildEssayHTML(finalText);
-    result.citedSources = sources;
-    
-    // Always build references — 'in-text' and 'bibliography' both need a references list
-    const bib = buildBibliographyHTML(sources, style, type === 'footnotes' ? 'footnotes' : 'bibliography', insertionOrder);
-    result.bibliographyHtml = bib.html;
-    result.bibliographyPlain = bib.plain;
-    result.type = 'cited';
-    break;
-}
+                    // Always build bibliography — required for in-text, footnotes, and standalone
+                    const bib = buildBibliographyHTML(sources, style, type === 'footnotes' ? 'footnotes' : 'bibliography', insertionOrder);
+                    result.bibliographyHtml = bib.html;
+                    result.bibliographyPlain = bib.plain;
+                    result.type = 'cited';
+                    break;
+                }
                   
                 case 'QUOTES': {
                     const input = context.previousOutput || '';
