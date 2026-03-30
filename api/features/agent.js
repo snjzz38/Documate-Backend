@@ -12,6 +12,11 @@ const stripMarkdown = t => t
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/`([^`]+)`/g, '$1');
 
+// Strip AI preamble like "Here's your essay:", "Sure, here is the response:", etc.
+const stripPreamble = t => t
+    .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
+    .trim();
+
 // Remove any bibliography/reference section the model appended to essay text
 const stripRefs = t => t
     .replace(/\n\n\*?\*?(?:APA References?|References?|Works Cited|Bibliography|Notes)[:\s]*\*?\*?[\s\S]*$/i, '')
@@ -383,6 +388,7 @@ CRITICAL RULES — ALWAYS APPLY:
 - Do NOT add a reference list, "Sources:", or bibliography section at the end
 - Do NOT mention specific researchers, papers, or organisations by name
 - Do NOT write a generic essay if the task asks for something else
+- Do NOT start with commentary like "Here's your essay:", "Sure!", or any preamble — begin with the actual content immediately
 ${imageFiles.length > 0 ? '- Carefully analyze any uploaded images as part of the response.' : ''}
 
 Complete the task now:`;
@@ -391,7 +397,7 @@ Complete the task now:`;
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
 
-                    const plainText = stripMarkdown(stripRefs(stripSourceAppendix(rawText)));
+                    const plainText = stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText))));
                     result.output = plainText;
                     result.outputHtml = buildEssayHTML(plainText);
                     result.type = 'text';
@@ -509,11 +515,15 @@ Complete the task now:`;
 
                     let citationFormat = '';
                     if (type === 'in-text') {
-                        if (isApa) citationFormat = `APA 7th: parenthetical = (LastName, Year) | narrative = LastName (Year). Use ONLY the CITE-AS key shown — do not alter it.`;
-                        else if (isMla) citationFormat = `MLA 9th: (LastName). No year. Use ONLY the CITE-AS key shown.`;
-                        else citationFormat = `Chicago: (LastName Year). Use ONLY the CITE-AS key shown.`;
+                        if (isApa) citationFormat = `APA 7th in-text: parenthetical = (LastName, Year) | narrative = LastName (Year). Use ONLY the CITE-AS key shown — do not alter it.
+Do NOT use footnotes, superscript numbers (¹²³), or endnotes. ONLY parenthetical/narrative in-text citations.`;
+                        else if (isMla) citationFormat = `MLA 9th in-text: parenthetical = (LastName). No year in the parenthetical. Use ONLY the CITE-AS key shown — do not alter it.
+Do NOT use footnotes, superscript numbers (¹²³), or endnotes. ONLY parenthetical in-text citations.`;
+                        else citationFormat = `Chicago in-text: (LastName Year). Use ONLY the CITE-AS key shown — do not alter it.
+Do NOT use footnotes, superscript numbers (¹²³), or endnotes. ONLY parenthetical in-text citations.`;
                     } else {
-                        citationFormat = `Superscript footnotes numbered sequentially (¹²³…). New number for each use.`;
+                        citationFormat = `Superscript footnotes numbered sequentially (¹²³…). New number for each use.
+Do NOT use parenthetical citations like (Author, Year) or (Author). ONLY superscript footnote numbers.`;
                     }
 
                     const citeFmt = detectTaskFormat(context.task || '');
@@ -533,20 +543,21 @@ RULES:
 1. Cite ONLY where a claim clearly matches a listed source — if unsure, skip it
 2. Never invent a citation; never reuse author names from the essay text itself
 3. Copy the CITE-AS key exactly as written — no variations
-4. Vary citation introduction patterns (parenthetical, narrative, embedded)
+4. ${type === 'in-text' ? 'Vary citation introduction patterns (parenthetical, narrative, embedded). NEVER use footnotes or superscript numbers.' : 'Use superscript footnote numbers ONLY. NEVER use parenthetical (Author, Year) citations.'}
 5. After citing, ensure the paragraph ends with your own analytical sentence — never a bare citation
 6. Do NOT add a references section, bibliography, or source list at the end
 7. Do NOT cite sources not in the list above
-${hasStructuredHeadersCite ? '8. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge or rename sections' : ''}
+8. Do NOT start with commentary like "Here is..." — output ONLY the text with citations
+${hasStructuredHeadersCite ? '9. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge or rename sections' : ''}
 
 Return ONLY the text with citations inserted:`;
 
                     let citedText = await GeminiAPI.chat(prompt, GEMINI);
-                    citedText = stripMarkdown(stripRefs(stripSourceAppendix(citedText)));
+                    citedText = stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText))));
 
                     if (type === 'footnotes') {
-                        const fixPrompt = `Wherever an author name appears without a footnote superscript, add the correct one. Do not change anything else. Do not add a reference list.\n\nESSAY:\n${citedText}\n\nSOURCES:\n${sourceList}\n\nReturn the corrected essay only:`;
-                        citedText = stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI))));
+                        const fixPrompt = `Wherever an author name appears without a footnote superscript, add the correct one. Do not change anything else. Do not add a reference list. Do not start with commentary.\n\nTEXT:\n${citedText}\n\nSOURCES:\n${sourceList}\n\nReturn the corrected text only:`;
+                        citedText = stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI)))));
 
                         const superToNum={'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
                         const toSuper=n=>String(n).split('').map(d=>'⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
@@ -614,10 +625,11 @@ INSTRUCTIONS:
 3. Follow each quote with 1-2 sentences of your own analysis
 4. Keep ALL existing text and citations intact
 5. Do NOT add a bibliography
+6. Do NOT start with commentary like "Here is..." — output ONLY the text with quotes inserted
 
-Return the essay with quotes inserted:`;
+Return the text with quotes inserted:`;
 
-                    const withQuotes=stripMarkdown(await GeminiAPI.chat(prompt,GEMINI));
+                    const withQuotes=stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI)));
                     result.output=withQuotes;
                     result.outputHtml=buildEssayHTML(withQuotes);
                     result.type='text';
