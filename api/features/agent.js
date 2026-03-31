@@ -57,11 +57,25 @@ const validateWithGroq = async (text, taskFmt, GROQ) => {
         issues.push('- Keep ALL section headers exactly as they are on their own lines');
         issues.push('- Do NOT add any new content, citations, or sentences');
 
-        const prompt = [{
-            role: 'user',
-            content: `Clean up this academic text by fixing ONLY these issues:\n${issues.join('\n')}\n\nTEXT:\n${text}\n\nReturn ONLY the cleaned text. No commentary.`
-        }];
-        const cleaned = await GroqAPI.chat(prompt, GROQ);
+        const messages = [
+            { role: 'system', content: 'You are a text editor. Output ONLY the cleaned text. Do NOT explain your reasoning. Do NOT output any thinking, commentary, or notes. No preamble. No "Here is the cleaned text". Just the text itself.' },
+            { role: 'user', content: `Clean up this academic text by fixing ONLY these issues:\n${issues.join('\n')}\n\nTEXT:\n${text}\n\nOutput the cleaned text only:` }
+        ];
+        let cleaned = await GroqAPI.chat(messages, GROQ);
+
+        // Strip any reasoning/thinking that leaked through (Qwen sometimes outputs without <think> tags)
+        cleaned = cleaned
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .replace(/^(?:Okay|Let me|First|Looking|Now|I need|I'll|Moving|Also|The user|Checking|Finally|Here'?s|Sure|Certainly)[^\n]*\n(?:[^\n]*\n)*/i, '')
+            .trim();
+
+        // If the cleaned text starts with reasoning paragraphs (no header/bullet), find the actual content
+        // by looking for the first known header or bullet
+        if (taskFmt === 'table' || taskFmt === 'steps' || taskFmt === 'structured') {
+            const headerIdx = cleaned.search(/^(?:ARGUMENTS|DECISION|JUSTIFICATION)/m);
+            if (headerIdx > 100) cleaned = cleaned.substring(headerIdx);
+        }
+
         // Sanity check: if Groq returned something drastically different (>40% shorter), keep original
         if (cleaned && cleaned.length > text.length * 0.6) return cleaned;
         return text;
