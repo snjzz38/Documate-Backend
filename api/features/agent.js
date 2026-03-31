@@ -19,8 +19,21 @@ const stripPreamble = t => t
 
 // Fix "Because" starting bullets/sentences — remove "Because" and capitalize next word
 const fixBecauseStarts = t => t
-    .replace(/^(\s*[-•]\s+)Because\s+([a-z])/gm, (_, prefix, c) => prefix + c.toUpperCase())
-    .replace(/^Because\s+([a-z])/gm, (_, c) => c.toUpperCase());
+    .replace(/^(\s*[-•]\s+)Because\s+/gm, '$1')
+    .replace(/^Because\s+/gm, '')
+    .replace(/^(\s*[-•]\s+)([a-z])/gm, (_, prefix, c) => prefix + c.toUpperCase())
+    .replace(/^([a-z])/gm, c => c.toUpperCase());
+
+// Strip commentary sentences that CITE/QUOTES added (abstract dumps appended after citations)
+// Catches patterns like: "  Indeed, Author (Year) highlights..." or "  Author et al. (2020) directly address..."
+const COMMENTARY_VERBS = '(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|suggest|argue|acknowledge|confirm|corroborate|validate|support|reveal)';
+const stripAddedAbstractSentences = t => {
+    // Remove sentences starting with transition + Author + commentary verb
+    let result = t.replace(new RegExp(`\\s{2,}(?:Indeed|Furthermore|Moreover|Additionally|Specifically|However|Notably|This),?\\s+[A-Z][a-z]+(?:'s)?(?:\\s+(?:et al\\.|&\\s+[A-Z][a-z]+))?\\s*(?:\\([^)]*\\)\\s*)?(?:specifically |directly |further |also |particularly )?${COMMENTARY_VERBS}[^.]*\\.`, 'gm'), ' ');
+    // Remove sentences starting with Author (Year) + commentary verb
+    result = result.replace(new RegExp(`\\s{2,}[A-Z][a-z]+(?:\\s+(?:et al\\.|&\\s+[A-Z][a-z]+))?\\s*\\(\\d{4}\\)\\s+(?:specifically |directly |further |also |particularly )?${COMMENTARY_VERBS}[^.]*\\.`, 'gm'), ' ');
+    return result.replace(/\s{2,}/g, ' ').trim();
+};
 
 // Remove any bibliography/reference section the model appended to essay text
 const stripRefs = t => t
@@ -552,24 +565,24 @@ ${sourceList}
 FORMAT: ${citationFormat}
 
 RULES:
-1. ONLY insert citation keys (e.g. parenthetical or footnote markers) — do NOT add new sentences, do NOT quote abstract text, do NOT add new content
-2. Cite where a claim clearly matches a listed source — if unsure, skip it
-3. Copy the CITE-AS key exactly as written — no variations
-4. ${type === 'in-text' ? 'Vary placement: some parenthetical at end of sentence, some narrative woven into the sentence. NEVER use footnotes or superscript numbers.' : 'Use superscript footnote numbers ONLY. NEVER use parenthetical (Author, Year) citations.'}
-5. Do NOT add a references section, bibliography, or source list at the end
-6. Do NOT cite sources not in the list above
-7. Do NOT start with commentary like "Here is..." — output ONLY the text with citations
-8. Do NOT insert quotes from the source abstracts into the text — only add the citation key itself
-${hasStructuredHeadersCite ? '9. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge or rename sections' : ''}
+1. ONLY insert citation keys — do NOT add ANY new sentences or words beyond the citation marker itself
+2. FORBIDDEN: Adding commentary like "Indeed, Author (Year) underscores...", "Furthermore, Author highlights...", "Author (Year) directly addresses this concern..." — these are NOT citations, they are new content. NEVER do this.
+3. CORRECT citation insertion: place the CITE-AS key at the end of an EXISTING sentence, e.g. "Gene editing carries risks (Author, Year)." — do NOT write a new sentence about the source
+4. Copy the CITE-AS key exactly as written — no variations
+5. ${type === 'in-text' ? 'NEVER use footnotes or superscript numbers. ONLY parenthetical/narrative in-text citations.' : 'Use superscript footnote numbers ONLY. NEVER use parenthetical (Author, Year) citations.'}
+6. Do NOT add a references section, bibliography, or source list at the end
+7. Do NOT start with commentary like "Here is..."
+8. The output must have the SAME NUMBER OF SENTENCES as the input — you are only adding citation markers, not new text
+${hasStructuredHeadersCite ? '9. CRITICAL: Preserve ALL section headers exactly as written on their own lines. Do not merge headers with other text.' : ''}
 
 Return ONLY the text with citations inserted:`;
 
                     let citedText = await GeminiAPI.chat(prompt, GEMINI);
-                    citedText = stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText))));
+                    citedText = fixBecauseStarts(stripAddedAbstractSentences(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText))))));
 
                     if (type === 'footnotes') {
                         const fixPrompt = `Wherever an author name appears without a footnote superscript, add the correct one. Do not change anything else. Do not add a reference list. Do not start with commentary.\n\nTEXT:\n${citedText}\n\nSOURCES:\n${sourceList}\n\nReturn the corrected text only:`;
-                        citedText = stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI)))));
+                        citedText = fixBecauseStarts(stripAddedAbstractSentences(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI)))))));
 
                         const superToNum={'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
                         const toSuper=n=>String(n).split('').map(d=>'⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
