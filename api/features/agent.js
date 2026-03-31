@@ -1,5 +1,6 @@
 // api/features/agent.js
 import { GeminiAPI } from '../utils/geminiAPI.js';
+import { GroqAPI } from '../utils/groqAPI.js';
 import { SourceFinderAPI } from '../utils/sourceFinder.js';
 import humanizerHandler from './humanizer.js';
 import graderHandler from './grader.js';
@@ -17,22 +18,57 @@ const stripPreamble = t => t
     .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
     .trim();
 
-// Fix "Because" starting bullets/sentences — remove "Because" and capitalize next word
-const fixBecauseStarts = t => t
-    .replace(/^(\s*[-•]\s+)Because\s+/gm, '$1')
-    .replace(/^Because\s+/gm, '')
-    .replace(/^(\s*[-•]\s+)([a-z])/gm, (_, prefix, c) => prefix + c.toUpperCase())
-    .replace(/^([a-z])/gm, c => c.toUpperCase());
+// ─── Header repair ───────────────────────────────────────────────────────────
+// Deterministic: find known section headers that got merged onto other lines and force them onto their own lines
+const KNOWN_HEADERS = [
+    'ARGUMENTS FOR (EMBRACE):',
+    'ARGUMENTS AGAINST (PANIC):',
+    'DECISION:',
+    'JUSTIFICATION:'
+];
 
-// Strip commentary sentences that CITE/QUOTES added (abstract dumps appended after citations)
-// Catches patterns like: "  Indeed, Author (Year) highlights..." or "  Author et al. (2020) directly address..."
-const COMMENTARY_VERBS = '(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|suggest|argue|acknowledge|confirm|corroborate|validate|support|reveal)';
-const stripAddedAbstractSentences = t => {
-    // Remove sentences starting with transition + Author + commentary verb
-    let result = t.replace(new RegExp(`\\s{2,}(?:Indeed|Furthermore|Moreover|Additionally|Specifically|However|Notably|This),?\\s+[A-Z][a-z]+(?:'s)?(?:\\s+(?:et al\\.|&\\s+[A-Z][a-z]+))?\\s*(?:\\([^)]*\\)\\s*)?(?:specifically |directly |further |also |particularly )?${COMMENTARY_VERBS}[^.]*\\.`, 'gm'), ' ');
-    // Remove sentences starting with Author (Year) + commentary verb
-    result = result.replace(new RegExp(`\\s{2,}[A-Z][a-z]+(?:\\s+(?:et al\\.|&\\s+[A-Z][a-z]+))?\\s*\\(\\d{4}\\)\\s+(?:specifically |directly |further |also |particularly )?${COMMENTARY_VERBS}[^.]*\\.`, 'gm'), ' ');
-    return result.replace(/\s{2,}/g, ' ').trim();
+const ensureHeaders = t => {
+    let result = t;
+    for (const hdr of KNOWN_HEADERS) {
+        const escaped = hdr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // If header appears mid-line (not at start of line), force a line break before it
+        result = result.replace(new RegExp(`(?<!^)(?<!\\n)\\s*${escaped}`, 'gm'), `\n\n${hdr}`);
+    }
+    // Also catch generic all-caps headers that got merged
+    result = result.replace(/([.!?])\s+((?:[A-Z][A-Z\s\(\)\/\-&]{2,}):?\s*$)/gm, '$1\n\n$2');
+    // Clean up excessive newlines
+    return result.replace(/\n{3,}/g, '\n\n').trim();
+};
+
+// ─── AI-powered validation (Groq — fast + cheap) ────────────────────────────
+// Replaces brittle regex post-processing. Runs after CITE/QUOTES to clean up
+// commentary sentences, "Because" starts, and other LLM artifacts.
+const validateWithGroq = async (text, taskFmt, GROQ) => {
+    if (!GROQ || !text) return text;
+    try {
+        const issues = [];
+        if (taskFmt === 'table' || taskFmt === 'steps' || taskFmt === 'structured') {
+            issues.push('- Remove any sentences that COMMENT ON a source rather than being part of the argument (e.g. "Indeed, Author (Year) highlights...", "As Author (Year) points out...", "Author (Year) effectively illustrates..."). These are meta-commentary, not argument content. Delete them entirely.');
+            issues.push('- Ensure each bullet in argument sections is EXACTLY 2-3 sentences. If a bullet has more, cut the weakest sentences.');
+        }
+        issues.push('- If any sentence starts with "Because", rewrite it to start with the actual subject instead. E.g. "Because gene editing can cause..." → "Gene editing can cause..."');
+        issues.push('- Remove any sentence that describes what a study/paper/article IS rather than what it FOUND (e.g. "This study reviews..." or "This highlights the importance of...")');
+        issues.push('- Keep ALL citation markers like (Author, Year) or superscript numbers exactly as they are');
+        issues.push('- Keep ALL section headers exactly as they are on their own lines');
+        issues.push('- Do NOT add any new content, citations, or sentences');
+
+        const prompt = [{
+            role: 'user',
+            content: `Clean up this academic text by fixing ONLY these issues:\n${issues.join('\n')}\n\nTEXT:\n${text}\n\nReturn ONLY the cleaned text. No commentary.`
+        }];
+        const cleaned = await GroqAPI.chat(prompt, GROQ);
+        // Sanity check: if Groq returned something drastically different (>40% shorter), keep original
+        if (cleaned && cleaned.length > text.length * 0.6) return cleaned;
+        return text;
+    } catch (e) {
+        console.error('[Agent] Groq validation failed, using original:', e.message);
+        return text;
+    }
 };
 
 // Remove any bibliography/reference section the model appended to essay text
@@ -228,6 +264,7 @@ export default async function handler(req, res) {
     try {
         const { action, task, options = {} } = req.body;
         const GEMINI = process.env.GEMINI_API_KEY;
+        const GROQ = process.env.GROQ_API_KEY;
 
         // ── PLAN ──────────────────────────────────────────────────────────────
         if (action === 'plan') {
@@ -422,7 +459,8 @@ Complete the task now:`;
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
 
-                    const plainText = fixBecauseStarts(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))));
+                    let plainText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))));
+                    plainText = await validateWithGroq(plainText, fmt, GROQ);
                     result.output = plainText;
                     result.outputHtml = buildEssayHTML(plainText);
                     result.type = 'text';
@@ -578,11 +616,12 @@ ${hasStructuredHeadersCite ? '9. CRITICAL: Preserve ALL section headers exactly 
 Return ONLY the text with citations inserted:`;
 
                     let citedText = await GeminiAPI.chat(prompt, GEMINI);
-                    citedText = fixBecauseStarts(stripAddedAbstractSentences(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText))))));
+                    citedText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText)))));
+                    citedText = await validateWithGroq(citedText, citeFmt, GROQ);
 
                     if (type === 'footnotes') {
                         const fixPrompt = `Wherever an author name appears without a footnote superscript, add the correct one. Do not change anything else. Do not add a reference list. Do not start with commentary.\n\nTEXT:\n${citedText}\n\nSOURCES:\n${sourceList}\n\nReturn the corrected text only:`;
-                        citedText = fixBecauseStarts(stripAddedAbstractSentences(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI)))))));
+                        citedText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI))))));
 
                         const superToNum={'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
                         const toSuper=n=>String(n).split('').map(d=>'⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
@@ -674,7 +713,9 @@ INSTRUCTIONS:
 
 Return the text with quotes inserted:`;
 
-                    const withQuotes=fixBecauseStarts(stripAddedAbstractSentences(stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI)))));
+                    const quoteFmt = detectTaskFormat(context.task || '');
+                    let withQuotes=ensureHeaders(stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI))));
+                    withQuotes = await validateWithGroq(withQuotes, quoteFmt, GROQ);
                     result.output=withQuotes;
                     result.outputHtml=buildEssayHTML(withQuotes);
                     result.type='text';
