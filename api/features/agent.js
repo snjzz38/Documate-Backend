@@ -17,6 +17,11 @@ const stripPreamble = t => t
     .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
     .trim();
 
+// Fix "Because" starting bullets/sentences — remove "Because" and capitalize next word
+const fixBecauseStarts = t => t
+    .replace(/^(\s*[-•]\s+)Because\s+([a-z])/gm, (_, prefix, c) => prefix + c.toUpperCase())
+    .replace(/^Because\s+([a-z])/gm, (_, c) => c.toUpperCase());
+
 // Remove any bibliography/reference section the model appended to essay text
 const stripRefs = t => t
     .replace(/\n\n\*?\*?(?:APA References?|References?|Works Cited|Bibliography|Notes)[:\s]*\*?\*?[\s\S]*$/i, '')
@@ -284,37 +289,44 @@ export default async function handler(req, res) {
                     let formatInstructions = '';
 
                     if (fmt === 'table') {
-                        formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these four sections with their headers on their own lines:
+                        formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these four sections with their headers on their own lines.
 
 ARGUMENTS FOR (EMBRACE):
-- [argument 1: 2-3 sentences making a distinct case. Cover ONE of: health/disease prevention, scientific progress, economic savings, parental rights, reduced suffering]
-- [argument 2: different angle from above]
-- [argument 3: different angle from above]
-- [argument 4: different angle from above]
+- [Argument 1: EXACTLY 2-3 sentences. State the claim, explain why it matters, give a concrete example or consequence. NO padding sentences.]
+- [Argument 2: different angle — 2-3 sentences only]
+- [Argument 3: different angle — 2-3 sentences only]
+- [Argument 4: different angle — 2-3 sentences only]
 
 ARGUMENTS AGAINST (PANIC):
-- [argument 1: 2-3 sentences making a distinct case. Cover ONE of: off-target safety risks, ethical/eugenics concerns, social inequality, unknown long-term effects, commodification of life]
-- [argument 2: different angle from above]
-- [argument 3: different angle from above]
-- [argument 4: different angle from above]
+- [Argument 1: EXACTLY 2-3 sentences. Same structure as above.]
+- [Argument 2: different angle — 2-3 sentences only]
+- [Argument 3: different angle — 2-3 sentences only]
+- [Argument 4: different angle — 2-3 sentences only]
 
 DECISION:
-[Write "Panic." or "Embrace." as the FIRST word. Then one sentence stating why this side outweighs the other.]
+One sentence only. Start with "Panic." or "Embrace." then state why.
 
 JUSTIFICATION:
-[Write 3-4 paragraphs. Requirements:
- - First sentence: "I choose to [panic/embrace] because..." — state the decision explicitly
- - Each paragraph: one clear topic sentence, then reasoning, then tie back to the decision
- - Final paragraph: strong synthesis — explain WHY the risks/benefits tip the scale, not just that "it warrants further study"
- - Do NOT include citations or a reference section]
+3-4 paragraphs. Requirements:
+- First sentence: "I choose to [panic/embrace] because..."
+- Each paragraph: topic sentence → reasoning → tie back to decision
+- Final paragraph: synthesis — explain WHY the risks/benefits tip the scale
+- Do NOT include citations or a reference section
 
-WRITING QUALITY (apply to ALL sections above):
-- Vary sentence openings — NEVER start two consecutive sentences with "Because", "Since", "Although", or the same word
-- Mix sentence lengths: some short and direct, some longer and analytical
-- In the justification, SHOW how the arguments interconnect — don't just list them in sequence
-- Avoid weak filler endings like "warrants consideration" or "requires further exploration"
+LENGTH RULES — STRICTLY ENFORCED:
+- Each bullet in FOR/AGAINST = EXACTLY 2-3 sentences. NOT 4, NOT 5, NOT 6. If you write more than 3 sentences for a bullet, you have failed.
+- Do NOT pad arguments with filler like "This represents a profound advancement" or "This perspective highlights..."
+- Do NOT repeat the same point in different words within one bullet
+- Every sentence must add NEW information — no restating
 
-CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim in your output on their own lines. Do NOT skip, rename, or merge them into prose.`;
+SENTENCE STARTER RULES — STRICTLY ENFORCED:
+- NEVER start any bullet with "Because". Start with the actual claim instead.
+- NEVER start two consecutive sentences with the same word anywhere in the output
+- BAD: "Because gene editing can..." → GOOD: "Gene editing can..."
+- BAD: "Because parents naturally..." → GOOD: "Parents naturally..."
+- Vary starters: use the subject, a condition, a contrast, a fact — anything but "Because" as a first word
+
+CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim on their own lines.`;
 
                     } else if (fmt === 'steps' || fmt === 'structured') {
                         // Parse what each step actually asks for and replicate the structure
@@ -397,7 +409,7 @@ Complete the task now:`;
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
 
-                    const plainText = stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText))));
+                    const plainText = fixBecauseStarts(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))));
                     result.output = plainText;
                     result.outputHtml = buildEssayHTML(plainText);
                     result.type = 'text';
@@ -540,14 +552,14 @@ ${sourceList}
 FORMAT: ${citationFormat}
 
 RULES:
-1. Cite ONLY where a claim clearly matches a listed source — if unsure, skip it
-2. Never invent a citation; never reuse author names from the essay text itself
+1. ONLY insert citation keys (e.g. parenthetical or footnote markers) — do NOT add new sentences, do NOT quote abstract text, do NOT add new content
+2. Cite where a claim clearly matches a listed source — if unsure, skip it
 3. Copy the CITE-AS key exactly as written — no variations
-4. ${type === 'in-text' ? 'Vary citation introduction patterns (parenthetical, narrative, embedded). NEVER use footnotes or superscript numbers.' : 'Use superscript footnote numbers ONLY. NEVER use parenthetical (Author, Year) citations.'}
-5. After citing, ensure the paragraph ends with your own analytical sentence — never a bare citation
-6. Do NOT add a references section, bibliography, or source list at the end
-7. Do NOT cite sources not in the list above
-8. Do NOT start with commentary like "Here is..." — output ONLY the text with citations
+4. ${type === 'in-text' ? 'Vary placement: some parenthetical at end of sentence, some narrative woven into the sentence. NEVER use footnotes or superscript numbers.' : 'Use superscript footnote numbers ONLY. NEVER use parenthetical (Author, Year) citations.'}
+5. Do NOT add a references section, bibliography, or source list at the end
+6. Do NOT cite sources not in the list above
+7. Do NOT start with commentary like "Here is..." — output ONLY the text with citations
+8. Do NOT insert quotes from the source abstracts into the text — only add the citation key itself
 ${hasStructuredHeadersCite ? '9. CRITICAL: Preserve ALL section headers exactly as written (e.g. "ARGUMENTS FOR (EMBRACE):", "DECISION:", "JUSTIFICATION:") — do not merge or rename sections' : ''}
 
 Return ONLY the text with citations inserted:`;
@@ -597,13 +609,17 @@ Return ONLY the text with citations inserted:`;
                     const sources = context.researchSources || [];
                     if (!input || !sources.length) { result.output=input; result.outputHtml=buildEssayHTML(input); result.type='text'; break; }
 
+                    // Filter out meta-description sentences (abstract boilerplate, not actual findings)
+                    const isMetaSentence = s => /\b(?:this (?:article|paper|study|review|report|chapter)|we (?:review|examine|discuss|explore|present|describe|analyze|analyse|investigate|summarize|assess|aim)|(?:here|herein),?\s+we|the (?:aim|purpose|goal|objective) of this)\b/i.test(s);
+
                     const quotesFromSources = sources.slice(0,10).map(s => {
                         const author = fmtAuthorLastOnly(s);
                         const sentences = (s.text||'').match(/[^.!?]+[.!?]+/g)||[];
-                        const good = sentences.find(sent =>
-                            sent.length>40 && sent.length<250 &&
-                            /show|found|suggest|demonstrate|indicate|reveal|important|significant|evidence/i.test(sent)
-                        ) || sentences.find(s=>s.length>50&&s.length<200) || sentences[0] || '';
+                        // Only consider sentences with actual findings, filtering out meta-descriptions
+                        const usable = sentences.filter(sent => sent.length > 40 && sent.length < 250 && !isMetaSentence(sent));
+                        const good = usable.find(sent =>
+                            /show|found|suggest|demonstrate|indicate|reveal|significant|evidence|result|effect|impact|cause|lead|increase|decrease|reduce|improve/i.test(sent)
+                        ) || usable.find(sent => sent.length > 50 && sent.length < 200) || '';
                         return { author, year:s.year, title:s.title, quote:good.trim() };
                     }).filter(q=>q.quote);
 
@@ -611,21 +627,23 @@ Return ONLY the text with citations inserted:`;
                         `[${i+1}] ${q.author} (${q.year}): "${q.quote}" — From: "${q.title}"`
                     ).join('\n\n');
 
-                    const prompt=`Insert 4-6 direct quotes into this essay with analytical transitions.
+                    const prompt=`Insert 3-5 direct quotes into this text with analytical transitions.
 
-ESSAY:
+TEXT:
 ${input}
 
-QUOTES:
+AVAILABLE QUOTES:
 ${quotesList}
 
 INSTRUCTIONS:
-1. Find the best places for each quote to strengthen the argument
-2. Use a transition sentence before each quote explaining its relevance
-3. Follow each quote with 1-2 sentences of your own analysis
-4. Keep ALL existing text and citations intact
-5. Do NOT add a bibliography
-6. Do NOT start with commentary like "Here is..." — output ONLY the text with quotes inserted
+1. Pick quotes that contain SPECIFIC FINDINGS, DATA, or CONCLUSIONS — not general descriptions of what a paper is about
+2. SKIP any quote that just describes what the study does (e.g. "This article reviews..." or "We examine...") — these add nothing
+3. Introduce each quote with a transition that explains its relevance to your argument
+4. Follow each quote with 1-2 sentences of your own analysis connecting it to the argument
+5. Keep ALL existing text and citations intact
+6. Do NOT add a bibliography or reference section
+7. Do NOT start with commentary like "Here is..." — output ONLY the text with quotes inserted
+8. A good quote adds EVIDENCE. A bad quote just describes a paper. Only use good quotes.
 
 Return the text with quotes inserted:`;
 
