@@ -721,16 +721,25 @@ Return ONLY the text with citations inserted:`;
                         const author = fmtAuthorLastOnly(s);
                         const sentences = (s.text||'').match(/[^.!?]+[.!?]+/g)||[];
                         const usable = sentences.filter(sent => sent.length > 40 && sent.length < 250 && !isUselessQuote(sent));
-                        // Prefer sentences with concrete findings/data
+                        // Prefer sentences with concrete findings/data, fall back to any usable sentence
                         const good = usable.find(sent =>
                             /\b(?:found that|results show|data suggest|evidence indicate|led to|caused|increased|decreased|reduced|improved|associated with|correlated|resulted in|demonstrated that|revealed that|significantly)\b/i.test(sent)
-                        ) || '';
+                        ) || usable.find(sent => sent.length > 50) || usable[0] || '';
                         return { author, year:s.year, title:s.title, quote:good.trim() };
                     }).filter(q=>q.quote);
 
                     const quotesList=quotesFromSources.map((q,i)=>
                         `[${i+1}] ${q.author} (${q.year}): "${q.quote}" — From: "${q.title}"`
                     ).join('\n\n');
+
+                    // If no usable quotes found, pass through unchanged
+                    if (!quotesFromSources.length) {
+                        console.log('[Agent] QUOTES: no usable quotes extracted from sources, skipping');
+                        result.output = input;
+                        result.outputHtml = buildEssayHTML(input);
+                        result.type = 'text';
+                        break;
+                    }
 
                     const prompt=`Insert 3-5 direct quotes into this text with analytical transitions.
 
