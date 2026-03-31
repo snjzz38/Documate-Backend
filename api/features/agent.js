@@ -622,17 +622,31 @@ Return ONLY the text with citations inserted:`;
                     const sources = context.researchSources || [];
                     if (!input || !sources.length) { result.output=input; result.outputHtml=buildEssayHTML(input); result.type='text'; break; }
 
-                    // Filter out meta-description sentences (abstract boilerplate, not actual findings)
-                    const isMetaSentence = s => /\b(?:this (?:article|paper|study|review|report|chapter)|we (?:review|examine|discuss|explore|present|describe|analyze|analyse|investigate|summarize|assess|aim)|(?:here|herein),?\s+we|the (?:aim|purpose|goal|objective) of this)\b/i.test(s);
+                    // Filter out abstract boilerplate — meta-descriptions, methodology, and vague framing
+                    const isUselessQuote = s => {
+                        // "This article/paper/study reviews/examines/discusses..."
+                        if (/\b(?:this|the present|our|the current)\s+(?:article|paper|study|review|report|chapter|work|analysis|research|investigation|manuscript)\b/i.test(s)) return true;
+                        // "We review/examine/discuss/present/describe..."
+                        if (/\b(?:we|here|herein)\s+(?:review|examine|discuss|explore|present|describe|analyze|analyse|investigate|summarize|assess|aim|propose|argue|contend|consider|outline|highlight|address|focus|seek|provide)\b/i.test(s)) return true;
+                        // "The aim/purpose/goal of this..."
+                        if (/\bthe\s+(?:aim|purpose|goal|objective|focus|scope|intent)\s+of\s+(?:this|the)\b/i.test(s)) return true;
+                        // Vague framing: "systematic review is crucial", "informed decision-making", "responsible utilization"
+                        if (/\b(?:systematic review|informed decision|responsible utiliz|guiding future research|full potential|transformative impact|crucial for|broad scope of applicability)\b/i.test(s)) return true;
+                        // Methodology: "In January 2019, we met at..."
+                        if (/\b(?:we met|we conducted|we performed|we collected|we recruited|we selected|we identified|we searched|we assessed|we evaluated)\b/i.test(s)) return true;
+                        // Too vague to be useful as a quote
+                        if (/\b(?:has emerged as|has been proposed|has attracted|is widely|is increasingly|is well known|it is important)\b/i.test(s)) return true;
+                        return false;
+                    };
 
                     const quotesFromSources = sources.slice(0,10).map(s => {
                         const author = fmtAuthorLastOnly(s);
                         const sentences = (s.text||'').match(/[^.!?]+[.!?]+/g)||[];
-                        // Only consider sentences with actual findings, filtering out meta-descriptions
-                        const usable = sentences.filter(sent => sent.length > 40 && sent.length < 250 && !isMetaSentence(sent));
+                        const usable = sentences.filter(sent => sent.length > 40 && sent.length < 250 && !isUselessQuote(sent));
+                        // Prefer sentences with concrete findings/data
                         const good = usable.find(sent =>
-                            /show|found|suggest|demonstrate|indicate|reveal|significant|evidence|result|effect|impact|cause|lead|increase|decrease|reduce|improve/i.test(sent)
-                        ) || usable.find(sent => sent.length > 50 && sent.length < 200) || '';
+                            /\b(?:found that|results show|data suggest|evidence indicate|led to|caused|increased|decreased|reduced|improved|associated with|correlated|resulted in|demonstrated that|revealed that|significantly)\b/i.test(sent)
+                        ) || '';
                         return { author, year:s.year, title:s.title, quote:good.trim() };
                     }).filter(q=>q.quote);
 
@@ -660,7 +674,7 @@ INSTRUCTIONS:
 
 Return the text with quotes inserted:`;
 
-                    const withQuotes=stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI)));
+                    const withQuotes=fixBecauseStarts(stripAddedAbstractSentences(stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI)))));
                     result.output=withQuotes;
                     result.outputHtml=buildEssayHTML(withQuotes);
                     result.type='text';
