@@ -40,49 +40,72 @@ const ensureHeaders = t => {
     return result.replace(/\n{3,}/g, '\n\n').trim();
 };
 
-// ─── AI-powered validation (Groq — fast + cheap) ────────────────────────────
-// Replaces brittle regex post-processing. Runs after CITE/QUOTES to clean up
-// commentary sentences, "Because" starts, and other LLM artifacts.
-const validateWithGroq = async (text, taskFmt, GROQ) => {
-    if (!GROQ || !text) return text;
+// ─── AI-powered CHECK (Groq — fast + cheap) ─────────────────────────────────
+// Groq ONLY returns JSON booleans — it NEVER produces output text.
+// If checks fail, we fix with deterministic code or re-prompt Gemini.
+const checkWithGroq = async (text, taskFmt, GROQ) => {
+    if (!GROQ || !text) return { pass: true };
     try {
-        const issues = [];
-        if (taskFmt === 'table' || taskFmt === 'steps' || taskFmt === 'structured') {
-            issues.push('- Remove any sentences that COMMENT ON a source rather than being part of the argument (e.g. "Indeed, Author (Year) highlights...", "As Author (Year) points out...", "Author (Year) effectively illustrates..."). These are meta-commentary, not argument content. Delete them entirely.');
-            issues.push('- Ensure each bullet in argument sections is EXACTLY 2-3 sentences. If a bullet has more, cut the weakest sentences.');
-        }
-        issues.push('- If any sentence starts with "Because", rewrite it to start with the actual subject instead. E.g. "Because gene editing can cause..." → "Gene editing can cause..."');
-        issues.push('- Remove any sentence that describes what a study/paper/article IS rather than what it FOUND (e.g. "This study reviews..." or "This highlights the importance of...")');
-        issues.push('- Keep ALL citation markers like (Author, Year) or superscript numbers exactly as they are');
-        issues.push('- Keep ALL section headers exactly as they are on their own lines');
-        issues.push('- Do NOT add any new content, citations, or sentences');
-
         const messages = [
-            { role: 'system', content: 'You are a text editor. Output ONLY the cleaned text. Do NOT explain your reasoning. Do NOT output any thinking, commentary, or notes. No preamble. No "Here is the cleaned text". Just the text itself.' },
-            { role: 'user', content: `Clean up this academic text by fixing ONLY these issues:\n${issues.join('\n')}\n\nTEXT:\n${text}\n\nOutput the cleaned text only:` }
+            { role: 'system', content: 'You are a QA checker. Return ONLY valid JSON. No thinking, no explanation.' },
+            { role: 'user', content: `Check this academic text and return a JSON object with these boolean fields:
+- "hasCommentary": true if ANY sentence comments on a source rather than arguing (e.g. "Indeed, Author highlights...", "As Author points out...", "Author effectively illustrates...", "This highlights the importance of...")
+- "hasBecauseStarts": true if ANY sentence or bullet starts with the word "Because"
+- "hasMetaDescriptions": true if ANY sentence describes what a study IS rather than what it FOUND (e.g. "This study reviews...", "This article examines...")
+- "headersIntact": true if section headers like "ARGUMENTS FOR", "DECISION:", "JUSTIFICATION:" each appear on their own line
+- "bulletsCorrectLength": true if every bullet (lines starting with "- ") has 2-3 sentences (not more)
+
+TEXT:
+${text}
+
+Return ONLY the JSON object:` }
         ];
-        let cleaned = await GroqAPI.chat(messages, GROQ);
-
-        // Strip any reasoning/thinking that leaked through (Qwen sometimes outputs without <think> tags)
-        cleaned = cleaned
-            .replace(/<think>[\s\S]*?<\/think>/gi, '')
-            .replace(/^(?:Okay|Let me|First|Looking|Now|I need|I'll|Moving|Also|The user|Checking|Finally|Here'?s|Sure|Certainly)[^\n]*\n(?:[^\n]*\n)*/i, '')
-            .trim();
-
-        // If the cleaned text starts with reasoning paragraphs (no header/bullet), find the actual content
-        // by looking for the first known header or bullet
-        if (taskFmt === 'table' || taskFmt === 'steps' || taskFmt === 'structured') {
-            const headerIdx = cleaned.search(/^(?:ARGUMENTS|DECISION|JUSTIFICATION)/m);
-            if (headerIdx > 100) cleaned = cleaned.substring(headerIdx);
-        }
-
-        // Sanity check: if Groq returned something drastically different (>40% shorter), keep original
-        if (cleaned && cleaned.length > text.length * 0.6) return cleaned;
-        return text;
+        const raw = await GroqAPI.chat(messages, GROQ, true);
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) return { pass: true };
+        return JSON.parse(jsonMatch[0]);
     } catch (e) {
-        console.error('[Agent] Groq validation failed, using original:', e.message);
-        return text;
+        console.error('[Agent] Groq check failed:', e.message);
+        return { pass: true };
     }
+};
+
+// Deterministic fixes applied based on Groq check results — Groq text NEVER enters output
+const applyFixes = (text, checks) => {
+    let result = text;
+
+    // Fix "Because" starts
+    if (checks.hasBecauseStarts) {
+        result = result
+            .replace(/^(\s*[-•]\s+)Because\s+/gm, '$1')
+            .replace(/^Because\s+/gm, '')
+            .replace(/^(\s*[-•]\s+)([a-z])/gm, (_, p, c) => p + c.toUpperCase())
+            .replace(/^([a-z])/gm, c => c.toUpperCase());
+    }
+
+    // Strip commentary sentences (transition + Author + commentary verb pattern)
+    if (checks.hasCommentary || checks.hasMetaDescriptions) {
+        // "Indeed/Furthermore/However, Author (Year) highlights/underscores/illustrates..."
+        result = result.replace(/\s*(?:Indeed|Furthermore|Moreover|Additionally|Specifically|However|Notably|Similarly),?\s+[A-Z][a-z]+(?:'s)?(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?(?:\s*\([^)]*\))?\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
+        // "Author (Year) highlights/underscores..." at sentence start
+        result = result.replace(/\s*[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\(\d{4}\)\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
+        // "As Author (Year) points out/notes/highlights..."
+        result = result.replace(/\s*As\s+[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\([^)]*\)\s+[^.]*\./g, '');
+        // "This highlights/underscores the importance of..."
+        result = result.replace(/\s*This\s+(?:highlights?|underscores?|emphasizes?|illustrates?|demonstrates?)\s+(?:the\s+)?(?:importance|significance|need|potential|concern|risk)[^.]*\./g, '');
+    }
+
+    // Trim bullets to 3 sentences max
+    if (checks.bulletsCorrectLength === false) {
+        result = result.replace(/^(\s*[-•]\s+)(.+)$/gm, (match, prefix, body) => {
+            const sentences = body.match(/[^.!?]+[.!?]+/g) || [body];
+            if (sentences.length > 3) return prefix + sentences.slice(0, 3).join('').trim();
+            return match;
+        });
+    }
+
+    // Clean up double spaces and trailing whitespace
+    return result.replace(/  +/g, ' ').replace(/ +\n/g, '\n').trim();
 };
 
 // Remove any bibliography/reference section the model appended to essay text
@@ -474,7 +497,8 @@ Complete the task now:`;
                         : await GeminiAPI.chat(prompt, GEMINI);
 
                     let plainText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))));
-                    plainText = await validateWithGroq(plainText, fmt, GROQ);
+                    const writeChecks = await checkWithGroq(plainText, fmt, GROQ);
+                    plainText = applyFixes(plainText, writeChecks);
                     result.output = plainText;
                     result.outputHtml = buildEssayHTML(plainText);
                     result.type = 'text';
@@ -631,7 +655,8 @@ Return ONLY the text with citations inserted:`;
 
                     let citedText = await GeminiAPI.chat(prompt, GEMINI);
                     citedText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText)))));
-                    citedText = await validateWithGroq(citedText, citeFmt, GROQ);
+                    const citeChecks = await checkWithGroq(citedText, citeFmt, GROQ);
+                    citedText = applyFixes(citedText, citeChecks);
 
                     if (type === 'footnotes') {
                         const fixPrompt = `Wherever an author name appears without a footnote superscript, add the correct one. Do not change anything else. Do not add a reference list. Do not start with commentary.\n\nTEXT:\n${citedText}\n\nSOURCES:\n${sourceList}\n\nReturn the corrected text only:`;
@@ -729,7 +754,8 @@ Return the text with quotes inserted:`;
 
                     const quoteFmt = detectTaskFormat(context.task || '');
                     let withQuotes=ensureHeaders(stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI))));
-                    withQuotes = await validateWithGroq(withQuotes, quoteFmt, GROQ);
+                    const quoteChecks = await checkWithGroq(withQuotes, quoteFmt, GROQ);
+                    withQuotes = applyFixes(withQuotes, quoteChecks);
                     result.output=withQuotes;
                     result.outputHtml=buildEssayHTML(withQuotes);
                     result.type='text';
