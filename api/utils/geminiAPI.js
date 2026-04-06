@@ -1,12 +1,15 @@
 // api/utils/geminiAPI.js
 const GEMINI_MODELS = [
+  'gemma-4-31B-it',
+  'gemini-3.1-flash-lite-preview',
+  'gemma-4-26B-A4B-it',
   'gemma-3-27b-it',
+  'gemma-4-E4B-it',
+  'gemma-4-E2B-it',
   'gemini-3-flash-preview',
   'gemini-2.5-pro',
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
   'gemma-3-12b-it',
   'gemma-3-4b-it',
   'gemma-3-1b-it'
