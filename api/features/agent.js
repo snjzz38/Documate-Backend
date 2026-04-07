@@ -13,6 +13,12 @@ const stripMarkdown = t => t
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/`([^`]+)`/g, '$1');
 
+// New helper to strip internal monologue/thinking tags
+const stripThinking = t => t
+    .replace(/<(?:thought|thinking|internal_monologue)>[\s\S]*?<\/(?:thought|thinking|internal_monologue)>/gi, '')
+    .replace(/\[(?:thought|thinking|internal_monologue)\][\s\S]*?\[\/(?:thought|thinking|internal_monologue)\]/gi, '')
+    .trim();
+
 // Strip AI preamble like "Here's your essay:", "Sure, here is the response:", etc.
 const stripPreamble = t => t
     .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
@@ -492,18 +498,19 @@ ${imageFiles.length > 0 ? '- Carefully analyze any uploaded images as part of th
 
 Complete the task now:`;
 
-                    const rawText = imageFiles.length > 0
-                        ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
-                        : await GeminiAPI.chat(prompt, GEMINI);
+            const rawText = imageFiles.length > 0
+                    ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
+                    : await GeminiAPI.chat(prompt, GEMINI);
 
-                    let plainText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))));
-                    const writeChecks = await checkWithGroq(plainText, fmt, GROQ);
-                    plainText = applyFixes(plainText, writeChecks);
-                    result.output = plainText;
-                    result.outputHtml = buildEssayHTML(plainText);
-                    result.type = 'text';
-                    break;
-                }
+                // Added stripThinking to the cleanup chain
+                let plainText = ensureHeaders(stripPreamble(stripMarkdown(stripThinking(stripRefs(stripSourceAppendix(rawText))))));
+                const writeChecks = await checkWithGroq(plainText, fmt, GROQ);
+                plainText = applyFixes(plainText, writeChecks);
+                result.output = plainText;
+                result.outputHtml = buildEssayHTML(plainText);
+                result.type = 'text';
+                break;
+            }
 
                 // ── HUMANIZE ──────────────────────────────────────────────────
                 case 'HUMANIZE': {
