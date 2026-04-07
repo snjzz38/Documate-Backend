@@ -1,5 +1,5 @@
 // api/utils/geminiAPI.js
-const ALL_GEMINI_MODELS = [
+const GEMINI_MODELS = [
   'gemma-4-31b-it',
   'gemini-3.1-flash-lite-preview',
   'gemma-4-26b-a4b-it',
