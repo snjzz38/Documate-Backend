@@ -39,18 +39,22 @@ export const GroqAPI = {
             const currentModel = GROQ_MODELS[0];
 
             try {
+                const body = {
+                    model: currentModel,
+                    messages: messages,
+                    temperature: 0.1,
+                    // Disable thinking/reasoning tokens at the API level for models that support it
+                    thinking: { type: "disabled" },
+                    ...(jsonMode ? { response_format: { type: "json_object" } } : {})
+                };
+
                 const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                     method: "POST",
                     headers: {
                         "Authorization": `Bearer ${apiKey}`,
                         "Content-Type": "application/json"
                     },
-                    body: JSON.stringify({
-                        model: currentModel,
-                        messages: messages,
-                        temperature: 0.1,
-                        response_format: jsonMode ? { type: "json_object" } : undefined
-                    })
+                    body: JSON.stringify(body)
                 });
 
                 const data = await res.json();
