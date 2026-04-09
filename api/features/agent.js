@@ -105,6 +105,8 @@ const stripExistingCitations = t => t
     .replace(/\([A-Z][a-zA-Z\s,&.]+(?:et al\.)?[,\s]+\d{4}[a-z]?\)/g, '')
     .replace(/\b([A-Z][a-z]+(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?)\s*\(\d{4}[a-z]?\)/g, '$1')
     .replace(/\(\d{4}[a-z]?\)/g, '')
+    // Strip superscript footnote numbers
+    .replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 
@@ -258,12 +260,10 @@ const buildEssayHTML = text => {
         `</div>`;
 };
 
-// ─── Source digest: summarize each source and extract quotes ─────────────────
-// Returns a map keyed by source URL: { mainIdea, inTextKey, quotes[] }
+// ─── Source digest ────────────────────────────────────────────────────────────
 const buildSourceDigest = async (sources, style, GEMINI) => {
     const isApa = style.includes('apa');
     const isMla = style.includes('mla');
-
     const digest = {};
 
     await Promise.all(sources.slice(0, 12).map(async s => {
@@ -274,7 +274,6 @@ const buildSourceDigest = async (sources, style, GEMINI) => {
 
         const abstract = (s.text || '').substring(0, 600) || 'No abstract available.';
 
-        // Extract usable sentences from abstract (concrete findings, not meta-descriptions)
         const sentences = abstract.match(/[^.!?]+[.!?]+/g) || [];
         const isUseless = sent =>
             /\b(?:this|the present|our)\s+(?:article|paper|study|review)\b/i.test(sent) ||
@@ -286,7 +285,6 @@ const buildSourceDigest = async (sources, style, GEMINI) => {
             .slice(0, 3)
             .map(q => q.trim());
 
-        // Ask Gemini for a 1-2 sentence main idea summary
         let mainIdea = '';
         try {
             const prompt = `Summarize in 1-2 sentences the main argument or finding of this academic source. Be specific — state what it found or argues, not just what it's about. No preamble.
@@ -306,16 +304,15 @@ Abstract: ${abstract}`;
     return digest;
 };
 
-// ─── JSON insertion: apply {insert_idx: "text"} map into a sentences array ───
+// ─── JSON insertion helpers ───────────────────────────────────────────────────
+
+// Appends a citation key inside the sentence's final punctuation
 const applyInsertions = (sentences, insertionMap) => {
-    // insertionMap: { "N": "text to append after sentence N" }
     const result = [];
     sentences.forEach((sentence, idx) => {
-        // Strip trailing punctuation, append citation before it
         const key = String(idx);
         if (insertionMap[key]) {
-            // Insert citation before the sentence's final punctuation
-            const punct = sentence.match(/[.!?]+\s*$/)?.[0] || '';
+            const punct = sentence.match(/([.!?]+)\s*$/)?.[1] || '';
             const base = sentence.replace(/[.!?]+\s*$/, '').trimEnd();
             result.push(`${base} ${insertionMap[key]}${punct}`);
         } else {
@@ -406,7 +403,6 @@ export default async function handler(req, res) {
                     ).join('\n\n');
 
                     const fmt = detectTaskFormat(userTask);
-
                     let formatInstructions = '';
 
                     if (fmt === 'table') {
@@ -443,26 +439,21 @@ LENGTH RULES — STRICTLY ENFORCED:
 SENTENCE STARTER RULES — STRICTLY ENFORCED:
 - NEVER start any bullet with "Because". Start with the actual claim instead.
 - NEVER start two consecutive sentences with the same word anywhere in the output
-- BAD: "Because gene editing can..." → GOOD: "Gene editing can..."
-- BAD: "Because parents naturally..." → GOOD: "Parents naturally..."
-- Vary starters: use the subject, a condition, a contrast, a fact — anything but "Because" as a first word
+- Vary starters: use the subject, a condition, a contrast, a fact
 
 CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim on their own lines.`;
 
                     } else if (fmt === 'steps' || fmt === 'structured') {
                         formatInstructions = `FORMAT — STRUCTURED ASSIGNMENT:
-This task has specific sections or steps. Output each section with its label, in order:
 - Read the task carefully and identify each distinct section or deliverable
 - Complete each section fully, in the order given
 - Use the exact section labels from the task
 - Do NOT convert this into a prose essay
-- Do NOT skip any sections
 - Plain text, no markdown formatting`;
 
                     } else if (fmt === 'questions') {
                         formatInstructions = `FORMAT — ANSWER EACH QUESTION:
 - Answer each question directly and completely, keeping original numbering
-- Each answer: thorough and specific
 - Plain text only — no markdown`;
 
                     } else if (fmt === 'list') {
@@ -472,37 +463,23 @@ This task has specific sections or steps. Output each section with its label, in
 
                     } else if (fmt === 'paragraph') {
                         formatInstructions = `FORMAT — PARAGRAPH RESPONSE:
-- Write a single well-developed paragraph (or the number of paragraphs the task specifies)
-- Do NOT expand into a multi-section essay with introduction/body/conclusion headings
-- Do NOT add a title or section labels unless the task asks for them
+- Write a single well-developed paragraph (or the number specified)
+- Do NOT expand into a multi-section essay
 - Plain text only — no markdown`;
 
                     } else if (fmt === 'essay') {
-                        formatInstructions = `FORMAT — ACADEMIC ESSAY (apply all of these):
-STRUCTURE:
-- Introduction: Open with context, then state your EXPLICIT thesis/decision in the final sentence of the intro (e.g. "This paper argues that...")
-- Body paragraphs: Each paragraph covers ONE main point. Start with a topic sentence. Support with evidence. End by connecting back to the thesis — never restate the topic sentence
-- Conclusion: Synthesize the argument; do not just summarize. Restate thesis in new words and explain the broader significance
-
-WRITING QUALITY:
-- Vary sentence openings and lengths — no two consecutive sentences should start the same way
-- Paraphrase all source material; avoid direct quotes unless uniquely necessary
-- Every claim should logically advance the argument; cut filler phrases like "it is important to note"
-- Formal academic tone throughout`;
+                        formatInstructions = `FORMAT — ACADEMIC ESSAY:
+- Introduction with explicit thesis in final sentence
+- Body paragraphs: one main point each, topic sentence → evidence → thesis link
+- Conclusion: synthesize, don't just summarize
+- Vary sentence openings; formal academic tone throughout`;
 
                     } else {
                         formatInstructions = `FORMAT — MATCH THE TASK EXACTLY:
-STEP 1: Identify what output format the task is asking for (e.g. a letter, a list, Q&A, a paragraph, a table, a short answer).
-STEP 2: Produce ONLY that format.
-
-STRICT RULES:
-- If the task asks for 1 paragraph — write 1 paragraph, NOT an essay
-- If the task asks for a letter — write a letter
-- If the task asks for Q&A or numbered questions — answer each question directly and separately
-- If the task has labeled sections — use those exact labels
-- NEVER write a multi-section academic essay (no Introduction/Body/Conclusion structure) unless the task explicitly uses the word "essay"
-- Do NOT add titles, headers, or extra sections the task did not ask for
-- Plain text — no markdown unless the task specifically requires it`;
+- Identify what format the task asks for and produce ONLY that
+- NEVER write a multi-section essay unless the task uses the word "essay"
+- Do NOT add titles, headers, or sections the task did not ask for
+- Plain text — no markdown`;
                     }
 
                     const prompt = `Complete the following task accurately.
@@ -518,7 +495,6 @@ CRITICAL RULES — ALWAYS APPLY:
 - Do NOT include any in-text citations, author names, or source references anywhere in the output
 - Do NOT add a reference list, "Sources:", or bibliography section at the end
 - Do NOT mention specific researchers, papers, or organisations by name
-- Do NOT write a generic essay if the task asks for something else
 - Do NOT start with commentary like "Here's your essay:", "Sure!", or any preamble — begin with the actual content immediately
 ${imageFiles.length > 0 ? '- Carefully analyze any uploaded images as part of the response.' : ''}
 
@@ -601,7 +577,11 @@ Complete the task now:`;
                 case 'CITE': {
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'apa7';
-                    const type = options.citationType || 'in-text';
+                    // Normalize type: must be exactly 'bibliography', 'in-text', or 'footnotes'
+                    const type = (options.citationType || 'in-text').toLowerCase().trim();
+                    const isBibliographyOnly = type === 'bibliography';
+                    const isFootnotes = type === 'footnotes';
+                    const isInText = !isBibliographyOnly && !isFootnotes; // default
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
 
@@ -616,7 +596,7 @@ Complete the task now:`;
                     const finish = (essayText, citedSources, insertionOrder = null) => {
                         const bib = buildBibliographyHTML(
                             citedSources, style,
-                            type === 'footnotes' ? 'footnotes' : 'bibliography',
+                            isFootnotes ? 'footnotes' : 'bibliography',
                             insertionOrder
                         );
                         result.output = essayText;
@@ -630,13 +610,17 @@ Complete the task now:`;
                     if (!sourcesWithCitations.length) { finish(input, []); break; }
                     if (!input) { finish('', sourcesWithCitations); break; }
 
-                    // Step 1: Build source digest — summarize each source
+                    // ── BIBLIOGRAPHY ONLY: return text unchanged, just build the reference list ──
+                    if (isBibliographyOnly) {
+                        finish(input, sourcesWithCitations);
+                        break;
+                    }
+
+                    // ── IN-TEXT or FOOTNOTES: insert citations into the text ──
                     const digest = await buildSourceDigest(sourcesWithCitations, style, GEMINI);
 
-                    // Step 2: Split essay into sentences array
                     const sentences = input.match(/[^.!?]+[.!?]+/g) || [input];
 
-                    // Step 3: Build compact source list for the AI
                     const sourceList = sourcesWithCitations.slice(0, 12).map((s, i) => {
                         const key = s.url || s.doi || s.id || s.title;
                         const d = digest[key] || {};
@@ -647,87 +631,103 @@ Complete the task now:`;
                         return `[${i}] CITE-AS: ${inTextKey}\n    Main idea: ${d.mainIdea || (s.text||'').substring(0,150)}\n    Title: "${s.title}"`;
                     }).join('\n\n');
 
-                    // Step 4: Ask AI to return JSON { sentence_index: "citation_key" }
-                    let citationFormat = '';
-                    if (type === 'in-text') {
-                        citationFormat = isApa
-                            ? 'APA 7th: (LastName, Year) — copy CITE-AS key exactly'
-                            : isMla ? 'MLA 9th: (LastName) — copy CITE-AS key exactly'
-                            : 'Chicago: (LastName Year) — copy CITE-AS key exactly';
-                    } else {
-                        citationFormat = 'Footnote superscript: ¹²³ — use sequential numbers';
-                    }
-
                     const numberedSentences = sentences.map((s, i) => `[${i}] ${s.trim()}`).join('\n');
 
-                    const citePrompt = `You are inserting citations into an academic text.
+                    if (isInText) {
+                        // ── IN-TEXT: parenthetical (Author, Year) ──
+                        const citePrompt = `You are inserting parenthetical in-text citations into an academic text.
 
-SENTENCES (each numbered by index):
+SENTENCES (numbered by index):
 ${numberedSentences}
 
 SOURCES:
 ${sourceList}
 
-CITATION FORMAT: ${citationFormat}
+CITATION FORMAT: ${isApa ? 'APA 7th: (LastName, Year)' : isMla ? 'MLA 9th: (LastName)' : 'Chicago: (LastName Year)'}
+Copy the CITE-AS key exactly as shown — do not alter names or years.
 
 TASK: Return a JSON object where:
-- Keys are sentence indices (as strings, e.g. "0", "3", "7")
-- Values are the citation string to append to that sentence (e.g. "(Smith, 2020)" or "¹")
-- Only include sentences that genuinely need a citation based on source relevance
-- Distribute citations throughout the text — do not cluster them all in one place
-- Each source should be cited where it is most relevant, not just at the end
-- Do NOT cite every sentence — only claims that match a specific source
+- Keys are sentence indices (as strings, e.g. "0", "4")
+- Values are the parenthetical citation to append to that sentence, e.g. "(Smith, 2020)"
+- Distribute citations across the whole text — do NOT cluster at the end
+- Only cite sentences where a source is genuinely relevant
+- Duplicate citations of the same source at different locations ARE allowed
 - Do NOT add new sentences — only provide the insertion map
 
-Return ONLY valid JSON, no explanation:`;
+Return ONLY valid JSON:`;
 
-                    let citedText = input;
-                    try {
-                        const raw = await GeminiAPI.chat(citePrompt, GEMINI, 0.3);
-                        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            const insertionMap = JSON.parse(jsonMatch[0]);
-                            citedText = applyInsertions(sentences, insertionMap);
+                        try {
+                            const raw = await GeminiAPI.chat(citePrompt, GEMINI, 0.3);
+                            const jsonMatch = raw.match(/\{[\s\S]*\}/);
+                            if (jsonMatch) {
+                                const insertionMap = JSON.parse(jsonMatch[0]);
+                                const citedText = ensureHeaders(applyFixes(
+                                    applyInsertions(sentences, insertionMap),
+                                    await checkWithGroq(applyInsertions(sentences, insertionMap), detectTaskFormat(context.task || ''), GROQ)
+                                ));
+                                finish(citedText, sourcesWithCitations);
+                                break;
+                            }
+                        } catch(e) {
+                            console.error('[Agent] CITE in-text JSON parse failed:', e.message);
                         }
-                    } catch(e) {
-                        console.error('[Agent] CITE JSON parse failed:', e.message);
-                        // Fall through with uncited text
-                    }
-
-                    citedText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText)))));
-                    const citeChecks = await checkWithGroq(citedText, detectTaskFormat(context.task || ''), GROQ);
-                    citedText = applyFixes(citedText, citeChecks);
-
-                    if (type === 'footnotes') {
-                        const superToNum={'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
-                        const toSuper=n=>String(n).split('').map(d=>'⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-                        let normalized=citedText.replace(/<sup>(\d+)<\/sup>/gi,(_,n)=>toSuper(parseInt(n)));
-                        const allMatches=[...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
-                        const parseSuper=str=>{
-                            const n=parseInt(str.split('').map(c=>superToNum[c]??0).join(''));
-                            if(n>0&&n<=sources.length) return [n];
-                            return str.split('').map(c=>superToNum[c]).filter(n=>n>0&&n<=sources.length);
-                        };
-                        const noteEntries=[],matchToNewNums=new Map();
-                        allMatches.forEach((m,idx)=>{
-                            const nums=parseSuper(m[0]).map(sNum=>{
-                                const src=sourcesWithCitations[sNum-1]; if(!src) return null;
-                                noteEntries.push(src); return noteEntries.length;
-                            }).filter(Boolean);
-                            if(nums.length) matchToNewNums.set(idx,nums);
-                        });
-                        let rewritten=normalized,offset=0;
-                        allMatches.forEach((m,idx)=>{
-                            const nums=matchToNewNums.get(idx); if(!nums?.length) return;
-                            const sup=nums.map(toSuper).join('');
-                            rewritten=rewritten.slice(0,m.index+offset)+sup+rewritten.slice(m.index+offset+m[0].length);
-                            offset+=sup.length-m[0].length;
-                        });
-                        finish(rewritten, sourcesWithCitations, noteEntries);
+                        // Fallback: return uncited text with bibliography
+                        finish(input, sourcesWithCitations);
                         break;
                     }
 
-                    finish(citedText, sourcesWithCitations);
+                    if (isFootnotes) {
+                        // ── FOOTNOTES: superscript numbers ¹²³ ──
+                        const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
+
+                        const footnotePrompt = `You are inserting superscript footnote numbers into an academic text.
+
+SENTENCES (numbered by index):
+${numberedSentences}
+
+SOURCES:
+${sourceList}
+
+TASK: Return a JSON object where:
+- Keys are sentence indices (as strings)
+- Values are superscript footnote numbers to append, e.g. "¹" or "²"
+- Number footnotes sequentially starting from 1 in order of first appearance
+- The same source can be cited multiple times with the same number
+- Distribute across the text — do NOT cluster at the end
+- Do NOT use parenthetical (Author, Year) format — ONLY superscript numbers
+
+Return ONLY valid JSON:`;
+
+                        try {
+                            const raw = await GeminiAPI.chat(footnotePrompt, GEMINI, 0.3);
+                            const jsonMatch = raw.match(/\{[\s\S]*\}/);
+                            if (jsonMatch) {
+                                const insertionMap = JSON.parse(jsonMatch[0]);
+
+                                // Map superscript values back to source indices for note entries
+                                const superToSourceIdx = {};
+                                const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
+                                Object.entries(insertionMap).forEach(([sentIdx, sup]) => {
+                                    const num = parseInt(String(sup).split('').map(c => superToNum[c] ?? 0).join(''));
+                                    if (num > 0 && !superToSourceIdx[sup]) {
+                                        // Assign source by order of first footnote appearance
+                                        const sourceIdx = Object.keys(superToSourceIdx).length;
+                                        superToSourceIdx[sup] = sourcesWithCitations[sourceIdx] || sourcesWithCitations[0];
+                                    }
+                                });
+
+                                const citedText = ensureHeaders(applyInsertions(sentences, insertionMap));
+                                const noteEntries = Object.values(superToSourceIdx);
+                                finish(citedText, sourcesWithCitations, noteEntries.length ? noteEntries : null);
+                                break;
+                            }
+                        } catch(e) {
+                            console.error('[Agent] CITE footnotes JSON parse failed:', e.message);
+                        }
+                        finish(input, sourcesWithCitations);
+                        break;
+                    }
+
                     break;
                 }
 
@@ -738,21 +738,13 @@ Return ONLY valid JSON, no explanation:`;
                     if (!input || !sources.length) { result.output=input; result.outputHtml=buildEssayHTML(input); result.type='text'; break; }
 
                     const style = options.citationStyle || 'apa7';
-
-                    // Step 1: Build source digest to get usable quotes per source
                     const digest = await buildSourceDigest(sources, style, GEMINI);
 
-                    // Flatten all usable quotes with their source info
                     const availableQuotes = [];
                     for (const [key, d] of Object.entries(digest)) {
                         for (const quote of d.quotes) {
                             if (quote.length > 40) {
-                                availableQuotes.push({
-                                    quote,
-                                    inTextKey: d.inTextKey,
-                                    mainIdea: d.mainIdea,
-                                    sourceTitle: d.source?.title || ''
-                                });
+                                availableQuotes.push({ quote, inTextKey: d.inTextKey, mainIdea: d.mainIdea });
                             }
                         }
                     }
@@ -764,7 +756,6 @@ Return ONLY valid JSON, no explanation:`;
                         break;
                     }
 
-                    // Step 2: Split essay into sentences array
                     const sentences = input.match(/[^.!?]+[.!?]+/g) || [input];
                     const numberedSentences = sentences.map((s, i) => `[${i}] ${s.trim()}`).join('\n');
 
@@ -772,7 +763,6 @@ Return ONLY valid JSON, no explanation:`;
                         `[${i}] ${q.inTextKey}: "${q.quote}"\n    Source about: ${q.mainIdea}`
                     ).join('\n\n');
 
-                    // Step 3: Ask AI for JSON insertion map { sentence_index: "transition + quote + analysis" }
                     const quotesPrompt = `You are inserting direct quotes into an academic essay to strengthen specific claims.
 
 ESSAY SENTENCES (numbered by index):
@@ -783,15 +773,14 @@ ${quoteList}
 
 TASK: Return a JSON object where:
 - Keys are sentence indices (as strings) AFTER which a quote block should be inserted
-- Values are the full quote insertion: a transition sentence + the quoted text with citation + 1 sentence of analysis
-- Only insert 3-5 quotes total, distributed across the essay
+- Values are the full quote insertion: transition + quoted text with citation + 1 sentence of analysis
+- Insert 3-5 quotes total, distributed across the essay
 - Choose quotes that directly support the claim in the sentence they follow
 - SKIP quotes that just describe what a study does ("This paper examines...")
-- Format each value as a complete paragraph addition, e.g.:
-  "As research confirms, \\"[quote text]\\" ${`(Author, Year)`}. This demonstrates [specific analytical point]."
-- Do NOT insert quotes that repeat what the surrounding sentences already say
+- Format: "As research confirms, \\"[quote]\\" ${`(Author, Year)`}. This shows [specific point]."
+- Do NOT repeat what surrounding sentences already say
 
-Return ONLY valid JSON, no explanation:`;
+Return ONLY valid JSON:`;
 
                     let withQuotes = input;
                     try {
@@ -799,14 +788,11 @@ Return ONLY valid JSON, no explanation:`;
                         const jsonMatch = raw.match(/\{[\s\S]*\}/);
                         if (jsonMatch) {
                             const insertionMap = JSON.parse(jsonMatch[0]);
-                            // For quotes we insert AFTER the sentence, not appended to it
                             const resultSentences = [];
                             sentences.forEach((sentence, idx) => {
                                 resultSentences.push(sentence);
                                 const key = String(idx);
-                                if (insertionMap[key]) {
-                                    resultSentences.push(insertionMap[key]);
-                                }
+                                if (insertionMap[key]) resultSentences.push(insertionMap[key]);
                             });
                             withQuotes = resultSentences.join(' ');
                         }
