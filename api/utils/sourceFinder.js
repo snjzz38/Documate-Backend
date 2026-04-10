@@ -3,6 +3,73 @@ import { DoiAPI } from './doiAPI.js';
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
+// ─── AI-powered query generation ─────────────────────────────────────────────
+// Generates 3-4 focused academic search queries from any topic.
+// Falls back to keyword extraction if Gemini is unavailable.
+const generateQueriesWithAI = async (topic, apiKey) => {
+    if (!apiKey) return null;
+    try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: `You are an academic librarian. Generate exactly 4 short, specific search queries for finding peer-reviewed academic papers about this topic.
+
+TOPIC: "${topic}"
+
+RULES:
+- Each query must be 3-6 words
+- Queries should cover different angles of the topic (e.g. science, ethics, policy, social impact)
+- Use academic terminology
+- Do NOT include the word "research" or "study" in queries
+- If the topic is about a specific animal, breed, or biological subject, include the scientific or formal name
+- Return ONLY a JSON array of 4 strings, nothing else
+
+Example output: ["CRISPR germline editing ethics", "heritable genome modification policy", "designer babies genetic selection", "preimplantation genetic diagnosis society"]
+
+Return ONLY the JSON array:` }] }],
+                generationConfig: { temperature: 0.2 }
+            })
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const match = text.match(/\[[\s\S]*?\]/);
+        if (!match) return null;
+        const queries = JSON.parse(match[0]);
+        if (!Array.isArray(queries) || queries.length === 0) return null;
+        return queries.filter(q => typeof q === 'string' && q.length > 3).slice(0, 4);
+    } catch (e) {
+        console.error('[SourceFinder] AI query generation failed:', e.message);
+        return null;
+    }
+};
+
+// ─── Relevance scoring ────────────────────────────────────────────────────────
+// Returns a 0-1 relevance score for a paper against the original topic.
+// Considers: title match, abstract match, concept overlap.
+const scoreRelevance = (paper, topicWords, queries) => {
+    const titleLower = (paper.title || '').toLowerCase();
+    const abstractLower = (paper.abstract || '').toLowerCase();
+    const allQueryWords = queries.flatMap(q => q.toLowerCase().split(/\s+/)).filter(w => w.length > 3);
+    const uniqueQueryWords = [...new Set([...topicWords, ...allQueryWords])];
+
+    let score = 0;
+    let matches = 0;
+
+    for (const word of uniqueQueryWords) {
+        const inTitle = titleLower.includes(word);
+        const inAbstract = abstractLower.includes(word);
+        if (inTitle) { score += 2; matches++; }
+        else if (inAbstract) { score += 1; matches++; }
+    }
+
+    // Normalize
+    const maxPossible = uniqueQueryWords.length * 2;
+    return maxPossible > 0 ? score / maxPossible : 0;
+};
+
 export const SourceFinderAPI = {
 
     async fetchAllCitations(sources, style = 'apa7') {
@@ -23,9 +90,7 @@ export const SourceFinderAPI = {
                     return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
                 }
 
-                // Merge Crossref metadata — fill gaps from OpenAlex
                 let mergedAuthors = meta.authors?.length ? meta.authors : src.authors;
-                // Filter out bad single-letter family names
                 mergedAuthors = mergedAuthors.filter(a => a.family && a.family.length > 1 && !/^\d+$/.test(a.family));
                 if (mergedAuthors.length === 0) mergedAuthors = (src.authors || []).filter(a => a.family && a.family.length > 1);
 
@@ -145,7 +210,7 @@ export const SourceFinderAPI = {
         return citation.trim();
     },
 
-    async search(query, limit = 12) {
+    async search(query, limit = 12, topicWords = [], allQueries = []) {
         if (!query || query.trim().length < 3) return [];
         try {
             const cleanQuery = query.trim().toLowerCase();
@@ -162,19 +227,24 @@ export const SourceFinderAPI = {
             const data = await response.json();
             if (!data.results?.length) return [];
 
+            const queryWords = cleanQuery.split(/\s+/).filter(w => w.length > 3);
+
             return data.results
                 .map(work => this._transformWork(work))
                 .filter(p => {
                     if (!p.doi) return false;
                     if (!p.abstract || p.abstract.length < 150) return false;
-                    const queryWords = cleanQuery.split(/\s+/).filter(w => w.length > 3);
+                    // Require at least 60% of query words to appear in title or abstract
                     const titleLower = p.title.toLowerCase();
                     const abstractLower = p.abstract.toLowerCase();
-                    const matchCount = queryWords.filter(w =>
-                        titleLower.includes(w) || abstractLower.includes(w)
-                    ).length;
-                    return matchCount >= Math.ceil(queryWords.length / 2);
+                    const matchCount = queryWords.filter(w => titleLower.includes(w) || abstractLower.includes(w)).length;
+                    const threshold = Math.max(1, Math.ceil(queryWords.length * 0.6));
+                    return matchCount >= threshold;
                 })
+                .map(p => ({
+                    ...p,
+                    _relevanceScore: scoreRelevance(p, topicWords, allQueries)
+                }))
                 .slice(0, limit);
         } catch (e) {
             console.error('[SourceFinder] Search failed:', e.message);
@@ -182,12 +252,25 @@ export const SourceFinderAPI = {
         }
     },
 
-    async searchTopic(topic, limit = 12, citationStyle = null) {
-        const queries = this._generateQueries(topic);
-        console.log('[SourceFinder] Generated queries:', queries);
+    async searchTopic(topic, limit = 12, citationStyle = null, apiKey = null) {
+        // Step 1: Generate smart queries via AI, fall back to keyword extraction
+        const geminiKey = apiKey || process.env.GEMINI_API_KEY;
+        let queries = await generateQueriesWithAI(topic, geminiKey);
 
-        const allResults = await Promise.all(queries.map(q => this.search(q, 8)));
+        if (!queries) {
+            // Fallback: use hardcoded topic branches + raw topic
+            queries = this._generateQueriesFallback(topic);
+        }
 
+        console.log('[SourceFinder] Queries:', queries);
+
+        // Step 2: Extract topic words for relevance scoring
+        const topicWords = topic.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+
+        // Step 3: Search all queries in parallel
+        const allResults = await Promise.all(queries.map(q => this.search(q, 10, topicWords, queries)));
+
+        // Step 4: Deduplicate by DOI
         const seen = new Set();
         const deduplicated = [];
         for (const results of allResults) {
@@ -199,17 +282,27 @@ export const SourceFinderAPI = {
             }
         }
 
-        const topResults = deduplicated
-            .sort((a, b) => (b.citationCount || 0) - (a.citationCount || 0))
+        // Step 5: Sort by relevance score first, then citation count as tiebreaker
+        // Hard filter: drop anything with relevance score below 0.05 (genuinely off-topic)
+        const filtered = deduplicated
+            .filter(p => (p._relevanceScore || 0) >= 0.05)
+            .sort((a, b) => {
+                const scoreDiff = (b._relevanceScore || 0) - (a._relevanceScore || 0);
+                if (Math.abs(scoreDiff) > 0.1) return scoreDiff;
+                return (b.citationCount || 0) - (a.citationCount || 0);
+            })
             .slice(0, limit);
 
+        console.log(`[SourceFinder] ${filtered.length} relevant papers after filtering (${deduplicated.length - filtered.length} dropped as off-topic)`);
+
         if (citationStyle) {
-            return await this.fetchAllCitations(topResults, citationStyle);
+            return await this.fetchAllCitations(filtered, citationStyle);
         }
-        return topResults;
+        return filtered;
     },
 
-    _generateQueries(topic) {
+    // Fallback query generation when AI is unavailable
+    _generateQueriesFallback(topic) {
         const lower = topic.toLowerCase();
         const queries = [topic];
         if (lower.includes('designer bab') || lower.includes('gene edit') || lower.includes('crispr')) {
@@ -218,6 +311,14 @@ export const SourceFinderAPI = {
             queries.push('climate change mitigation policy', 'global warming environmental impact', 'carbon emissions reduction strategies');
         } else if (lower.includes('artificial intelligence') || lower.includes(' ai ')) {
             queries.push('artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance policy');
+        } else if (lower.includes('vaccine') || lower.includes('vaccination')) {
+            queries.push('vaccine hesitancy public health', 'immunization policy effectiveness', 'vaccine safety clinical evidence');
+        } else if (lower.includes('social media') || lower.includes('instagram') || lower.includes('tiktok')) {
+            queries.push('social media mental health adolescents', 'online platform behavior psychology', 'digital media society effects');
+        } else {
+            // Generic: extract nouns and build a focused query
+            const words = topic.split(/\s+/).filter(w => w.length > 4).slice(0, 4);
+            if (words.length > 1) queries.push(words.join(' ') + ' ethics', words.join(' ') + ' policy');
         }
         return queries.slice(0, 4);
     },
