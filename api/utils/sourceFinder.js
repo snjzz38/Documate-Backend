@@ -3,54 +3,10 @@ import { DoiAPI } from './doiAPI.js';
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
-// ─── Stop words ───────────────────────────────────────────────────────────────
-const STOP_WORDS = new Set([
-    'a','an','the','and','or','but','in','on','at','to','for','of','with','by',
-    'from','is','are','was','were','be','been','being','have','has','had','do',
-    'does','did','will','would','could','should','may','might','shall','can',
-    'its','it','this','that','these','those','what','which','who','how','why',
-    'when','where','about','above','after','against','along','among','around',
-    'before','behind','between','during','except','into','near','off','out',
-    'over','since','through','throughout','under','until','upon','within',
-    'without','some','any','all','each','every','both','either','neither',
-    'such','same','other','another','than','then','so','yet','nor','not',
-    'no','only','just','also','even','still','well','very','too','here','there',
-    // Generic academic filler words that aren't useful filters
-    'effects','impact','impacts','study','studies','research','analysis',
-    'review','approach','method','methods','using','use','based','new',
-    'results','findings','data','case','cases','role','factors','factor',
-    'relationship','evidence','implications','implications','overview','issues'
-]);
-
-// Short but meaningful terms to always keep
-const WHITELIST_SHORT = new Set(['ai','ml','dna','rna','gmo','uv','iq','ph','ev','vr','ar']);
-
-// ─── Core word extraction ─────────────────────────────────────────────────────
-const extractCoreWords = topic => {
-    return topic.toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter(w => (w.length >= 3 && !STOP_WORDS.has(w)) || WHITELIST_SHORT.has(w));
-};
-
-// ─── Relevance scoring ────────────────────────────────────────────────────────
-// Score-first: no hard reject on title. Weight title matches 3x, abstract 1x.
-// Returns 0.0–1.0.
-const scoreRelevance = (paper, coreWords) => {
-    if (!coreWords.length) return 0.5;
-    const titleLower = (paper.title || '').toLowerCase();
-    const abstractLower = (paper.abstract || '').toLowerCase();
-    let score = 0;
-    for (const word of coreWords) {
-        if (titleLower.includes(word)) score += 3;
-        else if (abstractLower.includes(word)) score += 1;
-    }
-    const maxPossible = coreWords.length * 3;
-    return maxPossible > 0 ? score / maxPossible : 0;
-};
-
-// ─── AI query generation ──────────────────────────────────────────────────────
-const generateQueriesWithAI = async (topic, apiKey) => {
+// ─── Semantic keyword extraction via Gemini ───────────────────────────────────
+// Ask Gemini what the topic is really about and what keywords academic papers
+// on this subject would actually use. Returns { keywords: string[], queries: string[] }
+const extractSemanticKeywords = async (topic, apiKey) => {
     if (!apiKey) return null;
     try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
@@ -58,37 +14,121 @@ const generateQueriesWithAI = async (topic, apiKey) => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                contents: [{ parts: [{ text: `You are an academic librarian generating search queries for OpenAlex (peer-reviewed paper database).
+                contents: [{ parts: [{ text: `You are an academic librarian. A student needs peer-reviewed sources on this topic:
 
-TOPIC: "${topic}"
+"${topic}"
 
-Generate exactly 4 search queries (3-6 words each) to find academic papers about this topic.
+Your job:
+1. Identify the main subject (what this is fundamentally about)
+2. Generate academic keywords that peer-reviewed papers on this subject would actually use in their titles and abstracts — including synonyms, scientific terms, and related concepts
+3. Generate 4 specific search queries for the OpenAlex academic database
 
-RULES:
-1. At least 2 queries must use the exact core subject or its formal/scientific name
-2. The other 1-2 queries may use scientific synonyms or related academic terminology that OpenAlex would index (e.g. for "Labrador Retriever" you could use "Canis lupus familiaris breed")
-3. Cover different angles: e.g. behavior, health, genetics, ecology, ethics — whichever are relevant
-4. Do NOT use generic words like "research", "study", "review", "effects", "impact" as the main terms
-5. Queries should be specific enough to find papers directly about this subject, not loosely related topics
+Return ONLY this JSON (no other text):
+{
+  "mainSubject": "one sentence description of what this topic is about",
+  "keywords": ["keyword1", "keyword2", "keyword3", ...],
+  "queries": ["3-6 word query 1", "3-6 word query 2", "3-6 word query 3", "3-6 word query 4"]
+}
 
-Return ONLY a JSON array of 4 strings, nothing else.` }] }],
+Rules for keywords:
+- Include the exact terms used AND academic synonyms (e.g. "Labrador Retriever" AND "Canis lupus familiaris" AND "gun dog breed")
+- Include 8-15 keywords total
+- Include both specific and broader terms that papers about this subject would use
+- Do NOT include generic words like "research", "study", "effects", "impact"
+
+Rules for queries:
+- At least 2 queries must contain the core subject or its scientific name
+- Queries should target different angles (behavior, health, genetics, history, etc.)
+- 3-6 words per query` }] }],
                 generationConfig: { temperature: 0.1 }
             })
         });
         if (!res.ok) return null;
         const data = await res.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        // Strip any <think> blocks from reasoning models
-        const clean = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        const match = clean.match(/\[[\s\S]*?\]/);
+        const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        const match = text.match(/\{[\s\S]*\}/);
         if (!match) return null;
-        const queries = JSON.parse(match[0]);
-        if (!Array.isArray(queries) || !queries.length) return null;
-        return queries.filter(q => typeof q === 'string' && q.length > 3).slice(0, 4);
+        const parsed = JSON.parse(match[0]);
+        if (!Array.isArray(parsed.keywords) || !Array.isArray(parsed.queries)) return null;
+        return {
+            keywords: parsed.keywords.filter(k => typeof k === 'string' && k.length > 1),
+            queries: parsed.queries.filter(q => typeof q === 'string' && q.length > 3).slice(0, 4)
+        };
     } catch (e) {
-        console.error('[SourceFinder] AI query generation failed:', e.message);
+        console.error('[SourceFinder] Semantic extraction failed:', e.message);
         return null;
     }
+};
+
+// ─── Fuzzy/stemmed word match ─────────────────────────────────────────────────
+// Handles plural, -ing, -ed, -er, -tion variations without a full stemmer
+const fuzzyIncludes = (text, word) => {
+    if (text.includes(word)) return true;
+    if (word.length <= 3) return false; // don't stem very short words
+    // Try common suffixes
+    const stem = word.length > 5 ? word.slice(0, -2) : word.slice(0, -1);
+    return text.includes(stem);
+};
+
+// ─── Relevance scoring ────────────────────────────────────────────────────────
+// Title match = 3pts, abstract match = 1pt, citation boost via log scale
+const scoreRelevance = (paper, keywords) => {
+    if (!keywords.length) return 0.3;
+    const titleLower = (paper.title || '').toLowerCase();
+    const abstractLower = (paper.abstract || '').toLowerCase();
+    let score = 0;
+    for (const kw of keywords) {
+        const word = kw.toLowerCase();
+        if (fuzzyIncludes(titleLower, word)) score += 3;
+        else if (fuzzyIncludes(abstractLower, word)) score += 1;
+    }
+    const base = score / (keywords.length * 3);
+    // Citation boost: log10(citations+1)/10 adds up to ~0.5 for highly cited papers
+    const citationBoost = Math.log10((paper.citationCount || 0) + 1) / 10;
+    return Math.min(1, base + citationBoost * 0.3); // cap at 1, weight boost at 30%
+};
+
+// ─── Fallback keyword/query generation ───────────────────────────────────────
+const STOP_WORDS = new Set([
+    'a','an','the','and','or','but','in','on','at','to','for','of','with','by',
+    'from','is','are','was','were','be','been','have','has','had','do','does',
+    'did','will','would','could','should','may','might','can','its','it','this',
+    'that','these','those','what','which','who','how','why','when','where',
+    'about','some','any','all','each','every','both','than','then','so','not',
+    'no','only','just','also','still','very','too','here','there','such','same',
+    'effects','impact','impacts','study','studies','research','analysis','review',
+    'approach','method','methods','using','use','based','new','results','findings',
+    'data','case','cases','role','factors','factor','relationship','evidence',
+    'implications','overview','issues','issue'
+]);
+const WHITELIST_SHORT = new Set(['ai','ml','dna','rna','gmo','uv','iq','ph','ev','vr','ar']);
+
+const fallbackKeywords = topic => topic.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => (w.length >= 3 && !STOP_WORDS.has(w)) || WHITELIST_SHORT.has(w));
+
+const fallbackQueries = (topic, keywords) => {
+    const lower = topic.toLowerCase();
+    const kws = new Set(keywords);
+    if (kws.has('crispr') || kws.has('gene') || lower.includes('designer bab')) {
+        return [topic, 'CRISPR human embryo editing ethics', 'germline editing ethical implications', 'preimplantation genetic diagnosis'];
+    }
+    if (kws.has('climate') || kws.has('warming')) {
+        return [topic, 'climate change mitigation policy', 'global warming environmental impact', 'carbon emissions strategies'];
+    }
+    if (kws.has('intelligence') || kws.has('machine') || lower.includes(' ai ')) {
+        return [topic, 'artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance'];
+    }
+    if (kws.has('vaccine') || kws.has('vaccination')) {
+        return [topic, 'vaccine hesitancy public health', 'immunization policy effectiveness', 'vaccine safety evidence'];
+    }
+    if (kws.has('social') && kws.has('media')) {
+        return [topic, 'social media mental health adolescents', 'online platform behavior psychology', 'digital media society'];
+    }
+    const terms = keywords.slice(0, 3).join(' ');
+    return [topic, `${terms} behavior`, `${terms} health`, `${terms} biology`].filter(Boolean).slice(0, 4);
 };
 
 export const SourceFinderAPI = {
@@ -124,8 +164,7 @@ export const SourceFinderAPI = {
             results.push(...enriched);
             if (i + batchSize < sources.length) await new Promise(r => setTimeout(r, 300));
         }
-        const crossrefCount = results.filter(s => s.citationSource === 'crossref').length;
-        console.log(`[SourceFinder] ${crossrefCount}/${results.length} enriched from Crossref`);
+        console.log(`[SourceFinder] ${results.filter(s => s.citationSource === 'crossref').length}/${results.length} enriched from Crossref`);
         return results;
     },
 
@@ -137,48 +176,38 @@ export const SourceFinderAPI = {
 
     _formatApa(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-        const formatAuthor = a => {
-            const initials = a.given
-                ? a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')
-                : '';
-            return initials ? `${a.family}, ${initials}` : a.family;
-        };
+        const fmt = a => a.given
+            ? `${a.family}, ${a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')}`
+            : a.family;
         let authorStr = source.author || 'Unknown';
-        if (authors.length === 1) authorStr = formatAuthor(authors[0]);
-        else if (authors.length === 2) authorStr = `${formatAuthor(authors[0])} & ${formatAuthor(authors[1])}`;
-        else if (authors.length === 3) authorStr = `${formatAuthor(authors[0])}, ${formatAuthor(authors[1])}, & ${formatAuthor(authors[2])}`;
-        else if (authors.length > 3) authorStr = `${formatAuthor(authors[0])}, et al.`;
-        const year = source.year || 'n.d.';
-        const title = source.title || 'Untitled';
-        const journal = source.venue || '';
-        const volume = source.volume ? `, ${source.volume}` : '';
-        const issue = source.issue ? `(${source.issue})` : '';
-        const pages = source.pages ? `, ${source.pages}` : '';
+        if (authors.length === 1) authorStr = fmt(authors[0]);
+        else if (authors.length === 2) authorStr = `${fmt(authors[0])} & ${fmt(authors[1])}`;
+        else if (authors.length === 3) authorStr = `${fmt(authors[0])}, ${fmt(authors[1])}, & ${fmt(authors[2])}`;
+        else if (authors.length > 3) authorStr = `${fmt(authors[0])}, et al.`;
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        let citation = `${authorStr} (${year}). ${title}.`;
-        if (journal) citation += ` ${journal}${volume}${issue}${pages}.`;
+        let citation = `${authorStr} (${source.year || 'n.d.'}). ${source.title || 'Untitled'}.`;
+        if (source.venue) citation += ` ${source.venue}${source.volume ? `, ${source.volume}` : ''}${source.issue ? `(${source.issue})` : ''}${source.pages ? `, ${source.pages}` : ''}.`;
         if (doi) citation += ` ${doi}`;
         return citation.trim();
     },
 
     _formatMla(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
-        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+        const fmtFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const fmtRest = a => a.given ? `${a.given} ${a.family}` : a.family;
         let authorStr = source.author || 'Unknown';
-        if (authors.length === 1) authorStr = formatFirst(authors[0]);
-        else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
-        else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
-        const title = source.title || 'Untitled';
-        const journal = source.venue || '';
-        const year = source.year || 'n.d.';
-        const volume = source.volume ? `vol. ${source.volume}` : '';
-        const issue = source.issue ? `no. ${source.issue}` : '';
-        const pages = source.pages ? `pp. ${source.pages}` : '';
+        if (authors.length === 1) authorStr = fmtFirst(authors[0]);
+        else if (authors.length === 2) authorStr = `${fmtFirst(authors[0])}, and ${fmtRest(authors[1])}`;
+        else if (authors.length >= 3) authorStr = `${fmtFirst(authors[0])}, et al.`;
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        let citation = `${authorStr}. "${title}."`;
-        if (journal) citation += ` ${journal},`;
-        const details = [volume, issue, year, pages].filter(Boolean).join(', ');
+        let citation = `${authorStr}. "${source.title || 'Untitled'}."`;
+        if (source.venue) citation += ` ${source.venue},`;
+        const details = [
+            source.volume ? `vol. ${source.volume}` : '',
+            source.issue ? `no. ${source.issue}` : '',
+            source.year || 'n.d.',
+            source.pages ? `pp. ${source.pages}` : ''
+        ].filter(Boolean).join(', ');
         if (details) citation += ` ${details}`;
         citation += '.';
         if (doi) citation += ` ${doi}.`;
@@ -187,36 +216,29 @@ export const SourceFinderAPI = {
 
     _formatChicago(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
-        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+        const fmtFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const fmtRest = a => a.given ? `${a.given} ${a.family}` : a.family;
         let authorStr = source.author || 'Unknown';
-        if (authors.length === 1) authorStr = formatFirst(authors[0]);
-        else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
-        else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
-        const title = source.title || 'Untitled';
-        const journal = source.venue || '';
-        const year = source.year || 'n.d.';
-        const volume = source.volume || '';
-        const issue = source.issue ? `no. ${source.issue}` : '';
-        const pages = source.pages || '';
+        if (authors.length === 1) authorStr = fmtFirst(authors[0]);
+        else if (authors.length === 2) authorStr = `${fmtFirst(authors[0])}, and ${fmtRest(authors[1])}`;
+        else if (authors.length >= 3) authorStr = `${fmtFirst(authors[0])}, et al.`;
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        let citation = `${authorStr}. "${title}."`;
-        if (journal) citation += ` ${journal}`;
-        if (volume) citation += ` ${volume}`;
-        if (issue) citation += `, ${issue}`;
-        citation += ` (${year})`;
-        if (pages) citation += `: ${pages}`;
+        let citation = `${authorStr}. "${source.title || 'Untitled'}."`;
+        if (source.venue) citation += ` ${source.venue}`;
+        if (source.volume) citation += ` ${source.volume}`;
+        if (source.issue) citation += `, no. ${source.issue}`;
+        citation += ` (${source.year || 'n.d.'})`;
+        if (source.pages) citation += `: ${source.pages}`;
         citation += '.';
         if (doi) citation += ` ${doi}.`;
         return citation.trim();
     },
 
-    async search(query, limit = 12, coreWords = []) {
+    async search(query, limit = 12, keywords = []) {
         if (!query || query.trim().length < 3) return [];
         try {
-            const cleanQuery = query.trim().toLowerCase();
             const params = new URLSearchParams({
-                search: cleanQuery,
+                search: query.trim(),
                 filter: 'is_oa:true,has_abstract:true,has_doi:true',
                 'per-page': '30',
                 sort: 'relevance_score:desc'
@@ -230,11 +252,13 @@ export const SourceFinderAPI = {
 
             return data.results
                 .map(work => this._transformWork(work))
-                .filter(p => p.doi && p.abstract) // only require abstract exists, not a length
-                .map(p => ({ ...p, _relevanceScore: scoreRelevance(p, coreWords) }))
-                // Score-first: filter AFTER scoring, not before
-                // Threshold 0.15 = at least some meaningful word match in title or abstract
-                .filter(p => p._relevanceScore >= 0.15)
+                .filter(p => p.doi && p.abstract)
+                .map(p => ({ ...p, _relevanceScore: scoreRelevance(p, keywords) }))
+                .filter(p => {
+                    // Adaptive threshold: fewer keywords = lower bar
+                    const threshold = keywords.length <= 3 ? 0.1 : 0.15;
+                    return p._relevanceScore >= threshold;
+                })
                 .slice(0, limit);
         } catch (e) {
             console.error('[SourceFinder] Search failed:', e.message);
@@ -244,21 +268,27 @@ export const SourceFinderAPI = {
 
     async searchTopic(topic, limit = 12, citationStyle = null, apiKey = null) {
         const geminiKey = apiKey || process.env.GEMINI_API_KEY;
-        const coreWords = extractCoreWords(topic);
-        console.log('[SourceFinder] Core words:', coreWords);
 
-        let queries = await generateQueriesWithAI(topic, geminiKey);
-        if (!queries) queries = this._generateQueriesFallback(topic, coreWords);
+        // Step 1: Ask Gemini to understand the topic and extract academic keywords + queries
+        const semantic = await extractSemanticKeywords(topic, geminiKey);
+
+        // Use AI-generated keywords for scoring, fall back to surface extraction
+        const keywords = semantic?.keywords || fallbackKeywords(topic);
+        const queries = semantic?.queries || fallbackQueries(topic, fallbackKeywords(topic));
+
+        console.log('[SourceFinder] Keywords:', keywords);
         console.log('[SourceFinder] Queries:', queries);
 
-        const allResults = await Promise.all(queries.map(q => this.search(q, 12, coreWords)));
+        // Step 2: Search all queries in parallel using semantic keywords for scoring
+        const allResults = await Promise.all(queries.map(q => this.search(q, 12, keywords)));
 
-        // Deduplicate by DOI, fallback to lowercased title
+        // Step 3: Deduplicate (DOI primary, normalized title fallback)
+        const normalize = t => t?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
         const seen = new Set();
         const deduplicated = [];
         for (const results of allResults) {
             for (const paper of results) {
-                const key = paper.doi || paper.title?.toLowerCase();
+                const key = paper.doi || normalize(paper.title);
                 if (key && !seen.has(key)) {
                     seen.add(key);
                     deduplicated.push(paper);
@@ -266,42 +296,15 @@ export const SourceFinderAPI = {
             }
         }
 
-        // Sort: relevance score first (title matches weighted 3x), citation count as tiebreaker
+        // Step 4: Sort by relevance score (citation-boosted), take top N
         const sorted = deduplicated
-            .sort((a, b) => {
-                const diff = (b._relevanceScore || 0) - (a._relevanceScore || 0);
-                if (Math.abs(diff) > 0.1) return diff;
-                return (b.citationCount || 0) - (a.citationCount || 0);
-            })
+            .sort((a, b) => (b._relevanceScore || 0) - (a._relevanceScore || 0))
             .slice(0, limit);
 
-        console.log(`[SourceFinder] ${sorted.length} results (from ${deduplicated.length} candidates, ${deduplicated.length - sorted.length} dropped)`);
+        console.log(`[SourceFinder] ${sorted.length} results (from ${deduplicated.length} candidates)`);
 
         if (citationStyle) return await this.fetchAllCitations(sorted, citationStyle);
         return sorted;
-    },
-
-    _generateQueriesFallback(topic, coreWords = []) {
-        const lower = topic.toLowerCase();
-        const queries = [topic];
-        if (coreWords.includes('crispr') || coreWords.includes('gene') || lower.includes('designer bab')) {
-            queries.push('designer babies ethics genetic engineering', 'CRISPR human embryo editing ethics', 'germline editing ethical implications');
-        } else if (coreWords.includes('climate') || coreWords.includes('warming')) {
-            queries.push('climate change mitigation policy', 'global warming environmental impact', 'carbon emissions reduction strategies');
-        } else if (coreWords.includes('intelligence') || coreWords.includes('machine') || lower.includes(' ai ')) {
-            queries.push('artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance policy');
-        } else if (coreWords.includes('vaccine') || coreWords.includes('vaccination')) {
-            queries.push('vaccine hesitancy public health', 'immunization policy effectiveness', 'vaccine safety clinical evidence');
-        } else if (coreWords.includes('social') && coreWords.includes('media')) {
-            queries.push('social media mental health adolescents', 'online platform behavior psychology', 'digital media society effects');
-        } else {
-            // Generic: build queries from core words directly
-            const terms = coreWords.slice(0, 3).join(' ');
-            if (terms) {
-                queries.push(`${terms} behavior`, `${terms} health`, `${terms} biology`);
-            }
-        }
-        return queries.slice(0, 4);
     },
 
     _transformWork(work) {
@@ -309,22 +312,28 @@ export const SourceFinderAPI = {
         const authors = (work.authorships || []).slice(0, 5).map(a => {
             const name = a.author?.display_name || '';
             const parts = name.split(' ');
-            if (parts.length >= 2) return { given: parts.slice(0, -1).join(' '), family: parts[parts.length - 1] };
-            return { given: '', family: name };
+            return parts.length >= 2
+                ? { given: parts.slice(0, -1).join(' '), family: parts[parts.length - 1] }
+                : { given: '', family: name };
         }).filter(a => a.family);
-        let displayAuthor = 'Unknown';
-        if (authors.length > 0) {
-            displayAuthor = authors.length > 2 ? `${authors[0].family} et al.` : authors.map(a => a.family).join(' & ');
-        }
+        const displayAuthor = authors.length === 0 ? 'Unknown'
+            : authors.length > 2 ? `${authors[0].family} et al.`
+            : authors.map(a => a.family).join(' & ');
         const venue = work.primary_location?.source?.display_name || work.host_venue?.display_name || '';
         const doi = work.doi ? work.doi.replace('https://doi.org/', '') : null;
         return {
-            id: work.id, title: work.title || 'Untitled',
-            authors, author: displayAuthor, displayName: displayAuthor,
+            id: work.id,
+            title: work.title || 'Untitled',
+            authors,
+            author: displayAuthor,
+            displayName: displayAuthor,
             year: work.publication_year || 'n.d.',
-            venue, citationCount: work.cited_by_count || 0,
+            venue,
+            citationCount: work.cited_by_count || 0,
             url: doi ? `https://doi.org/${doi}` : work.id,
-            doi, abstract, text: abstract
+            doi,
+            abstract,
+            text: abstract
         };
     },
 
