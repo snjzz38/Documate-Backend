@@ -1,141 +1,47 @@
 // api/utils/sourceFinder.js
 import { DoiAPI } from './doiAPI.js';
+import { GeminiAPI } from './geminiAPI.js';
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
-// ─── Semantic keyword extraction via Gemini ───────────────────────────────────
-// Ask Gemini what the topic is really about and what keywords academic papers
-// on this subject would actually use. Returns { keywords: string[], queries: string[] }
-const extractSemanticKeywords = async (topic, apiKey) => {
-    if (!apiKey) return null;
-    try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: `You are an academic librarian. A student needs peer-reviewed sources on this topic:
+// Ask Gemini to understand the topic and return:
+// [0] main idea (1-2 sentences)
+// [1] a search string that will return high-quality citations from OpenAlex
+const analyzeTopicWithGemini = async (topic, apiKey) => {
+    const prompt = `You are an academic librarian. A student needs peer-reviewed sources for this topic:
 
 "${topic}"
 
-Your job:
-1. Identify the main subject (what this is fundamentally about)
-2. Generate academic keywords that peer-reviewed papers on this subject would actually use in their titles and abstracts — including synonyms, scientific terms, and related concepts
-3. Generate 4 specific search queries for the OpenAlex academic database
+Return a JSON array with exactly 2 elements:
+- Index 0: A 1-2 sentence description of the main idea or subject of this topic
+- Index 1: A single search string (5-10 words) that will return the most relevant peer-reviewed papers from the OpenAlex academic database. Use formal academic and scientific terminology that would appear in paper titles and abstracts. Include synonyms if the topic has a scientific name.
 
-Return ONLY this JSON (no other text):
-{
-  "mainSubject": "one sentence description of what this topic is about",
-  "keywords": ["keyword1", "keyword2", "keyword3", ...],
-  "queries": ["3-6 word query 1", "3-6 word query 2", "3-6 word query 3", "3-6 word query 4"]
-}
+Example for "yellow Labrador Retriever":
+["The topic concerns the Labrador Retriever breed, specifically the yellow coat variant, covering its behavior, health, and characteristics.", "Labrador Retriever breed temperament health genetics canine"]
 
-Rules for keywords:
-- Include the exact terms used AND academic synonyms (e.g. "Labrador Retriever" AND "Canis lupus familiaris" AND "gun dog breed")
-- Include 8-15 keywords total
-- Include both specific and broader terms that papers about this subject would use
-- Do NOT include generic words like "research", "study", "effects", "impact"
+Example for "CRISPR gene editing ethics":
+["The topic concerns the ethical implications of CRISPR-Cas9 technology for editing human genomes, particularly germline modification.", "CRISPR Cas9 germline editing ethics human embryo genetic modification"]
 
-Rules for queries:
-- At least 2 queries must contain the core subject or its scientific name
-- Queries should target different angles (behavior, health, genetics, history, etc.)
-- 3-6 words per query` }] }],
-                generationConfig: { temperature: 0.1 }
-            })
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '')
-            .replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        const match = text.match(/\{[\s\S]*\}/);
+Return ONLY the JSON array, nothing else.`;
+
+    try {
+        const raw = await GeminiAPI.chat(prompt, apiKey, 0.1);
+        const match = raw.match(/\[[\s\S]*?\]/);
         if (!match) return null;
         const parsed = JSON.parse(match[0]);
-        if (!Array.isArray(parsed.keywords) || !Array.isArray(parsed.queries)) return null;
-        return {
-            keywords: parsed.keywords.filter(k => typeof k === 'string' && k.length > 1),
-            queries: parsed.queries.filter(q => typeof q === 'string' && q.length > 3).slice(0, 4)
-        };
+        if (!Array.isArray(parsed) || parsed.length < 2) return null;
+        if (typeof parsed[0] !== 'string' || typeof parsed[1] !== 'string') return null;
+        return parsed;
     } catch (e) {
-        console.error('[SourceFinder] Semantic extraction failed:', e.message);
+        console.error('[SourceFinder] Gemini topic analysis failed:', e.message);
         return null;
     }
-};
-
-// ─── Fuzzy/stemmed word match ─────────────────────────────────────────────────
-// Handles plural, -ing, -ed, -er, -tion variations without a full stemmer
-const fuzzyIncludes = (text, word) => {
-    if (text.includes(word)) return true;
-    if (word.length <= 3) return false; // don't stem very short words
-    // Try common suffixes
-    const stem = word.length > 5 ? word.slice(0, -2) : word.slice(0, -1);
-    return text.includes(stem);
-};
-
-// ─── Relevance scoring ────────────────────────────────────────────────────────
-// Title match = 3pts, abstract match = 1pt, citation boost via log scale
-const scoreRelevance = (paper, keywords) => {
-    if (!keywords.length) return 0.3;
-    const titleLower = (paper.title || '').toLowerCase();
-    const abstractLower = (paper.abstract || '').toLowerCase();
-    let score = 0;
-    for (const kw of keywords) {
-        const word = kw.toLowerCase();
-        if (fuzzyIncludes(titleLower, word)) score += 3;
-        else if (fuzzyIncludes(abstractLower, word)) score += 1;
-    }
-    const base = score / (keywords.length * 3);
-    // Citation boost: log10(citations+1)/10 adds up to ~0.5 for highly cited papers
-    const citationBoost = Math.log10((paper.citationCount || 0) + 1) / 10;
-    return Math.min(1, base + citationBoost * 0.3); // cap at 1, weight boost at 30%
-};
-
-// ─── Fallback keyword/query generation ───────────────────────────────────────
-const STOP_WORDS = new Set([
-    'a','an','the','and','or','but','in','on','at','to','for','of','with','by',
-    'from','is','are','was','were','be','been','have','has','had','do','does',
-    'did','will','would','could','should','may','might','can','its','it','this',
-    'that','these','those','what','which','who','how','why','when','where',
-    'about','some','any','all','each','every','both','than','then','so','not',
-    'no','only','just','also','still','very','too','here','there','such','same',
-    'effects','impact','impacts','study','studies','research','analysis','review',
-    'approach','method','methods','using','use','based','new','results','findings',
-    'data','case','cases','role','factors','factor','relationship','evidence',
-    'implications','overview','issues','issue'
-]);
-const WHITELIST_SHORT = new Set(['ai','ml','dna','rna','gmo','uv','iq','ph','ev','vr','ar']);
-
-const fallbackKeywords = topic => topic.toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => (w.length >= 3 && !STOP_WORDS.has(w)) || WHITELIST_SHORT.has(w));
-
-const fallbackQueries = (topic, keywords) => {
-    const lower = topic.toLowerCase();
-    const kws = new Set(keywords);
-    if (kws.has('crispr') || kws.has('gene') || lower.includes('designer bab')) {
-        return [topic, 'CRISPR human embryo editing ethics', 'germline editing ethical implications', 'preimplantation genetic diagnosis'];
-    }
-    if (kws.has('climate') || kws.has('warming')) {
-        return [topic, 'climate change mitigation policy', 'global warming environmental impact', 'carbon emissions strategies'];
-    }
-    if (kws.has('intelligence') || kws.has('machine') || lower.includes(' ai ')) {
-        return [topic, 'artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance'];
-    }
-    if (kws.has('vaccine') || kws.has('vaccination')) {
-        return [topic, 'vaccine hesitancy public health', 'immunization policy effectiveness', 'vaccine safety evidence'];
-    }
-    if (kws.has('social') && kws.has('media')) {
-        return [topic, 'social media mental health adolescents', 'online platform behavior psychology', 'digital media society'];
-    }
-    const terms = keywords.slice(0, 3).join(' ');
-    return [topic, `${terms} behavior`, `${terms} health`, `${terms} biology`].filter(Boolean).slice(0, 4);
 };
 
 export const SourceFinderAPI = {
 
     async fetchAllCitations(sources, style = 'apa7') {
         if (!sources?.length) return sources;
-        console.log(`[SourceFinder] Fetching ${sources.length} citations in ${style} format...`);
         const results = [];
         const batchSize = 3;
         for (let i = 0; i < sources.length; i += batchSize) {
@@ -234,13 +140,13 @@ export const SourceFinderAPI = {
         return citation.trim();
     },
 
-    async search(query, limit = 12, keywords = []) {
+    async search(query, limit = 12) {
         if (!query || query.trim().length < 3) return [];
         try {
             const params = new URLSearchParams({
                 search: query.trim(),
                 filter: 'is_oa:true,has_abstract:true,has_doi:true',
-                'per-page': '30',
+                'per-page': String(limit),
                 sort: 'relevance_score:desc'
             });
             const response = await fetch(`${OPENALEX_BASE}?${params}`, {
@@ -249,17 +155,9 @@ export const SourceFinderAPI = {
             if (!response.ok) throw new Error(`OpenAlex returned ${response.status}`);
             const data = await response.json();
             if (!data.results?.length) return [];
-
             return data.results
                 .map(work => this._transformWork(work))
-                .filter(p => p.doi && p.abstract)
-                .map(p => ({ ...p, _relevanceScore: scoreRelevance(p, keywords) }))
-                .filter(p => {
-                    // Adaptive threshold: fewer keywords = lower bar
-                    const threshold = keywords.length <= 3 ? 0.1 : 0.15;
-                    return p._relevanceScore >= threshold;
-                })
-                .slice(0, limit);
+                .filter(p => p.doi && p.abstract);
         } catch (e) {
             console.error('[SourceFinder] Search failed:', e.message);
             return [];
@@ -269,42 +167,28 @@ export const SourceFinderAPI = {
     async searchTopic(topic, limit = 12, citationStyle = null, apiKey = null) {
         const geminiKey = apiKey || process.env.GEMINI_API_KEY;
 
-        // Step 1: Ask Gemini to understand the topic and extract academic keywords + queries
-        const semantic = await extractSemanticKeywords(topic, geminiKey);
+        // Step 1: Gemini understands the topic and generates the search string
+        const analysis = await analyzeTopicWithGemini(topic, geminiKey);
 
-        // Use AI-generated keywords for scoring, fall back to surface extraction
-        const keywords = semantic?.keywords || fallbackKeywords(topic);
-        const queries = semantic?.queries || fallbackQueries(topic, fallbackKeywords(topic));
+        const searchQuery = analysis?.[1] || topic;
+        console.log('[SourceFinder] Main idea:', analysis?.[0]);
+        console.log('[SourceFinder] Search query:', searchQuery);
 
-        console.log('[SourceFinder] Keywords:', keywords);
-        console.log('[SourceFinder] Queries:', queries);
+        // Step 2: Single focused search using Gemini's query
+        const results = await this.search(searchQuery, Math.min(limit + 5, 20));
 
-        // Step 2: Search all queries in parallel using semantic keywords for scoring
-        const allResults = await Promise.all(queries.map(q => this.search(q, 12, keywords)));
-
-        // Step 3: Deduplicate (DOI primary, normalized title fallback)
-        const normalize = t => t?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
+        // Step 3: Deduplicate by DOI
         const seen = new Set();
-        const deduplicated = [];
-        for (const results of allResults) {
-            for (const paper of results) {
-                const key = paper.doi || normalize(paper.title);
-                if (key && !seen.has(key)) {
-                    seen.add(key);
-                    deduplicated.push(paper);
-                }
-            }
-        }
+        const deduplicated = results.filter(p => {
+            if (seen.has(p.doi)) return false;
+            seen.add(p.doi);
+            return true;
+        }).slice(0, limit);
 
-        // Step 4: Sort by relevance score (citation-boosted), take top N
-        const sorted = deduplicated
-            .sort((a, b) => (b._relevanceScore || 0) - (a._relevanceScore || 0))
-            .slice(0, limit);
+        console.log(`[SourceFinder] ${deduplicated.length} results`);
 
-        console.log(`[SourceFinder] ${sorted.length} results (from ${deduplicated.length} candidates)`);
-
-        if (citationStyle) return await this.fetchAllCitations(sorted, citationStyle);
-        return sorted;
+        if (citationStyle) return await this.fetchAllCitations(deduplicated, citationStyle);
+        return deduplicated;
     },
 
     _transformWork(work) {
