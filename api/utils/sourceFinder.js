@@ -3,9 +3,7 @@ import { DoiAPI } from './doiAPI.js';
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
 
-// ─── Extract core subject words from topic ────────────────────────────────────
-// These are the words that MUST appear in any result we keep.
-// We strip stop words and keep only the meaningful nouns/adjectives.
+// ─── Stop words ───────────────────────────────────────────────────────────────
 const STOP_WORDS = new Set([
     'a','an','the','and','or','but','in','on','at','to','for','of','with','by',
     'from','is','are','was','were','be','been','being','have','has','had','do',
@@ -16,17 +14,42 @@ const STOP_WORDS = new Set([
     'over','since','through','throughout','under','until','upon','within',
     'without','some','any','all','each','every','both','either','neither',
     'such','same','other','another','than','then','so','yet','nor','not',
-    'no','only','just','also','even','still','well','very','too','here','there'
+    'no','only','just','also','even','still','well','very','too','here','there',
+    // Generic academic filler words that aren't useful filters
+    'effects','impact','impacts','study','studies','research','analysis',
+    'review','approach','method','methods','using','use','based','new',
+    'results','findings','data','case','cases','role','factors','factor',
+    'relationship','evidence','implications','implications','overview','issues'
 ]);
 
+// Short but meaningful terms to always keep
+const WHITELIST_SHORT = new Set(['ai','ml','dna','rna','gmo','uv','iq','ph','ev','vr','ar']);
+
+// ─── Core word extraction ─────────────────────────────────────────────────────
 const extractCoreWords = topic => {
     return topic.toLowerCase()
         .replace(/[^a-z0-9\s]/g, ' ')
         .split(/\s+/)
-        .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+        .filter(w => (w.length >= 3 && !STOP_WORDS.has(w)) || WHITELIST_SHORT.has(w));
 };
 
-// ─── AI-powered query generation ─────────────────────────────────────────────
+// ─── Relevance scoring ────────────────────────────────────────────────────────
+// Score-first: no hard reject on title. Weight title matches 3x, abstract 1x.
+// Returns 0.0–1.0.
+const scoreRelevance = (paper, coreWords) => {
+    if (!coreWords.length) return 0.5;
+    const titleLower = (paper.title || '').toLowerCase();
+    const abstractLower = (paper.abstract || '').toLowerCase();
+    let score = 0;
+    for (const word of coreWords) {
+        if (titleLower.includes(word)) score += 3;
+        else if (abstractLower.includes(word)) score += 1;
+    }
+    const maxPossible = coreWords.length * 3;
+    return maxPossible > 0 ? score / maxPossible : 0;
+};
+
+// ─── AI query generation ──────────────────────────────────────────────────────
 const generateQueriesWithAI = async (topic, apiKey) => {
     if (!apiKey) return null;
     try {
@@ -35,35 +58,32 @@ const generateQueriesWithAI = async (topic, apiKey) => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                contents: [{ parts: [{ text: `You are an academic librarian generating search queries for OpenAlex (a database of peer-reviewed papers).
+                contents: [{ parts: [{ text: `You are an academic librarian generating search queries for OpenAlex (peer-reviewed paper database).
 
 TOPIC: "${topic}"
 
-Generate exactly 4 short search queries (3-6 words each) to find academic papers directly about this topic.
+Generate exactly 4 search queries (3-6 words each) to find academic papers about this topic.
 
-STRICT RULES:
-1. Every query MUST contain the core subject of the topic (e.g. if topic is "Labrador Retriever", every query must include "Labrador" or "Labrador Retriever")
-2. Cover different angles: e.g. behavior, health, genetics, training — but always anchored to the exact subject
-3. Use formal/scientific terminology where appropriate
-4. Do NOT generate queries about loosely related topics (e.g. "canine welfare" is too broad if topic is "Labrador Retriever")
-5. Do NOT include "research", "study", or "review" as words in the queries
+RULES:
+1. At least 2 queries must use the exact core subject or its formal/scientific name
+2. The other 1-2 queries may use scientific synonyms or related academic terminology that OpenAlex would index (e.g. for "Labrador Retriever" you could use "Canis lupus familiaris breed")
+3. Cover different angles: e.g. behavior, health, genetics, ecology, ethics — whichever are relevant
+4. Do NOT use generic words like "research", "study", "review", "effects", "impact" as the main terms
+5. Queries should be specific enough to find papers directly about this subject, not loosely related topics
 
-Return ONLY a JSON array of 4 strings, nothing else.
-
-Example for topic "Labrador Retriever":
-["Labrador Retriever temperament behavior", "Labrador Retriever hip dysplasia genetics", "Labrador Retriever obesity health", "yellow Labrador coat genetics"]
-
-Return ONLY the JSON array:` }] }],
+Return ONLY a JSON array of 4 strings, nothing else.` }] }],
                 generationConfig: { temperature: 0.1 }
             })
         });
         if (!res.ok) return null;
         const data = await res.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const match = text.match(/\[[\s\S]*?\]/);
+        // Strip any <think> blocks from reasoning models
+        const clean = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        const match = clean.match(/\[[\s\S]*?\]/);
         if (!match) return null;
         const queries = JSON.parse(match[0]);
-        if (!Array.isArray(queries) || queries.length === 0) return null;
+        if (!Array.isArray(queries) || !queries.length) return null;
         return queries.filter(q => typeof q === 'string' && q.length > 3).slice(0, 4);
     } catch (e) {
         console.error('[SourceFinder] AI query generation failed:', e.message);
@@ -71,62 +91,22 @@ Return ONLY the JSON array:` }] }],
     }
 };
 
-// ─── Relevance check ──────────────────────────────────────────────────────────
-// Returns true only if the paper is genuinely about the topic.
-// Strategy: at least one core topic word must appear in the TITLE (not just abstract).
-// This is the key fix — abstract matches are too loose, title matches are precise.
-const isTrulyRelevant = (paper, coreWords) => {
-    if (!coreWords.length) return true;
-    const titleLower = (paper.title || '').toLowerCase();
-    const abstractLower = (paper.abstract || '').toLowerCase();
-
-    // Count how many core words appear in the title
-    const titleMatches = coreWords.filter(w => titleLower.includes(w)).length;
-    // Count how many core words appear in title OR abstract
-    const totalMatches = coreWords.filter(w => titleLower.includes(w) || abstractLower.includes(w)).length;
-
-    // Must have at least one core word in the title
-    // AND at least 40% of core words somewhere in title+abstract
-    const titleOk = titleMatches >= 1;
-    const coverageOk = totalMatches >= Math.max(1, Math.ceil(coreWords.length * 0.4));
-
-    return titleOk && coverageOk;
-};
-
-// ─── Relevance score ──────────────────────────────────────────────────────────
-const scoreRelevance = (paper, coreWords) => {
-    const titleLower = (paper.title || '').toLowerCase();
-    const abstractLower = (paper.abstract || '').toLowerCase();
-    let score = 0;
-    for (const word of coreWords) {
-        if (titleLower.includes(word)) score += 3;       // title match = strongest signal
-        else if (abstractLower.includes(word)) score += 1; // abstract match = weak signal
-    }
-    return coreWords.length > 0 ? score / (coreWords.length * 3) : 0;
-};
-
 export const SourceFinderAPI = {
 
     async fetchAllCitations(sources, style = 'apa7') {
         if (!sources?.length) return sources;
         console.log(`[SourceFinder] Fetching ${sources.length} citations in ${style} format...`);
-
         const results = [];
         const batchSize = 3;
-
         for (let i = 0; i < sources.length; i += batchSize) {
             const batch = sources.slice(i, i + batchSize);
             const enriched = await Promise.all(batch.map(async src => {
-                if (!src.doi) {
-                    return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
-                }
+                if (!src.doi) return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
                 const meta = await DoiAPI.fetchFromCrossref(src.doi);
-                if (!meta) {
-                    return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
-                }
+                if (!meta) return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
                 let mergedAuthors = meta.authors?.length ? meta.authors : src.authors;
                 mergedAuthors = mergedAuthors.filter(a => a.family && a.family.length > 1 && !/^\d+$/.test(a.family));
-                if (mergedAuthors.length === 0) mergedAuthors = (src.authors || []).filter(a => a.family && a.family.length > 1);
+                if (!mergedAuthors.length) mergedAuthors = (src.authors || []).filter(a => a.family && a.family.length > 1);
                 const enrichedSrc = {
                     ...src,
                     authors: mergedAuthors,
@@ -144,7 +124,6 @@ export const SourceFinderAPI = {
             results.push(...enriched);
             if (i + batchSize < sources.length) await new Promise(r => setTimeout(r, 300));
         }
-
         const crossrefCount = results.filter(s => s.citationSource === 'crossref').length;
         console.log(`[SourceFinder] ${crossrefCount}/${results.length} enriched from Crossref`);
         return results;
@@ -239,7 +218,7 @@ export const SourceFinderAPI = {
             const params = new URLSearchParams({
                 search: cleanQuery,
                 filter: 'is_oa:true,has_abstract:true,has_doi:true',
-                'per-page': '25',
+                'per-page': '30',
                 sort: 'relevance_score:desc'
             });
             const response = await fetch(`${OPENALEX_BASE}?${params}`, {
@@ -251,12 +230,11 @@ export const SourceFinderAPI = {
 
             return data.results
                 .map(work => this._transformWork(work))
-                .filter(p => {
-                    if (!p.doi || !p.abstract || p.abstract.length < 150) return false;
-                    // Hard filter: must pass title+core-word relevance check
-                    return isTrulyRelevant(p, coreWords);
-                })
+                .filter(p => p.doi && p.abstract) // only require abstract exists, not a length
                 .map(p => ({ ...p, _relevanceScore: scoreRelevance(p, coreWords) }))
+                // Score-first: filter AFTER scoring, not before
+                // Threshold 0.15 = at least some meaningful word match in title or abstract
+                .filter(p => p._relevanceScore >= 0.15)
                 .slice(0, limit);
         } catch (e) {
             console.error('[SourceFinder] Search failed:', e.message);
@@ -266,63 +244,61 @@ export const SourceFinderAPI = {
 
     async searchTopic(topic, limit = 12, citationStyle = null, apiKey = null) {
         const geminiKey = apiKey || process.env.GEMINI_API_KEY;
-
-        // Extract core words — these must appear in any result we keep
         const coreWords = extractCoreWords(topic);
         console.log('[SourceFinder] Core words:', coreWords);
 
-        // Generate AI queries anchored to the exact subject
         let queries = await generateQueriesWithAI(topic, geminiKey);
-        if (!queries) queries = this._generateQueriesFallback(topic);
+        if (!queries) queries = this._generateQueriesFallback(topic, coreWords);
         console.log('[SourceFinder] Queries:', queries);
 
-        // Search all queries in parallel, passing coreWords for filtering
-        const allResults = await Promise.all(queries.map(q => this.search(q, 10, coreWords)));
+        const allResults = await Promise.all(queries.map(q => this.search(q, 12, coreWords)));
 
-        // Deduplicate by DOI
+        // Deduplicate by DOI, fallback to lowercased title
         const seen = new Set();
         const deduplicated = [];
         for (const results of allResults) {
             for (const paper of results) {
-                if (paper.doi && !seen.has(paper.doi)) {
-                    seen.add(paper.doi);
+                const key = paper.doi || paper.title?.toLowerCase();
+                if (key && !seen.has(key)) {
+                    seen.add(key);
                     deduplicated.push(paper);
                 }
             }
         }
 
-        // Sort by relevance score (title matches heavily weighted), citation count as tiebreaker
+        // Sort: relevance score first (title matches weighted 3x), citation count as tiebreaker
         const sorted = deduplicated
             .sort((a, b) => {
                 const diff = (b._relevanceScore || 0) - (a._relevanceScore || 0);
-                if (Math.abs(diff) > 0.15) return diff;
+                if (Math.abs(diff) > 0.1) return diff;
                 return (b.citationCount || 0) - (a.citationCount || 0);
             })
             .slice(0, limit);
 
-        console.log(`[SourceFinder] ${sorted.length} relevant papers (filtered from ${deduplicated.length} candidates)`);
+        console.log(`[SourceFinder] ${sorted.length} results (from ${deduplicated.length} candidates, ${deduplicated.length - sorted.length} dropped)`);
 
         if (citationStyle) return await this.fetchAllCitations(sorted, citationStyle);
         return sorted;
     },
 
-    _generateQueriesFallback(topic) {
+    _generateQueriesFallback(topic, coreWords = []) {
         const lower = topic.toLowerCase();
         const queries = [topic];
-        if (lower.includes('designer bab') || lower.includes('gene edit') || lower.includes('crispr')) {
-            queries.push('designer babies ethics genetic engineering', 'CRISPR human embryo editing ethics', 'germline editing ethical implications', 'preimplantation genetic diagnosis ethics');
-        } else if (lower.includes('climate') || lower.includes('global warming')) {
+        if (coreWords.includes('crispr') || coreWords.includes('gene') || lower.includes('designer bab')) {
+            queries.push('designer babies ethics genetic engineering', 'CRISPR human embryo editing ethics', 'germline editing ethical implications');
+        } else if (coreWords.includes('climate') || coreWords.includes('warming')) {
             queries.push('climate change mitigation policy', 'global warming environmental impact', 'carbon emissions reduction strategies');
-        } else if (lower.includes('artificial intelligence') || lower.includes(' ai ')) {
+        } else if (coreWords.includes('intelligence') || coreWords.includes('machine') || lower.includes(' ai ')) {
             queries.push('artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance policy');
-        } else if (lower.includes('vaccine') || lower.includes('vaccination')) {
+        } else if (coreWords.includes('vaccine') || coreWords.includes('vaccination')) {
             queries.push('vaccine hesitancy public health', 'immunization policy effectiveness', 'vaccine safety clinical evidence');
-        } else if (lower.includes('social media')) {
+        } else if (coreWords.includes('social') && coreWords.includes('media')) {
             queries.push('social media mental health adolescents', 'online platform behavior psychology', 'digital media society effects');
         } else {
-            const words = topic.split(/\s+/).filter(w => w.length > 4).slice(0, 4);
-            if (words.length > 1) {
-                queries.push(words.join(' ') + ' behavior', words.join(' ') + ' health');
+            // Generic: build queries from core words directly
+            const terms = coreWords.slice(0, 3).join(' ');
+            if (terms) {
+                queries.push(`${terms} behavior`, `${terms} health`, `${terms} biology`);
             }
         }
         return queries.slice(0, 4);
