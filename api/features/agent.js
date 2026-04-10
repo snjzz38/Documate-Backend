@@ -17,17 +17,26 @@ const stripPreamble = t => t
     .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
     .trim();
 
-// ─── Pre-strip "Because" starts before QA (deterministic, no AI needed) ──────
+// ─── Pre-strip "Because" starts — deterministic, no AI needed ────────────────
 const stripBecauseStarts = text => text
-    // Bullet starting with "Because"
     .replace(/^(\s*[-•]\s+)Because\s+([a-z])/gm, (_, prefix, c) => prefix + c.toUpperCase())
-    // Sentence starting with "Because" at line start
     .replace(/^Because\s+([a-z])/gm, (_, c) => c.toUpperCase())
-    // After a period/exclamation, "Because" starting next sentence mid-paragraph
     .replace(/([.!?]\s+)Because\s+([a-z])/g, (_, punct, c) => punct + c.toUpperCase());
 
+// ─── Strip hollow filler sentences ───────────────────────────────────────────
+// Removes sentences that make a vague observation without specific content
+const stripHollowFiller = text => text
+    // "The potential for X is undeniable/significant/clear, but Y"
+    .replace(/\s*The potential for [^.!?]+ is (?:undeniable|significant|clear|substantial|tremendous)[^.!?]*\./gi, '')
+    // "The prospect of X raises serious concerns about Y" with no follow-through
+    .replace(/\s*The prospect of [^.!?]+ raises serious concerns[^.!?]*\./gi, '')
+    // "X is not without risk/challenge/issue" — vague caveat sentences
+    .replace(/\s*(?:the )?(?:process|approach|technology|method) is not without (?:risk|challenge|issue|concern)[^.!?]*\./gi, '')
+    // Orphan mid-thought connectors like "When X, it paves the way for Y" that restate previous sentence
+    .replace(/\s*When (?:researchers?|scientists?|we) (?:gain|develop|uncover|discover)[^.!?]+(?:paves the way for|opens doors to|enables)[^.!?]*\./gi, '')
+    .replace(/  +/g, ' ').replace(/ +\n/g, '\n').trim();
+
 // ─── Sentence splitter ────────────────────────────────────────────────────────
-// Handles: "et al.", initials, common abbreviations — never splits on those periods
 const ABBREV_RE = /(?:et al|Dr|Mr|Mrs|Ms|Prof|Sr|Jr|vs|e\.g|i\.e|cf|viz|fig|ibid|ca|pp|Vol|No|ed|eds|trans|rev|para|chap|pt)\s*$/i;
 const INITIAL_RE = /\b[A-Z]\.$/;
 
@@ -41,7 +50,6 @@ const splitSentences = text => {
 
         if (/[.!?]/.test(text[i])) {
             let j = i + 1;
-            // consume trailing closing punctuation / whitespace / superscripts
             while (j < text.length && /[\s"')»\u00B9\u00B2\u00B3\u2074-\u2079\u2070]/.test(text[j])) {
                 current += text[j];
                 j++;
@@ -90,12 +98,13 @@ const checkWithGroq = async (text, taskFmt, GROQ) => {
         const messages = [
             { role: 'system', content: 'You are a QA checker. Return ONLY valid JSON. No thinking, no explanation.' },
             { role: 'user', content: `Check this academic text and return a JSON object with these boolean fields:
-- "hasCommentary": true if ANY sentence comments on a source rather than arguing (e.g. "Indeed, Author highlights...", "As Author points out...", "This highlights the importance of...")
+- "hasCommentary": true if ANY sentence comments on a source rather than arguing
 - "hasBecauseStarts": true if ANY sentence or bullet starts with the word "Because"
 - "hasMetaDescriptions": true if ANY sentence describes what a study IS rather than what it FOUND
 - "headersIntact": true if section headers like "ARGUMENTS FOR", "DECISION:", "JUSTIFICATION:" each appear on their own line
 - "bulletsCorrectLength": true if every bullet (lines starting with "- ") has 2-3 sentences (not more)
-- "hasHollowAnalysis": true if ANY sentence follows a quote with hollow commentary like "This highlights the importance of...", "This underscores the need for...", "This demonstrates the significance of..." without explaining a specific implication
+- "hasHollowAnalysis": true if ANY sentence follows evidence with hollow commentary like "This highlights the importance of...", "This underscores the need for...", "This demonstrates the significance of..." without naming a specific consequence
+- "hasSameSourceClustering": true if the same citation (e.g. "(Smith, 2020)") appears in 3 or more consecutive sentences
 
 TEXT:
 ${text}
@@ -115,15 +124,14 @@ Return ONLY the JSON object:` }
 const applyFixes = (text, checks) => {
     let result = text;
 
-    // Always run Because strip deterministically — don't wait for Groq to catch it
+    // Always run deterministic strips first
     result = stripBecauseStarts(result);
+    result = stripHollowFiller(result);
 
     if (checks.hasCommentary || checks.hasMetaDescriptions || checks.hasHollowAnalysis) {
-        // Remove transition + Author commentary sentences
         result = result.replace(/\s*(?:Indeed|Furthermore|Moreover|Additionally|Specifically|However|Notably|Similarly),?\s+[A-Z][a-z]+(?:'s)?(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?(?:\s*\([^)]*\))?\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
         result = result.replace(/\s*[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\(\d{4}\)\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
         result = result.replace(/\s*As\s+[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\([^)]*\)\s+[^.]*\./g, '');
-        // Remove hollow post-quote analysis sentences
         result = result.replace(/\s*This\s+(?:highlights?|underscores?|emphasizes?|illustrates?|demonstrates?|confirms?|suggests?|shows?)\s+(?:the\s+)?(?:importance|significance|need|potential|concern|risk|inherent risk|imprudence|necessity)[^.]*\./g, '');
         result = result.replace(/\s*(?:This|Such)\s+(?:lack of|absence of|widespread impact|finding|result|evidence)\s+[^.]*(?:necessitates?|underscores?|highlights?|demonstrates?)[^.]*\./g, '');
         result = result.replace(/\s*Despite the [^,]+, this [^.]*(?:necessitates?|requires?|demands?)[^.]*\./g, '');
@@ -320,7 +328,6 @@ const buildSourceDigest = async (sources, style, GEMINI) => {
             : isMla ? `(${lastName})` : `(${lastName} ${s.year})`;
 
         const abstract = (s.text || '').substring(0, 600) || 'No abstract available.';
-
         const sentences = abstract.match(/[^.!?]+[.!?]+/g) || [];
         const isUseless = sent =>
             /\b(?:this|the present|our)\s+(?:article|paper|study|review)\b/i.test(sent) ||
@@ -454,40 +461,55 @@ export default async function handler(req, res) {
                         formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these four sections with their headers on their own lines.
 
 ARGUMENTS FOR (EMBRACE):
-- [Argument 1: EXACTLY 2-3 sentences. Sentence 1: state the claim. Sentence 2: explain WHY it matters — what is the consequence or mechanism. Sentence 3 (optional): give a concrete real-world example. NO filler, NO padding.]
-- [Argument 2: different angle — 2-3 sentences only]
-- [Argument 3: different angle — 2-3 sentences only]
-- [Argument 4: different angle — 2-3 sentences only]
+- [Argument 1: EXACTLY 2-3 sentences. S1: state the specific claim. S2: explain the mechanism or consequence — WHY does this matter? S3 (optional): concrete real-world example.]
+- [Argument 2: different angle, same structure]
+- [Argument 3: different angle, same structure]
+- [Argument 4: different angle, same structure]
 
 ARGUMENTS AGAINST (PANIC):
-- [Argument 1: EXACTLY 2-3 sentences. Same structure as above.]
-- [Argument 2: different angle — 2-3 sentences only]
-- [Argument 3: different angle — 2-3 sentences only]
-- [Argument 4: different angle — 2-3 sentences only]
+- [Argument 1: same structure as above]
+- [Argument 2: different angle]
+- [Argument 3: different angle]
+- [Argument 4: different angle]
 
 DECISION:
-Exactly ONE sentence. State your position and the single most decisive reason. Do NOT restate this sentence in different words. Do NOT quote any source.
+Exactly ONE sentence. State your position and the single most decisive reason. No quotes. No restatement.
 
 JUSTIFICATION:
-Exactly 3-4 paragraphs, each making a DISTINCT point that has NOT been made in any previous paragraph.
+Exactly 4 paragraphs. Each paragraph covers a DISTINCT dimension (e.g. biological, economic, ethical, ecological — do not repeat the same dimension).
 
-Paragraph structure — apply to every paragraph:
-  Sentence 1: Make a specific claim relevant to your decision.
-  Sentence 2-3: Explain the mechanism or consequence — WHY does this claim matter? What does it lead to?
-  Sentence 4 (optional): Connect explicitly back to why this tips the scale toward your decision.
+Each paragraph structure:
+  S1: Specific claim relevant to your decision.
+  S2–S3: Mechanism — WHY does this matter? What specific consequence does it lead to? Name it concretely.
+  S4: Engage the strongest counterargument to this point in one sentence (e.g. "Proponents argue that regulation could prevent this..."), then refute it in S5 with a specific reason it falls short.
 
-ANALYSIS RULE — STRICTLY ENFORCED:
-After every piece of evidence, ask "So what?" and answer it in the next sentence.
-BAD: "Gene editing carries risk of off-target mutations. This highlights the importance of caution."
-GOOD: "Gene editing carries risk of off-target mutations. A single uncorrected error in the germline propagates into every cell of every descendant, meaning one mistake today becomes irreversible biological harm across generations."
-The "So what?" answer must name a SPECIFIC consequence, not a vague observation.
+SOURCE DIVERSITY RULE — STRICTLY ENFORCED:
+- Do NOT cite the same source in more than 2 consecutive sentences.
+- Each paragraph must draw on at least 2 different ideas (they don't need to be from different sources, but the ideas must be distinct).
+- If you find yourself citing the same author repeatedly in a row, switch to a different angle or piece of evidence first.
 
-REPETITION RULE — STRICTLY ENFORCED:
-Each paragraph must make a point not already made. Do NOT restate the same risk or benefit in different words across paragraphs. If paragraph 1 covers biological risk, paragraph 2 must cover a different dimension (e.g. social, ethical, economic).
+"SO WHAT?" RULE — STRICTLY ENFORCED:
+After every claim, the next sentence must name a SPECIFIC consequence.
+BAD: "This highlights the importance of caution."
+GOOD: "A single off-target mutation in the embryo propagates into every cell of every descendant, making reversal biologically impossible."
+
+SPECIFICITY RULE:
+When claiming a risk or benefit, include at least one concrete anchor:
+- A named condition, disease, or biological process (e.g. sickle cell anemia, off-target indels)
+- A real-world precedent or analogy (e.g. thalidomide, monoculture crop failures)
+- A measurable or observable outcome (e.g. "increases edit precision to 99% but still leaves a 1% error rate across billions of base pairs")
 
 SENTENCE STARTER RULES:
-- NEVER start any sentence or bullet with "Because" — start with the subject or claim instead
+- NEVER start any sentence or bullet with "Because"
 - NEVER start two consecutive sentences with the same word
+
+FILLER RULE:
+These sentence patterns are FORBIDDEN — delete them if you write them:
+- "The potential for X is undeniable"
+- "X is not without risk"
+- "The prospect of X raises concerns"
+- "When researchers gain X, it paves the way for Y" (restating the previous sentence)
+- Any sentence that makes a vague observation without naming a specific consequence
 
 CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim on their own lines.`;
 
@@ -518,8 +540,9 @@ CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):
                     } else if (fmt === 'essay') {
                         formatInstructions = `FORMAT — ACADEMIC ESSAY:
 - Introduction with explicit thesis in final sentence
-- Body paragraphs: one main point each; after every claim, explain its specific consequence ("So what?")
-- No two paragraphs may cover the same point — each must advance the argument
+- Body paragraphs: one main point each; after every claim, name the specific consequence ("So what?")
+- At least one paragraph must engage a counterargument and refute it with specific reasoning
+- No two paragraphs may cover the same dimension
 - Conclusion: synthesize, don't summarize
 - Vary sentence openings; formal academic tone throughout`;
 
@@ -544,9 +567,10 @@ CRITICAL RULES — ALWAYS APPLY:
 - Do NOT include any in-text citations, author names, or source references anywhere in the output
 - Do NOT add a reference list, "Sources:", or bibliography section at the end
 - Do NOT mention specific researchers, papers, or organisations by name
-- Do NOT start with commentary like "Here's your essay:", "Sure!", or any preamble — begin with the actual content immediately
-- Do NOT use direct quotes from sources — paraphrase all source material into your own words
-- NEVER start a sentence with "Because" — restructure to lead with the subject or claim
+- Do NOT start with any preamble — begin with the actual content immediately
+- Do NOT use direct quotes from sources — paraphrase all source material
+- NEVER start a sentence with "Because" — lead with the subject or claim instead
+- NEVER write a vague sentence that makes an observation without naming a specific consequence
 ${imageFiles.length > 0 ? '- Carefully analyze any uploaded images as part of the response.' : ''}
 
 Complete the task now:`;
@@ -555,7 +579,7 @@ Complete the task now:`;
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
 
-                    let plainText = stripBecauseStarts(ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText))))));
+                    let plainText = stripBecauseStarts(stripHollowFiller(ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))))));
                     const writeChecks = await checkWithGroq(plainText, fmt, GROQ);
                     plainText = applyFixes(plainText, writeChecks);
                     result.output = plainText;
@@ -699,8 +723,9 @@ RULES:
 2. Distribute citations across the WHOLE text — do not cluster at the end
 3. Only cite sentences where a source is genuinely relevant to the specific claim made
 4. Duplicate citations of the same source at different locations ARE allowed
-5. NEVER use footnote superscripts — ONLY parenthetical format
-6. Do NOT add new sentences
+5. SOURCE DIVERSITY: Do not assign the same citation to more than 2 consecutive sentences
+6. NEVER use footnote superscripts — ONLY parenthetical format
+7. Do NOT add new sentences
 
 Return ONLY valid JSON:`;
 
@@ -736,8 +761,9 @@ RULES:
 2. Number footnotes sequentially (¹²³…) in order of first appearance in the text
 3. The same source reused later gets the SAME superscript number
 4. Distribute across the text — do not cluster at the end
-5. NEVER use parenthetical (Author, Year) format — ONLY superscript numbers
-6. Do NOT add new sentences
+5. SOURCE DIVERSITY: Do not assign the same superscript to more than 2 consecutive sentences
+6. NEVER use parenthetical (Author, Year) format — ONLY superscript numbers
+7. Do NOT add new sentences
 
 Return ONLY valid JSON:`;
 
@@ -811,17 +837,19 @@ ${quoteList}
 
 RULES:
 1. Return a JSON object: keys = sentence indices AFTER which to insert the quote block, values = the full insertion text
-2. Insert EXACTLY 2-3 quotes total — spread across different sections of the essay
-3. Only use quotes containing SPECIFIC FINDINGS, MEASUREMENTS, or CONCRETE CONCLUSIONS — skip anything describing what a paper does
-4. Do NOT insert a quote into the DECISION section
-5. Each inserted value must follow this exact structure:
-   - One transition sentence that sets up WHY this quote is relevant to the surrounding argument
+2. Insert EXACTLY 2-3 quotes total — spread across different sections, do NOT place two quotes consecutively
+3. Only use quotes with SPECIFIC FINDINGS, DATA, or CONCRETE CONCLUSIONS — skip anything describing what a paper does
+4. Do NOT insert into the DECISION section
+5. Each inserted value must follow this structure:
+   - Transition sentence explaining WHY this quote is relevant to the surrounding argument
    - The direct quote with citation: "..." (Author, Year).
-   - One analysis sentence that answers "So what?" — name the SPECIFIC implication for the argument, not a vague restatement
-6. FORBIDDEN analysis sentences: "This highlights the importance of...", "This underscores the need for...", "This demonstrates the significance of..." — these are hollow. Name a specific consequence instead.
-   BAD: "This highlights the importance of cautious regulation."
-   GOOD: "This means that a single misstep in the editing process could embed heritable errors into a lineage with no mechanism for reversal."
-7. Do NOT repeat what the surrounding sentences already say
+   - Analysis sentence answering "So what?" — name the SPECIFIC implication, not a vague observation
+6. FORBIDDEN analysis endings:
+   "This highlights the importance of..." → FORBIDDEN
+   "This underscores the need for..." → FORBIDDEN
+   "This demonstrates the significance of..." → FORBIDDEN
+   Instead name a concrete consequence: what breaks, what happens, who is affected and how.
+7. Do NOT repeat content already stated in surrounding sentences
 
 Return ONLY valid JSON:`;
 
@@ -843,8 +871,7 @@ Return ONLY valid JSON:`;
                         console.error('[Agent] QUOTES JSON parse failed:', e.message);
                     }
 
-                    // Strip hollow post-quote sentences before returning
-                    withQuotes = stripBecauseStarts(ensureHeaders(stripPreamble(stripMarkdown(withQuotes))));
+                    withQuotes = stripBecauseStarts(stripHollowFiller(ensureHeaders(stripPreamble(stripMarkdown(withQuotes)))));
                     const quoteChecks = await checkWithGroq(withQuotes, detectTaskFormat(context.task || ''), GROQ);
                     withQuotes = applyFixes(withQuotes, quoteChecks);
                     result.output = withQuotes;
