@@ -17,6 +17,53 @@ const stripPreamble = t => t
     .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
     .trim();
 
+// ─── Sentence splitter ────────────────────────────────────────────────────────
+// Splits text into complete sentences, correctly handling:
+// - "et al." — never a sentence boundary
+// - Single-letter initials like "J." in names
+// - Common abbreviations: Dr., Mr., Mrs., Prof., vs., e.g., i.e., etc.
+// - Superscript footnote numbers attached to sentence endings
+const ABBREV = /(?:et al|Dr|Mr|Mrs|Ms|Prof|Sr|Jr|vs|e\.g|i\.e|cf|viz|approx|est|dept|approx|fig|govt|approx|ibid|op\.cit|ca|pp|Vol|No|ed|eds|trans|rev|suppl|para|chap|pt)\./i;
+const INITIAL = /\b[A-Z]\./;
+
+const splitSentences = text => {
+    // Split on .  !  ? followed by whitespace and a capital letter or end of string
+    // but not if preceded by an abbreviation or initial
+    const raw = [];
+    let current = '';
+    const chars = text;
+    let i = 0;
+
+    while (i < chars.length) {
+        current += chars[i];
+
+        if (/[.!?]/.test(chars[i])) {
+            // Look ahead for whitespace then capital or end
+            let j = i + 1;
+            // Consume any closing punctuation (quotes, parens, superscripts)
+            while (j < chars.length && /[\s"')\u00B9\u00B2\u00B3\u2074-\u2079\u2070]/.test(chars[j])) {
+                current += chars[j];
+                j++;
+            }
+
+            const ahead = chars.slice(j, j + 2);
+            const isEnd = j >= chars.length || /^[A-Z"']/.test(ahead) || /^\n/.test(ahead);
+            const precedingWord = current.replace(/[.!?\s"')]+$/, '').split(/\s+/).pop() || '';
+            const isAbbrev = ABBREV.test(precedingWord + '.') || INITIAL.test(precedingWord + '.');
+
+            if (isEnd && !isAbbrev) {
+                raw.push(current.trim());
+                current = '';
+                i = j;
+                continue;
+            }
+        }
+        i++;
+    }
+    if (current.trim()) raw.push(current.trim());
+    return raw.filter(s => s.length > 0);
+};
+
 // ─── Header repair ───────────────────────────────────────────────────────────
 const KNOWN_HEADERS = [
     'ARGUMENTS FOR (EMBRACE):',
@@ -42,9 +89,9 @@ const checkWithGroq = async (text, taskFmt, GROQ) => {
         const messages = [
             { role: 'system', content: 'You are a QA checker. Return ONLY valid JSON. No thinking, no explanation.' },
             { role: 'user', content: `Check this academic text and return a JSON object with these boolean fields:
-- "hasCommentary": true if ANY sentence comments on a source rather than arguing (e.g. "Indeed, Author highlights...", "As Author points out...", "Author effectively illustrates...", "This highlights the importance of...")
+- "hasCommentary": true if ANY sentence comments on a source rather than arguing
 - "hasBecauseStarts": true if ANY sentence or bullet starts with the word "Because"
-- "hasMetaDescriptions": true if ANY sentence describes what a study IS rather than what it FOUND (e.g. "This study reviews...", "This article examines...")
+- "hasMetaDescriptions": true if ANY sentence describes what a study IS rather than what it FOUND
 - "headersIntact": true if section headers like "ARGUMENTS FOR", "DECISION:", "JUSTIFICATION:" each appear on their own line
 - "bulletsCorrectLength": true if every bullet (lines starting with "- ") has 2-3 sentences (not more)
 
@@ -83,8 +130,8 @@ const applyFixes = (text, checks) => {
 
     if (checks.bulletsCorrectLength === false) {
         result = result.replace(/^(\s*[-•]\s+)(.+)$/gm, (match, prefix, body) => {
-            const sentences = body.match(/[^.!?]+[.!?]+/g) || [body];
-            if (sentences.length > 3) return prefix + sentences.slice(0, 3).join('').trim();
+            const sents = body.match(/[^.!?]+[.!?]+/g) || [body];
+            if (sents.length > 3) return prefix + sents.slice(0, 3).join('').trim();
             return match;
         });
     }
@@ -105,7 +152,6 @@ const stripExistingCitations = t => t
     .replace(/\([A-Z][a-zA-Z\s,&.]+(?:et al\.)?[,\s]+\d{4}[a-z]?\)/g, '')
     .replace(/\b([A-Z][a-z]+(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?)\s*\(\d{4}[a-z]?\)/g, '$1')
     .replace(/\(\d{4}[a-z]?\)/g, '')
-    // Strip superscript footnote numbers
     .replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -268,6 +314,7 @@ const buildSourceDigest = async (sources, style, GEMINI) => {
 
     await Promise.all(sources.slice(0, 12).map(async s => {
         const lastName = fmtAuthorLastOnly(s, isMla ? 'mla' : 'apa');
+        // APA: always use & between two authors, never "and"
         const inTextKey = isApa
             ? `(${lastName}, ${s.year})`
             : isMla ? `(${lastName})` : `(${lastName} ${s.year})`;
@@ -282,12 +329,12 @@ const buildSourceDigest = async (sources, style, GEMINI) => {
 
         const usableQuotes = sentences
             .filter(sent => sent.length > 40 && sent.length < 250 && !isUseless(sent))
-            .slice(0, 3)
+            .slice(0, 2) // max 2 quotes per source to prevent over-reliance
             .map(q => q.trim());
 
         let mainIdea = '';
         try {
-            const prompt = `Summarize in 1-2 sentences the main argument or finding of this academic source. Be specific — state what it found or argues, not just what it's about. No preamble.
+            const prompt = `Summarize in 1-2 sentences the main argument or finding of this academic source. State what it found or argues specifically. No preamble.
 
 Title: "${s.title}"
 Abstract: ${abstract}`;
@@ -304,9 +351,7 @@ Abstract: ${abstract}`;
     return digest;
 };
 
-// ─── JSON insertion helpers ───────────────────────────────────────────────────
-
-// Appends a citation key inside the sentence's final punctuation
+// ─── JSON insertion — appends citation inside sentence's final punctuation ────
 const applyInsertions = (sentences, insertionMap) => {
     const result = [];
     sentences.forEach((sentence, idx) => {
@@ -421,25 +466,29 @@ ARGUMENTS AGAINST (PANIC):
 - [Argument 4: different angle — 2-3 sentences only]
 
 DECISION:
-One sentence only. Start with "Panic." or "Embrace." then state why.
+One sentence only. Start with "Panic." or "Embrace." then state why. Do NOT quote any source here.
 
 JUSTIFICATION:
 3-4 paragraphs. Requirements:
 - First sentence: "I choose to [panic/embrace] because..."
-- Each paragraph: topic sentence → reasoning → tie back to decision
+- Each paragraph must make a DISTINCT point — no repeating the same idea in different words
+- Each paragraph: topic sentence → new reasoning → tie back to decision
 - Final paragraph: synthesis — explain WHY the risks/benefits tip the scale
-- Do NOT include citations or a reference section
+- Do NOT include citations, direct quotes, or a reference section
+
+REPETITION RULE — STRICTLY ENFORCED:
+- Read each paragraph before writing the next. If you have already made a point, do NOT restate it.
+- Each sentence must introduce NEW information. Never reword a point you already made.
 
 LENGTH RULES — STRICTLY ENFORCED:
-- Each bullet in FOR/AGAINST = EXACTLY 2-3 sentences. NOT 4, NOT 5, NOT 6. If you write more than 3 sentences for a bullet, you have failed.
-- Do NOT pad arguments with filler like "This represents a profound advancement" or "This perspective highlights..."
-- Do NOT repeat the same point in different words within one bullet
-- Every sentence must add NEW information — no restating
+- Each bullet in FOR/AGAINST = EXACTLY 2-3 sentences. NOT 4, NOT 5, NOT 6.
+- Do NOT pad arguments with filler phrases.
+- Every sentence must add NEW information.
 
-SENTENCE STARTER RULES — STRICTLY ENFORCED:
-- NEVER start any bullet with "Because". Start with the actual claim instead.
-- NEVER start two consecutive sentences with the same word anywhere in the output
-- Vary starters: use the subject, a condition, a contrast, a fact
+SENTENCE STARTER RULES:
+- NEVER start any bullet with "Because"
+- NEVER start two consecutive sentences with the same word
+- Vary starters: subject, condition, contrast, fact
 
 CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim on their own lines.`;
 
@@ -471,7 +520,8 @@ CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):
                         formatInstructions = `FORMAT — ACADEMIC ESSAY:
 - Introduction with explicit thesis in final sentence
 - Body paragraphs: one main point each, topic sentence → evidence → thesis link
-- Conclusion: synthesize, don't just summarize
+- No two paragraphs may make the same point — each must advance the argument
+- Conclusion: synthesize, don't summarize
 - Vary sentence openings; formal academic tone throughout`;
 
                     } else {
@@ -496,6 +546,7 @@ CRITICAL RULES — ALWAYS APPLY:
 - Do NOT add a reference list, "Sources:", or bibliography section at the end
 - Do NOT mention specific researchers, papers, or organisations by name
 - Do NOT start with commentary like "Here's your essay:", "Sure!", or any preamble — begin with the actual content immediately
+- Do NOT use direct quotes from sources — paraphrase all source material
 ${imageFiles.length > 0 ? '- Carefully analyze any uploaded images as part of the response.' : ''}
 
 Complete the task now:`;
@@ -577,11 +628,9 @@ Complete the task now:`;
                 case 'CITE': {
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'apa7';
-                    // Normalize type: must be exactly 'bibliography', 'in-text', or 'footnotes'
                     const type = (options.citationType || 'in-text').toLowerCase().trim();
                     const isBibliographyOnly = type === 'bibliography';
                     const isFootnotes = type === 'footnotes';
-                    const isInText = !isBibliographyOnly && !isFootnotes; // default
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
 
@@ -610,21 +659,23 @@ Complete the task now:`;
                     if (!sourcesWithCitations.length) { finish(input, []); break; }
                     if (!input) { finish('', sourcesWithCitations); break; }
 
-                    // ── BIBLIOGRAPHY ONLY: return text unchanged, just build the reference list ──
+                    // ── BIBLIOGRAPHY ONLY ─────────────────────────────────────
                     if (isBibliographyOnly) {
                         finish(input, sourcesWithCitations);
                         break;
                     }
 
-                    // ── IN-TEXT or FOOTNOTES: insert citations into the text ──
+                    // ── IN-TEXT or FOOTNOTES ──────────────────────────────────
                     const digest = await buildSourceDigest(sourcesWithCitations, style, GEMINI);
 
-                    const sentences = input.match(/[^.!?]+[.!?]+/g) || [input];
+                    // Use robust sentence splitter — handles "et al.", initials, abbreviations
+                    const sentences = splitSentences(input);
 
                     const sourceList = sourcesWithCitations.slice(0, 12).map((s, i) => {
                         const key = s.url || s.doi || s.id || s.title;
                         const d = digest[key] || {};
                         const lastName = fmtAuthorLastOnly(s, isMla ? 'mla' : 'apa');
+                        // Always use & for APA multi-author in-text, never "and"
                         const inTextKey = isApa
                             ? `(${lastName}, ${s.year})`
                             : isMla ? `(${lastName})` : `(${lastName} ${s.year})`;
@@ -633,8 +684,8 @@ Complete the task now:`;
 
                     const numberedSentences = sentences.map((s, i) => `[${i}] ${s.trim()}`).join('\n');
 
-                    if (isInText) {
-                        // ── IN-TEXT: parenthetical (Author, Year) ──
+                    if (!isFootnotes) {
+                        // ── IN-TEXT: parenthetical ────────────────────────────
                         const citePrompt = `You are inserting parenthetical in-text citations into an academic text.
 
 SENTENCES (numbered by index):
@@ -643,16 +694,16 @@ ${numberedSentences}
 SOURCES:
 ${sourceList}
 
-CITATION FORMAT: ${isApa ? 'APA 7th: (LastName, Year)' : isMla ? 'MLA 9th: (LastName)' : 'Chicago: (LastName Year)'}
-Copy the CITE-AS key exactly as shown — do not alter names or years.
+CITATION FORMAT: ${isApa ? 'APA 7th: (LastName, Year) — use & not "and" for multiple authors' : isMla ? 'MLA 9th: (LastName)' : 'Chicago: (LastName Year)'}
+Copy the CITE-AS key exactly as written — do not alter names, ampersands, or years.
 
-TASK: Return a JSON object where:
-- Keys are sentence indices (as strings, e.g. "0", "4")
-- Values are the parenthetical citation to append to that sentence, e.g. "(Smith, 2020)"
-- Distribute citations across the whole text — do NOT cluster at the end
-- Only cite sentences where a source is genuinely relevant
-- Duplicate citations of the same source at different locations ARE allowed
-- Do NOT add new sentences — only provide the insertion map
+RULES:
+1. Return a JSON object: keys = sentence indices (strings), values = citation to append e.g. "(Smith & Jones, 2020)"
+2. Distribute citations across the WHOLE text — do not cluster at the end
+3. Only cite sentences where a source is genuinely relevant to the claim made
+4. Duplicate citations of the same source at different locations ARE allowed
+5. NEVER use footnote superscripts — ONLY parenthetical format
+6. Do NOT add new sentences
 
 Return ONLY valid JSON:`;
 
@@ -661,26 +712,21 @@ Return ONLY valid JSON:`;
                             const jsonMatch = raw.match(/\{[\s\S]*\}/);
                             if (jsonMatch) {
                                 const insertionMap = JSON.parse(jsonMatch[0]);
-                                const citedText = ensureHeaders(applyFixes(
-                                    applyInsertions(sentences, insertionMap),
-                                    await checkWithGroq(applyInsertions(sentences, insertionMap), detectTaskFormat(context.task || ''), GROQ)
-                                ));
-                                finish(citedText, sourcesWithCitations);
+                                const cited = applyInsertions(sentences, insertionMap);
+                                const citedClean = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(cited)))));
+                                const checks = await checkWithGroq(citedClean, detectTaskFormat(context.task || ''), GROQ);
+                                finish(applyFixes(citedClean, checks), sourcesWithCitations);
                                 break;
                             }
                         } catch(e) {
                             console.error('[Agent] CITE in-text JSON parse failed:', e.message);
                         }
-                        // Fallback: return uncited text with bibliography
                         finish(input, sourcesWithCitations);
                         break;
                     }
 
-                    if (isFootnotes) {
-                        // ── FOOTNOTES: superscript numbers ¹²³ ──
-                        const toSuper = n => String(n).split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
-
-                        const footnotePrompt = `You are inserting superscript footnote numbers into an academic text.
+                    // ── FOOTNOTES: superscript numbers ────────────────────────
+                    const footnotePrompt = `You are inserting superscript footnote numbers into an academic text.
 
 SENTENCES (numbered by index):
 ${numberedSentences}
@@ -688,46 +734,47 @@ ${numberedSentences}
 SOURCES:
 ${sourceList}
 
-TASK: Return a JSON object where:
-- Keys are sentence indices (as strings)
-- Values are superscript footnote numbers to append, e.g. "¹" or "²"
-- Number footnotes sequentially starting from 1 in order of first appearance
-- The same source can be cited multiple times with the same number
-- Distribute across the text — do NOT cluster at the end
-- Do NOT use parenthetical (Author, Year) format — ONLY superscript numbers
+RULES:
+1. Return a JSON object: keys = sentence indices (strings), values = superscript to append e.g. "¹" or "²"
+2. Number footnotes sequentially (¹²³…) in order of first appearance in the text
+3. The same source reused later gets the SAME superscript number
+4. Distribute across the text — do not cluster at the end
+5. NEVER use parenthetical (Author, Year) format — ONLY superscript numbers
+6. Do NOT add new sentences
 
 Return ONLY valid JSON:`;
 
-                        try {
-                            const raw = await GeminiAPI.chat(footnotePrompt, GEMINI, 0.3);
-                            const jsonMatch = raw.match(/\{[\s\S]*\}/);
-                            if (jsonMatch) {
-                                const insertionMap = JSON.parse(jsonMatch[0]);
+                    try {
+                        const raw = await GeminiAPI.chat(footnotePrompt, GEMINI, 0.3);
+                        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            const insertionMap = JSON.parse(jsonMatch[0]);
+                            const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
 
-                                // Map superscript values back to source indices for note entries
-                                const superToSourceIdx = {};
-                                const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
-                                Object.entries(insertionMap).forEach(([sentIdx, sup]) => {
+                            // Build ordered note entries by first appearance
+                            const noteOrder = [];
+                            const seenSups = new Set();
+                            // Walk sentences in order to find first appearance of each superscript
+                            sentences.forEach((_, idx) => {
+                                const sup = insertionMap[String(idx)];
+                                if (sup && !seenSups.has(sup)) {
+                                    seenSups.add(sup);
+                                    // Map superscript to source: sup ¹=1, ²=2 → sourceIndex = num-1
                                     const num = parseInt(String(sup).split('').map(c => superToNum[c] ?? 0).join(''));
-                                    if (num > 0 && !superToSourceIdx[sup]) {
-                                        // Assign source by order of first footnote appearance
-                                        const sourceIdx = Object.keys(superToSourceIdx).length;
-                                        superToSourceIdx[sup] = sourcesWithCitations[sourceIdx] || sourcesWithCitations[0];
-                                    }
-                                });
+                                    const src = sourcesWithCitations[num - 1] || sourcesWithCitations[noteOrder.length];
+                                    if (src) noteOrder.push(src);
+                                }
+                            });
 
-                                const citedText = ensureHeaders(applyInsertions(sentences, insertionMap));
-                                const noteEntries = Object.values(superToSourceIdx);
-                                finish(citedText, sourcesWithCitations, noteEntries.length ? noteEntries : null);
-                                break;
-                            }
-                        } catch(e) {
-                            console.error('[Agent] CITE footnotes JSON parse failed:', e.message);
+                            const cited = applyInsertions(sentences, insertionMap);
+                            const citedClean = ensureHeaders(cited);
+                            finish(citedClean, sourcesWithCitations, noteOrder.length ? noteOrder : null);
+                            break;
                         }
-                        finish(input, sourcesWithCitations);
-                        break;
+                    } catch(e) {
+                        console.error('[Agent] CITE footnotes JSON parse failed:', e.message);
                     }
-
+                    finish(input, sourcesWithCitations);
                     break;
                 }
 
@@ -756,14 +803,14 @@ Return ONLY valid JSON:`;
                         break;
                     }
 
-                    const sentences = input.match(/[^.!?]+[.!?]+/g) || [input];
+                    const sentences = splitSentences(input);
                     const numberedSentences = sentences.map((s, i) => `[${i}] ${s.trim()}`).join('\n');
 
-                    const quoteList = availableQuotes.slice(0, 10).map((q, i) =>
+                    const quoteList = availableQuotes.slice(0, 8).map((q, i) =>
                         `[${i}] ${q.inTextKey}: "${q.quote}"\n    Source about: ${q.mainIdea}`
                     ).join('\n\n');
 
-                    const quotesPrompt = `You are inserting direct quotes into an academic essay to strengthen specific claims.
+                    const quotesPrompt = `You are inserting 2-3 direct quotes into an academic essay to support specific claims.
 
 ESSAY SENTENCES (numbered by index):
 ${numberedSentences}
@@ -771,14 +818,15 @@ ${numberedSentences}
 AVAILABLE QUOTES:
 ${quoteList}
 
-TASK: Return a JSON object where:
-- Keys are sentence indices (as strings) AFTER which a quote block should be inserted
-- Values are the full quote insertion: transition + quoted text with citation + 1 sentence of analysis
-- Insert 3-5 quotes total, distributed across the essay
-- Choose quotes that directly support the claim in the sentence they follow
-- SKIP quotes that just describe what a study does ("This paper examines...")
-- Format: "As research confirms, \\"[quote]\\" ${`(Author, Year)`}. This shows [specific point]."
-- Do NOT repeat what surrounding sentences already say
+RULES:
+1. Return a JSON object: keys = sentence indices AFTER which to insert the quote block, values = the full insertion text
+2. Insert EXACTLY 2-3 quotes total — no more. Spread them across different sections of the essay.
+3. Only use quotes that contain SPECIFIC FINDINGS or DATA — skip any that describe what a paper does
+4. Each inserted value must be a complete sentence addition: transition + quote with citation + one sentence of your OWN analysis
+5. The analysis sentence must explain how the quote connects to the argument — not just restate the quote
+6. Do NOT insert a quote into the DECISION section — that section must be the writer's own words only
+7. Do NOT repeat the content of surrounding sentences
+8. Format: "Research confirms that \\"[quote text]\\" [citation]. This demonstrates [specific analytical point connecting to the argument]."
 
 Return ONLY valid JSON:`;
 
