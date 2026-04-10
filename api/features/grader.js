@@ -274,18 +274,18 @@ export default async function handler(req, res) {
         if (!text) throw new Error("No student text provided.");
         if (text.length < 10) throw new Error("Student submission too short (minimum 10 characters).");
 
-        // Process uploaded files into rubric/instruction content
+        // Separate image files (pass to vision API) from text files (append to prompt)
+        const imageFiles = [];
         let fileContent = '';
         if (files && Array.isArray(files) && files.length > 0) {
-            fileContent = '\n\n═══════════════════════════════════════════════════════════════\nATTACHED FILES:\n═══════════════════════════════════════════════════════════════\n';
             for (const file of files) {
-                fileContent += `\n--- ${file.name} ---\n`;
-                if (file.isBase64) {
-                    // For binary files like PDFs, just note they're attached
-                    fileContent += `[Binary file attached: ${file.type}]\n`;
-                } else {
-                    // Text content
-                    fileContent += `${file.content.substring(0, 10000)}\n`;
+                if (file.type?.startsWith('image/') && file.content) {
+                    // Strip data URL prefix to get raw base64
+                    const base64 = file.content.includes(',') ? file.content.split(',')[1] : file.content;
+                    imageFiles.push({ type: file.type, data: base64 });
+                } else if (!file.isBase64 && file.content) {
+                    if (!fileContent) fileContent = '\n\n═══════════════════════════════════════════════════════════════\nATTACHED FILES:\n═══════════════════════════════════════════════════════════════\n';
+                    fileContent += `\n--- ${file.name} ---\n${file.content.substring(0, 10000)}\n`;
                 }
             }
         }
@@ -305,7 +305,9 @@ export default async function handler(req, res) {
             parsedCriteria
         );
 
-        const feedback = await GeminiAPI.chat(prompt, GEMINI_KEY);
+        const feedback = imageFiles.length > 0
+            ? await GeminiAPI.vision(prompt, GEMINI_KEY, imageFiles)
+            : await GeminiAPI.chat(prompt, GEMINI_KEY);
 
         return res.status(200).json({ 
             success: true, 
