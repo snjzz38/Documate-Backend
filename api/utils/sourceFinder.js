@@ -14,13 +14,13 @@ const analyzeTopicWithGemini = async (topic, apiKey) => {
 
 Return a JSON array with exactly 2 elements:
 - Index 0: A 1-2 sentence description of the main idea or subject of this topic
-- Index 1: A single search string (5-10 words) that will return the most relevant peer-reviewed papers from the OpenAlex academic database. Use formal academic and scientific terminology that would appear in paper titles and abstracts. Include synonyms if the topic has a scientific name.
+- Index 1: A single search string of 3-5 words maximum that will return the most relevant peer-reviewed papers from the OpenAlex academic database. Use the most specific and distinctive terms only — the core subject plus 1-2 key descriptors. Fewer, more precise words work better than many words.
 
 Example for "yellow Labrador Retriever":
-["The topic concerns the Labrador Retriever breed, specifically the yellow coat variant, covering its behavior, health, and characteristics.", "Labrador Retriever breed temperament health genetics canine"]
+["The topic concerns the Labrador Retriever breed, specifically the yellow coat variant, covering its behavior, health, and characteristics.", "Labrador Retriever yellow coat genetics"]
 
 Example for "CRISPR gene editing ethics":
-["The topic concerns the ethical implications of CRISPR-Cas9 technology for editing human genomes, particularly germline modification.", "CRISPR Cas9 germline editing ethics human embryo genetic modification"]
+["The topic concerns the ethical implications of CRISPR-Cas9 technology for editing human genomes, particularly germline modification.", "CRISPR germline editing ethics"]
 
 Return ONLY the JSON array, nothing else.`;
 
