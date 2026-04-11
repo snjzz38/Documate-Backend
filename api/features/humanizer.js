@@ -1,6 +1,5 @@
 // api/features/humanizer.js
 import { GeminiAPI } from '../utils/geminiAPI.js';
-import { HumanizerPrompts } from '../utils/prompts.js';
 
 function getRandomTemperature() {
     return 0.7 + Math.random() * 0.6; // 0.7 to 1.3 — high enough for variety, low enough for grammar
@@ -69,6 +68,42 @@ function applyWordSwaps(text) {
 function splitIntoSentences(text) {
     const raw = text.match(/[^.!?]+[.!?]+[\s]*/g) || [text];
     return raw.map(s => s.trim()).filter(s => s.length > 0);
+}
+
+// ==========================================================================
+// SINGLE SENTENCE HUMANIZER PROMPT
+// ==========================================================================
+
+function buildSentencePrompt(sentence, context) {
+    // Randomly pick a style hint to encourage variation
+    const styleHints = [
+        "Try starting with the subject directly.",
+        "Try starting with 'When', 'Because', 'Since', or 'Although'.",
+        "Try making this sentence shorter and punchier.",
+        "Try combining ideas with 'and' or 'but'.",
+        "Try a straightforward declarative structure.",
+    ];
+    const randomHint = styleHints[Math.floor(Math.random() * styleHints.length)];
+    
+    return `Rewrite this single sentence so it sounds like a human wrote it. Keep the exact same meaning. Keep an academic tone.
+
+CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow):
+"${context}"
+
+SENTENCE TO REWRITE:
+"${sentence}"
+
+RULES:
+1. Output ONE sentence only — no commentary, no quotes around it
+2. Keep the same meaning — don't add or remove facts
+3. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
+4. NEVER use semicolons or em dashes
+5. NEVER use ", which" relative clauses
+6. NEVER use filler like "as a matter of course", "it should be noted", "essentially"
+7. Use contractions naturally: it's, don't, we're, that's
+8. ${randomHint}
+
+Output ONLY the rewritten sentence.`;
 }
 
 // ==========================================================================
@@ -259,79 +294,41 @@ export default async function handler(req, res) {
         let processed = applyWordSwaps(text);
         logs.push('Applied banned word replacements');
 
-        // Step 2: Split into paragraphs (preserves \n\n separators for multi-block input)
+        // Step 2: Split into sentences
+        const sentences = splitIntoSentences(processed);
+        logs.push(`Split into ${sentences.length} sentences`);
+
+        // Step 3: Humanize each sentence individually, in parallel
         const temperature = getRandomTemperature();
         logs.push(`Temperature: ${temperature.toFixed(2)}`);
 
-        const inputParagraphs = processed.split(/\n\n+/).filter(p => p.trim().length > 0);
-        logs.push(`Paragraphs: ${inputParagraphs.length}`);
+        const humanizedSentences = await Promise.all(
+            sentences.map(async (sentence, i) => {
+                const contextParts = [];
+                if (i > 0) contextParts.push(sentences[i - 1]);
+                contextParts.push(`>>> ${sentence} <<<`);
+                if (i < sentences.length - 1) contextParts.push(sentences[i + 1]);
+                const context = contextParts.join(' ');
 
-        // Step 3: Humanize in parallel mini-batches of 4 sentences each
-        // Groups run in parallel → fast; each group is small → fast generation per call
-        const BATCH_SIZE = 4;
+                const prompt = buildSentencePrompt(sentence, context);
 
-        const humanizedParagraphs = await Promise.all(inputParagraphs.map(async (para) => {
-            const sentences = splitIntoSentences(para);
-
-            // Deduplicate input sentences within paragraph
-            const seen = new Set();
-            const unique = sentences.filter(s => {
-                const key = s.trim().toLowerCase();
-                if (seen.has(key)) { logs.push(`Removed dup: "${s.substring(0, 40)}"`); return false; }
-                seen.add(key);
-                return true;
-            });
-
-            if (unique.length === 0) return '';
-
-            // Split unique sentences into mini-batches of BATCH_SIZE
-            const batches = [];
-            for (let i = 0; i < unique.length; i += BATCH_SIZE) {
-                batches.push(unique.slice(i, i + BATCH_SIZE));
-            }
-
-            // All mini-batches run in parallel
-            const batchResults = await Promise.all(batches.map(async (batch) => {
-                const prompt = HumanizerPrompts.buildBatchPrompt(batch);
                 try {
                     const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
-                    const lines = raw.split('\n');
-                    return batch.map((original, j) => {
-                        const prefix = new RegExp(`^\\s*${j + 1}[.):] ?`);
-                        const line = lines.find(l => prefix.test(l));
-                        if (line) {
-                            const text = line.replace(prefix, '').trim().replace(/^["']|["']$/g, '');
-                            return text || original;
-                        }
-                        return original;
-                    });
+                    const cleaned = raw.trim().replace(/^["']|["']$/g, '');
+                    logs.push(`Sentence ${i + 1}/${sentences.length}: OK`);
+                    return cleaned;
                 } catch (err) {
-                    logs.push(`Batch FAILED (${err.message})`);
-                    return batch;
+                    logs.push(`Sentence ${i + 1}/${sentences.length}: FAILED (${err.message}), using original`);
+                    return sentence;
                 }
-            }));
+            })
+        );
 
-            const humanized = batchResults.flat();
+        // Step 4: Rejoin and post-process
+        let result = humanizedSentences.join(' ');
+        result = postProcess(result, logs);
 
-            // Dedup output in case model generated duplicate sentences
-            const outSeen = new Set();
-            const deduped = humanized.filter(s => {
-                const key = s.trim().toLowerCase();
-                if (outSeen.has(key)) { logs.push(`Removed output dup`); return false; }
-                outSeen.add(key);
-                return true;
-            });
-            logs.push(`Para OK (${unique.length} → ${deduped.length} sentences, ${batches.length} batch${batches.length > 1 ? 'es' : ''})`);
-            return deduped.join(' ');
-        }));
-
-        // Step 4: Post-process each paragraph, then rejoin
-        const processedParagraphs = humanizedParagraphs
-            .filter(p => p.trim())
-            .map(p => postProcess(p, logs));
-        let result = processedParagraphs.join('\n\n');
-
-        // Step 5: Final word swap pass (applied to full result)
+        // Step 5: Final word swap pass
         result = applyWordSwaps(result);
 
         logs.push(`Final: ${result.length} chars`);
