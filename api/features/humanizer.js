@@ -294,8 +294,16 @@ export default async function handler(req, res) {
                     }
                     return original;
                 });
-                logs.push(`Para OK (${unique.length} sentences)`);
-                return humanized.join(' ');
+                // Dedup output in case model generated duplicate sentences
+                const outSeen = new Set();
+                const deduped = humanized.filter(s => {
+                    const key = s.trim().toLowerCase();
+                    if (outSeen.has(key)) { logs.push(`Removed output dup: "${s.substring(0, 40)}"`); return false; }
+                    outSeen.add(key);
+                    return true;
+                });
+                logs.push(`Para OK (${unique.length} → ${deduped.length} sentences)`);
+                return deduped.join(' ');
             } catch (err) {
                 logs.push(`Para FAILED (${err.message}), using originals`);
                 return unique.join(' ');
