@@ -451,7 +451,7 @@ export default async function handler(req, res) {
                 case 'CITE': {
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'apa7';
-                    const type = options.citationType || 'in-text';
+                    const type = options.citationType || 'bibliography';
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
 
