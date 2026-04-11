@@ -266,48 +266,63 @@ export default async function handler(req, res) {
         const inputParagraphs = processed.split(/\n\n+/).filter(p => p.trim().length > 0);
         logs.push(`Paragraphs: ${inputParagraphs.length}`);
 
-        // Step 3: Humanize each paragraph in parallel — each paragraph = 1 batched Gemini call
+        // Step 3: Humanize in parallel mini-batches of 4 sentences each
+        // Groups run in parallel → fast; each group is small → fast generation per call
+        const BATCH_SIZE = 4;
+
         const humanizedParagraphs = await Promise.all(inputParagraphs.map(async (para) => {
             const sentences = splitIntoSentences(para);
 
-            // Deduplicate sentences within paragraph
+            // Deduplicate input sentences within paragraph
             const seen = new Set();
             const unique = sentences.filter(s => {
                 const key = s.trim().toLowerCase();
-                if (seen.has(key)) { logs.push(`Removed duplicate: "${s.substring(0, 40)}"`); return false; }
+                if (seen.has(key)) { logs.push(`Removed dup: "${s.substring(0, 40)}"`); return false; }
                 seen.add(key);
                 return true;
             });
 
             if (unique.length === 0) return '';
 
-            const prompt = HumanizerPrompts.buildBatchPrompt(unique);
-            try {
-                const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
-                const lines = raw.split('\n');
-                const humanized = unique.map((original, i) => {
-                    const prefix = new RegExp(`^\\s*${i + 1}[.):] ?`);
-                    const line = lines.find(l => prefix.test(l));
-                    if (line) {
-                        const text = line.replace(prefix, '').trim().replace(/^["']|["']$/g, '');
-                        return text || original;
-                    }
-                    return original;
-                });
-                // Dedup output in case model generated duplicate sentences
-                const outSeen = new Set();
-                const deduped = humanized.filter(s => {
-                    const key = s.trim().toLowerCase();
-                    if (outSeen.has(key)) { logs.push(`Removed output dup: "${s.substring(0, 40)}"`); return false; }
-                    outSeen.add(key);
-                    return true;
-                });
-                logs.push(`Para OK (${unique.length} → ${deduped.length} sentences)`);
-                return deduped.join(' ');
-            } catch (err) {
-                logs.push(`Para FAILED (${err.message}), using originals`);
-                return unique.join(' ');
+            // Split unique sentences into mini-batches of BATCH_SIZE
+            const batches = [];
+            for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+                batches.push(unique.slice(i, i + BATCH_SIZE));
             }
+
+            // All mini-batches run in parallel
+            const batchResults = await Promise.all(batches.map(async (batch) => {
+                const prompt = HumanizerPrompts.buildBatchPrompt(batch);
+                try {
+                    const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
+                    const lines = raw.split('\n');
+                    return batch.map((original, j) => {
+                        const prefix = new RegExp(`^\\s*${j + 1}[.):] ?`);
+                        const line = lines.find(l => prefix.test(l));
+                        if (line) {
+                            const text = line.replace(prefix, '').trim().replace(/^["']|["']$/g, '');
+                            return text || original;
+                        }
+                        return original;
+                    });
+                } catch (err) {
+                    logs.push(`Batch FAILED (${err.message})`);
+                    return batch;
+                }
+            }));
+
+            const humanized = batchResults.flat();
+
+            // Dedup output in case model generated duplicate sentences
+            const outSeen = new Set();
+            const deduped = humanized.filter(s => {
+                const key = s.trim().toLowerCase();
+                if (outSeen.has(key)) { logs.push(`Removed output dup`); return false; }
+                outSeen.add(key);
+                return true;
+            });
+            logs.push(`Para OK (${unique.length} → ${deduped.length} sentences, ${batches.length} batch${batches.length > 1 ? 'es' : ''})`);
+            return deduped.join(' ');
         }));
 
         // Step 4: Post-process each paragraph, then rejoin
