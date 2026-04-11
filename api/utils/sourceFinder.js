@@ -169,33 +169,62 @@ export const SourceFinderAPI = {
 
         // Step 1: Gemini understands the topic and generates the search string
         const analysis = await analyzeTopicWithGemini(topic, geminiKey);
-
         const searchQuery = analysis?.[1] || topic;
         console.log('[SourceFinder] Main idea:', analysis?.[0]);
         console.log('[SourceFinder] Search query:', searchQuery);
 
-        // Step 2: Search raw topic first (most precise), then Gemini query as fallback
-        const isDifferent = searchQuery.toLowerCase().trim() !== topic.toLowerCase().trim();
-        const [primaryResults, secondaryResults] = await Promise.all([
-            this.search(topic, limit),
-            isDifferent ? this.search(searchQuery, limit) : Promise.resolve([])
-        ]);
+        // Step 2: Search raw topic first
+        const primaryResults = await this.search(topic, limit);
 
-        // Step 3: Merge — primary results first, fill remaining slots from secondary
-        const seen = new Set();
-        const deduplicated = [];
-        for (const p of [...primaryResults, ...secondaryResults]) {
-            if (p.doi && !seen.has(p.doi)) {
-                seen.add(p.doi);
-                deduplicated.push(p);
-                if (deduplicated.length >= limit) break;
+        // Step 3: Relevance check — ask Gemini if the top results actually match the topic
+        const relevant = await this._checkRelevance(topic, primaryResults.slice(0, 4), geminiKey);
+
+        let finalResults = primaryResults;
+
+        if (!relevant) {
+            // Primary results are off-topic — fall back to Gemini's query
+            console.log('[SourceFinder] Primary results failed relevance check, trying Gemini query:', searchQuery);
+            const fallbackResults = await this.search(searchQuery, limit);
+            // Merge: fallback first (more relevant), then fill from primary
+            const seen = new Set();
+            finalResults = [];
+            for (const p of [...fallbackResults, ...primaryResults]) {
+                if (p.doi && !seen.has(p.doi)) {
+                    seen.add(p.doi);
+                    finalResults.push(p);
+                    if (finalResults.length >= limit) break;
+                }
             }
         }
 
-        console.log(`[SourceFinder] ${deduplicated.length} results`);
+        console.log(`[SourceFinder] ${finalResults.length} results (relevant: ${relevant})`);
 
-        if (citationStyle) return await this.fetchAllCitations(deduplicated, citationStyle);
-        return deduplicated;
+        if (citationStyle) return await this.fetchAllCitations(finalResults, citationStyle);
+        return finalResults;
+    },
+
+    // Ask Gemini whether the returned paper titles are actually about the topic
+    async _checkRelevance(topic, papers, apiKey) {
+        if (!apiKey || !papers.length) return true; // assume ok if no key or no results
+        try {
+            const titles = papers.map((p, i) => `${i + 1}. "${p.title}"`).join('\n');
+            const prompt = `A student is researching this topic: "${topic}"
+
+These are the academic paper titles returned by a search:
+${titles}
+
+Are these papers directly relevant to the topic? Answer with ONLY "yes" or "no".
+"yes" = the papers are genuinely about the topic or closely related subject matter
+"no" = the papers are off-topic, unrelated, or only tangentially connected`;
+
+            const raw = await GeminiAPI.chat(prompt, apiKey, 0.1);
+            const answer = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim().toLowerCase();
+            console.log('[SourceFinder] Relevance check:', answer);
+            return !answer.startsWith('no');
+        } catch (e) {
+            console.error('[SourceFinder] Relevance check failed:', e.message);
+            return true; // assume relevant on error
+        }
     },
 
     _transformWork(work) {
