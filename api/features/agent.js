@@ -2,6 +2,7 @@
 import { GeminiAPI } from '../utils/geminiAPI.js';
 import { GroqAPI } from '../utils/groqAPI.js';
 import { SourceFinderAPI } from '../utils/sourceFinder.js';
+import { AgentPrompts } from '../utils/prompts.js';
 import humanizerHandler from './humanizer.js';
 import graderHandler from './grader.js';
 
@@ -13,67 +14,13 @@ const stripMarkdown = t => t
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/`([^`]+)`/g, '$1');
 
+// Strip AI preamble like "Here's your essay:", "Sure, here is the response:", etc.
 const stripPreamble = t => t
     .replace(/^(?:(?:Here(?:'s| is)|Sure[,!]?\s*(?:here(?:'s| is))?|Okay[,!]?\s*(?:here(?:'s| is))?|Certainly[,!]?\s*(?:here(?:'s| is))?|I'(?:ve|ll)|Below is|The following is)[^\n]*\n)+/i, '')
     .trim();
 
-// ─── Pre-strip "Because" starts — deterministic, no AI needed ────────────────
-const stripBecauseStarts = text => text
-    .replace(/^(\s*[-•]\s+)Because\s+([a-z])/gm, (_, prefix, c) => prefix + c.toUpperCase())
-    .replace(/^Because\s+([a-z])/gm, (_, c) => c.toUpperCase())
-    .replace(/([.!?]\s+)Because\s+([a-z])/g, (_, punct, c) => punct + c.toUpperCase());
-
-// ─── Strip hollow filler sentences ───────────────────────────────────────────
-// Removes sentences that make a vague observation without specific content
-const stripHollowFiller = text => text
-    // "The potential for X is undeniable/significant/clear, but Y"
-    .replace(/\s*The potential for [^.!?]+ is (?:undeniable|significant|clear|substantial|tremendous)[^.!?]*\./gi, '')
-    // "The prospect of X raises serious concerns about Y" with no follow-through
-    .replace(/\s*The prospect of [^.!?]+ raises serious concerns[^.!?]*\./gi, '')
-    // "X is not without risk/challenge/issue" — vague caveat sentences
-    .replace(/\s*(?:the )?(?:process|approach|technology|method) is not without (?:risk|challenge|issue|concern)[^.!?]*\./gi, '')
-    // Orphan mid-thought connectors like "When X, it paves the way for Y" that restate previous sentence
-    .replace(/\s*When (?:researchers?|scientists?|we) (?:gain|develop|uncover|discover)[^.!?]+(?:paves the way for|opens doors to|enables)[^.!?]*\./gi, '')
-    .replace(/  +/g, ' ').replace(/ +\n/g, '\n').trim();
-
-// ─── Sentence splitter ────────────────────────────────────────────────────────
-const ABBREV_RE = /(?:et al|Dr|Mr|Mrs|Ms|Prof|Sr|Jr|vs|e\.g|i\.e|cf|viz|fig|ibid|ca|pp|Vol|No|ed|eds|trans|rev|para|chap|pt)\s*$/i;
-const INITIAL_RE = /\b[A-Z]\.$/;
-
-const splitSentences = text => {
-    const raw = [];
-    let current = '';
-    let i = 0;
-
-    while (i < text.length) {
-        current += text[i];
-
-        if (/[.!?]/.test(text[i])) {
-            let j = i + 1;
-            while (j < text.length && /[\s"')»\u00B9\u00B2\u00B3\u2074-\u2079\u2070]/.test(text[j])) {
-                current += text[j];
-                j++;
-            }
-
-            const ahead = text.slice(j, j + 2);
-            const isEnd = j >= text.length || /^[A-Z"']/.test(ahead) || /^\n/.test(ahead);
-            const precedingWord = current.replace(/[.!?\s"')»]+$/, '').split(/\s+/).pop() || '';
-            const isAbbrev = ABBREV_RE.test(precedingWord) || INITIAL_RE.test(precedingWord);
-
-            if (isEnd && !isAbbrev) {
-                raw.push(current.trim());
-                current = '';
-                i = j;
-                continue;
-            }
-        }
-        i++;
-    }
-    if (current.trim()) raw.push(current.trim());
-    return raw.filter(s => s.length > 0);
-};
-
 // ─── Header repair ───────────────────────────────────────────────────────────
+// Deterministic: find known section headers that got merged onto other lines and force them onto their own lines
 const KNOWN_HEADERS = [
     'ARGUMENTS FOR (EMBRACE):',
     'ARGUMENTS AGAINST (PANIC):',
@@ -85,32 +32,22 @@ const ensureHeaders = t => {
     let result = t;
     for (const hdr of KNOWN_HEADERS) {
         const escaped = hdr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // If header appears mid-line (not at start of line), force a line break before it
         result = result.replace(new RegExp(`(?<!^)(?<!\\n)\\s*${escaped}`, 'gm'), `\n\n${hdr}`);
     }
+    // Also catch generic all-caps headers that got merged
     result = result.replace(/([.!?])\s+((?:[A-Z][A-Z\s\(\)\/\-&]{2,}):?\s*$)/gm, '$1\n\n$2');
+    // Clean up excessive newlines
     return result.replace(/\n{3,}/g, '\n\n').trim();
 };
 
-// ─── Groq QA check ───────────────────────────────────────────────────────────
-const checkWithGroq = async (text, taskFmt, GROQ) => {
+// ─── AI-powered CHECK (Groq — fast + cheap) ─────────────────────────────────
+// Groq ONLY returns JSON booleans — it NEVER produces output text.
+// If checks fail, we fix with deterministic code or re-prompt Gemini.
+const checkWithGroq = async (text, GROQ) => {
     if (!GROQ || !text) return { pass: true };
     try {
-        const messages = [
-            { role: 'system', content: 'You are a QA checker. Return ONLY valid JSON. No thinking, no explanation.' },
-            { role: 'user', content: `Check this academic text and return a JSON object with these boolean fields:
-- "hasCommentary": true if ANY sentence comments on a source rather than arguing
-- "hasBecauseStarts": true if ANY sentence or bullet starts with the word "Because"
-- "hasMetaDescriptions": true if ANY sentence describes what a study IS rather than what it FOUND
-- "headersIntact": true if section headers like "ARGUMENTS FOR", "DECISION:", "JUSTIFICATION:" each appear on their own line
-- "bulletsCorrectLength": true if every bullet (lines starting with "- ") has 2-3 sentences (not more)
-- "hasHollowAnalysis": true if ANY sentence follows evidence with hollow commentary like "This highlights the importance of...", "This underscores the need for...", "This demonstrates the significance of..." without naming a specific consequence
-- "hasSameSourceClustering": true if the same citation (e.g. "(Smith, 2020)") appears in 3 or more consecutive sentences
-
-TEXT:
-${text}
-
-Return ONLY the JSON object:` }
-        ];
+        const messages = AgentPrompts.groqCheckMessages(text);
         const raw = await GroqAPI.chat(messages, GROQ, true);
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
         if (!jsonMatch) return { pass: true };
@@ -121,47 +58,60 @@ Return ONLY the JSON object:` }
     }
 };
 
+// Deterministic fixes applied based on Groq check results — Groq text NEVER enters output
 const applyFixes = (text, checks) => {
     let result = text;
 
-    // Always run deterministic strips first
-    result = stripBecauseStarts(result);
-    result = stripHollowFiller(result);
-
-    if (checks.hasCommentary || checks.hasMetaDescriptions || checks.hasHollowAnalysis) {
-        result = result.replace(/\s*(?:Indeed|Furthermore|Moreover|Additionally|Specifically|However|Notably|Similarly),?\s+[A-Z][a-z]+(?:'s)?(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?(?:\s*\([^)]*\))?\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
-        result = result.replace(/\s*[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\(\d{4}\)\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
-        result = result.replace(/\s*As\s+[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\([^)]*\)\s+[^.]*\./g, '');
-        result = result.replace(/\s*This\s+(?:highlights?|underscores?|emphasizes?|illustrates?|demonstrates?|confirms?|suggests?|shows?)\s+(?:the\s+)?(?:importance|significance|need|potential|concern|risk|inherent risk|imprudence|necessity)[^.]*\./g, '');
-        result = result.replace(/\s*(?:This|Such)\s+(?:lack of|absence of|widespread impact|finding|result|evidence)\s+[^.]*(?:necessitates?|underscores?|highlights?|demonstrates?)[^.]*\./g, '');
-        result = result.replace(/\s*Despite the [^,]+, this [^.]*(?:necessitates?|requires?|demands?)[^.]*\./g, '');
+    // Fix "Because" starts
+    if (checks.hasBecauseStarts) {
+        result = result
+            .replace(/^(\s*[-•]\s+)Because\s+/gm, '$1')
+            .replace(/^Because\s+/gm, '')
+            .replace(/^(\s*[-•]\s+)([a-z])/gm, (_, p, c) => p + c.toUpperCase())
+            .replace(/^([a-z])/gm, c => c.toUpperCase());
     }
 
+    // Strip commentary sentences (transition + Author + commentary verb pattern)
+    if (checks.hasCommentary || checks.hasMetaDescriptions) {
+        // "Indeed/Furthermore/However, Author (Year) highlights/underscores/illustrates..."
+        result = result.replace(/\s*(?:Indeed|Furthermore|Moreover|Additionally|Specifically|However|Notably|Similarly),?\s+[A-Z][a-z]+(?:'s)?(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?(?:\s*\([^)]*\))?\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
+        // "Author (Year) highlights/underscores..." at sentence start
+        result = result.replace(/\s*[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\(\d{4}\)\s+(?:specifically |directly |further |also |particularly |effectively |powerfully )?(?:address|note|highlight|underscore|emphasize|articulate|expand|detail|elaborate|caution|warn|point out|stress|echo|summarize|demonstrate|reinforce|illustrate|review|discuss|analyze|examine|explore|assert|contend|observe|remark|acknowledge|confirm|corroborate|validate|support|reveal)[^.]*\./g, '');
+        // "As Author (Year) points out/notes/highlights..."
+        result = result.replace(/\s*As\s+[A-Z][a-z]+(?:\s+(?:et al\.|(?:and|&)\s+[A-Z][a-z]+))?\s*\([^)]*\)\s+[^.]*\./g, '');
+        // "This highlights/underscores the importance of..."
+        result = result.replace(/\s*This\s+(?:highlights?|underscores?|emphasizes?|illustrates?|demonstrates?)\s+(?:the\s+)?(?:importance|significance|need|potential|concern|risk)[^.]*\./g, '');
+    }
+
+    // Trim bullets to 3 sentences max
     if (checks.bulletsCorrectLength === false) {
         result = result.replace(/^(\s*[-•]\s+)(.+)$/gm, (match, prefix, body) => {
-            const sents = body.match(/[^.!?]+[.!?]+/g) || [body];
-            if (sents.length > 3) return prefix + sents.slice(0, 3).join('').trim();
+            const sentences = body.match(/[^.!?]+[.!?]+/g) || [body];
+            if (sentences.length > 3) return prefix + sentences.slice(0, 3).join('').trim();
             return match;
         });
     }
 
+    // Clean up double spaces and trailing whitespace
     return result.replace(/  +/g, ' ').replace(/ +\n/g, '\n').trim();
 };
 
+// Remove any bibliography/reference section the model appended to essay text
 const stripRefs = t => t
     .replace(/\n\n\*?\*?(?:APA References?|References?|Works Cited|Bibliography|Notes)[:\s]*\*?\*?[\s\S]*$/i, '')
     .trim();
 
+// Remove trailing source appendices
 const stripSourceAppendix = t => t
     .replace(/\n\n(?:Sources?|References?|APA References?|Works Cited|Following instructions?|The following sources)[\s\S]*$/i, '')
     .replace(/\n\nFollowing instructions[\s\S]*$/i, '')
     .trim();
 
+// Strip ALL existing in-text citations before re-inserting clean ones
 const stripExistingCitations = t => t
     .replace(/\([A-Z][a-zA-Z\s,&.]+(?:et al\.)?[,\s]+\d{4}[a-z]?\)/g, '')
     .replace(/\b([A-Z][a-z]+(?:\s+(?:et al\.|&\s+[A-Z][a-z]+))?)\s*\(\d{4}[a-z]?\)/g, '$1')
     .replace(/\(\d{4}[a-z]?\)/g, '')
-    .replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 
@@ -184,7 +134,7 @@ const extractTopic = text => {
         .join(' ') || text.substring(0, 80);
 };
 
-// ─── Author formatting ────────────────────────────────────────────────────────
+// ─── Author formatting (OpenAlex: {given, family}) ───────────────────────────
 
 const fmtAuthorLastOnly = (s, style = 'apa') => {
     const authors = (s.authors || []).filter(a => a.family && a.family.length > 1);
@@ -209,12 +159,19 @@ const fmtAuthorLastOnly = (s, style = 'apa') => {
 // ─── Task format detection ────────────────────────────────────────────────────
 
 const detectTaskFormat = userTask => {
+    // Table/structured assignment with explicit for/against columns
     if (/arguments?\s+for|arguments?\s+against|for\s*\(embrace\)|against\s*\(panic\)/i.test(userTask)) return 'table';
+    // Step-by-step instruction format (numbered steps, bullet points defining what to do)
     if (/(?:^|\n)\s*(?:step\s*\d+|\d+[\.\)]|[•\-]\s+\w)/im.test(userTask) && !/essay/i.test(userTask)) return 'steps';
+    // Explicit questions to answer
     if (/\?\s*$|\?\s*\n|(?:^|\n)\s*(?:a\)|b\)|1\.|2\.)|\banswer\b|\brespond to\b/im.test(userTask)) return 'questions';
+    // List tasks
     if (/\b(?:list|bullet|enumerate|outline)\b/i.test(userTask) && !/essay/i.test(userTask)) return 'list';
+    // Paragraph/short-form tasks
     if (/\b(?:paragraph|short answer|in one sentence|in a sentence|briefly explain|brief explanation|brief response|short paragraph)\b/i.test(userTask) && !/essay/i.test(userTask)) return 'paragraph';
+    // Essay only when explicitly requested
     if (/\b(?:essay|argue|argument|thesis|discuss at length)\b/i.test(userTask)) return 'essay';
+    // Contains a structured rubric/expectation table — treat as structured assignment
     if (/\bexpectation\b|\brubric\b|\bL1\b|\bL2\b|\bL3\b|\bL4\b/i.test(userTask)) return 'structured';
     return 'general';
 };
@@ -284,21 +241,26 @@ const buildEssayHTML = text => {
     const base = `font-family:'Times New Roman',Times,serif;font-size:12pt;line-height:2;color:#000;`;
     const hasHtml = /<[a-z][\s\S]*>/i.test(text);
     const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // All-caps line (optional trailing colon), e.g. "ARGUMENTS FOR (EMBRACE):" or "DECISION"
     const isHeader = s => /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/.test(s.trim()) && s.trim().length < 80;
+    // Bullet/dash list item
     const isBullet = s => /^\s*[-•]\s+/.test(s);
 
     const renderBlock = block => {
         const lines = block.split(/\n/);
+        // Single-line header
         if (lines.length === 1 && isHeader(lines[0])) {
             const content = hasHtml ? lines[0] : esc(lines[0]);
             return `<p style="margin:20px 0 4px 0;font-weight:bold;text-indent:0;">${content}</p>`;
         }
+        // Block where every non-empty line is a bullet
         if (lines.every(l => !l.trim() || isBullet(l))) {
             return lines.filter(l => l.trim()).map(l => {
                 const content = hasHtml ? l : esc(l);
                 return `<p style="margin:0;text-indent:0;padding-left:24px;">${content}</p>`;
             }).join('\n');
         }
+        // Multi-line block starting with a header, rest is content
         if (isHeader(lines[0]) && lines.length > 1) {
             const header = hasHtml ? lines[0] : esc(lines[0]);
             const rest = lines.slice(1).join('\n');
@@ -306,6 +268,7 @@ const buildEssayHTML = text => {
             return `<p style="margin:20px 0 4px 0;font-weight:bold;text-indent:0;">${header}</p>` +
                    `<p style="margin:0;text-indent:36px;">${content.replace(/\n/g,'<br>')}</p>`;
         }
+        // Regular essay paragraph
         const content = hasHtml ? block.replace(/\n/g,'<br>') : esc(block).replace(/\n/g,'<br>');
         return `<p style="margin:0;text-indent:36px;">${content}</p>`;
     };
@@ -313,65 +276,6 @@ const buildEssayHTML = text => {
     return `<div style="${base}">` +
         text.split(/\n\n+/).map(renderBlock).join('\n') +
         `</div>`;
-};
-
-// ─── Source digest ────────────────────────────────────────────────────────────
-const buildSourceDigest = async (sources, style, GEMINI) => {
-    const isApa = style.includes('apa');
-    const isMla = style.includes('mla');
-    const digest = {};
-
-    await Promise.all(sources.slice(0, 12).map(async s => {
-        const lastName = fmtAuthorLastOnly(s, isMla ? 'mla' : 'apa');
-        const inTextKey = isApa
-            ? `(${lastName}, ${s.year})`
-            : isMla ? `(${lastName})` : `(${lastName} ${s.year})`;
-
-        const abstract = (s.text || '').substring(0, 600) || 'No abstract available.';
-        const sentences = abstract.match(/[^.!?]+[.!?]+/g) || [];
-        const isUseless = sent =>
-            /\b(?:this|the present|our)\s+(?:article|paper|study|review)\b/i.test(sent) ||
-            /\b(?:we|here)\s+(?:review|examine|discuss|present|describe|analyze)\b/i.test(sent) ||
-            /\bthe\s+(?:aim|purpose|goal)\s+of\s+(?:this|the)\b/i.test(sent);
-
-        const usableQuotes = sentences
-            .filter(sent => sent.length > 40 && sent.length < 250 && !isUseless(sent))
-            .slice(0, 2)
-            .map(q => q.trim());
-
-        let mainIdea = '';
-        try {
-            const prompt = `Summarize in 1-2 sentences the main argument or finding of this academic source. State what it found or argues specifically. No preamble.
-
-Title: "${s.title}"
-Abstract: ${abstract}`;
-            mainIdea = await GeminiAPI.chat(prompt, GEMINI, 0.3);
-            mainIdea = stripPreamble(stripMarkdown(mainIdea)).trim();
-        } catch (e) {
-            mainIdea = abstract.substring(0, 150);
-        }
-
-        const key = s.url || s.doi || s.id || s.title;
-        digest[key] = { mainIdea, inTextKey, quotes: usableQuotes, source: s };
-    }));
-
-    return digest;
-};
-
-// ─── JSON insertion — appends citation inside sentence's final punctuation ────
-const applyInsertions = (sentences, insertionMap) => {
-    const result = [];
-    sentences.forEach((sentence, idx) => {
-        const key = String(idx);
-        if (insertionMap[key]) {
-            const punct = sentence.match(/([.!?]+)\s*$/)?.[1] || '';
-            const base = sentence.replace(/[.!?]+\s*$/, '').trimEnd();
-            result.push(`${base} ${insertionMap[key]}${punct}`);
-        } else {
-            result.push(sentence);
-        }
-    });
-    return result.join(' ');
 };
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -383,7 +287,7 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        const { action, task, options = {} } = req.body;
+        const { action, options = {} } = req.body;
         const GEMINI = process.env.GEMINI_API_KEY;
         const GROQ = process.env.GROQ_API_KEY;
 
@@ -420,6 +324,7 @@ export default async function handler(req, res) {
                         venue: p.venue, author: p.author, authors: p.authors || [],
                         year: p.year, displayName: p.author || p.displayName,
                         text: p.abstract || p.text,
+                        // Always ensure a citation string exists
                         citation: p.citation || SourceFinderAPI._formatCitation(p, style),
                         citationSource: p.citationSource || 'generated',
                         volume: p.volume || null, issue: p.issue || null, pages: p.pages || null
@@ -455,132 +360,21 @@ export default async function handler(req, res) {
                     ).join('\n\n');
 
                     const fmt = detectTaskFormat(userTask);
-                    let formatInstructions = '';
-
-                    if (fmt === 'table') {
-                        formatInstructions = `FORMAT — STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these four sections with their headers on their own lines.
-
-ARGUMENTS FOR (EMBRACE):
-- [Argument 1: EXACTLY 2-3 sentences. S1: state the specific claim. S2: explain the mechanism or consequence — WHY does this matter? S3 (optional): concrete real-world example.]
-- [Argument 2: different angle, same structure]
-- [Argument 3: different angle, same structure]
-- [Argument 4: different angle, same structure]
-
-ARGUMENTS AGAINST (PANIC):
-- [Argument 1: same structure as above]
-- [Argument 2: different angle]
-- [Argument 3: different angle]
-- [Argument 4: different angle]
-
-DECISION:
-Exactly ONE sentence. State your position and the single most decisive reason. No quotes. No restatement.
-
-JUSTIFICATION:
-Exactly 4 paragraphs. Each paragraph covers a DISTINCT dimension (e.g. biological, economic, ethical, ecological — do not repeat the same dimension).
-
-Each paragraph structure:
-  S1: Specific claim relevant to your decision.
-  S2–S3: Mechanism — WHY does this matter? What specific consequence does it lead to? Name it concretely.
-  S4: Engage the strongest counterargument to this point in one sentence (e.g. "Proponents argue that regulation could prevent this..."), then refute it in S5 with a specific reason it falls short.
-
-SOURCE DIVERSITY RULE — STRICTLY ENFORCED:
-- Do NOT cite the same source in more than 2 consecutive sentences.
-- Each paragraph must draw on at least 2 different ideas (they don't need to be from different sources, but the ideas must be distinct).
-- If you find yourself citing the same author repeatedly in a row, switch to a different angle or piece of evidence first.
-
-"SO WHAT?" RULE — STRICTLY ENFORCED:
-After every claim, the next sentence must name a SPECIFIC consequence.
-BAD: "This highlights the importance of caution."
-GOOD: "A single off-target mutation in the embryo propagates into every cell of every descendant, making reversal biologically impossible."
-
-SPECIFICITY RULE:
-When claiming a risk or benefit, include at least one concrete anchor:
-- A named condition, disease, or biological process (e.g. sickle cell anemia, off-target indels)
-- A real-world precedent or analogy (e.g. thalidomide, monoculture crop failures)
-- A measurable or observable outcome (e.g. "increases edit precision to 99% but still leaves a 1% error rate across billions of base pairs")
-
-SENTENCE STARTER RULES:
-- NEVER start any sentence or bullet with "Because"
-- NEVER start two consecutive sentences with the same word
-
-FILLER RULE:
-These sentence patterns are FORBIDDEN — delete them if you write them:
-- "The potential for X is undeniable"
-- "X is not without risk"
-- "The prospect of X raises concerns"
-- "When researchers gain X, it paves the way for Y" (restating the previous sentence)
-- Any sentence that makes a vague observation without naming a specific consequence
-
-CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim on their own lines.`;
-
-                    } else if (fmt === 'steps' || fmt === 'structured') {
-                        formatInstructions = `FORMAT — STRUCTURED ASSIGNMENT:
-- Read the task carefully and identify each distinct section or deliverable
-- Complete each section fully, in the order given
-- Use the exact section labels from the task
-- Do NOT convert this into a prose essay
-- Plain text, no markdown formatting`;
-
-                    } else if (fmt === 'questions') {
-                        formatInstructions = `FORMAT — ANSWER EACH QUESTION:
-- Answer each question directly and completely, keeping original numbering
-- Plain text only — no markdown`;
-
-                    } else if (fmt === 'list') {
-                        formatInstructions = `FORMAT — LIST:
-- Clear, organized structure
-- Plain text only — no markdown`;
-
-                    } else if (fmt === 'paragraph') {
-                        formatInstructions = `FORMAT — PARAGRAPH RESPONSE:
-- Write a single well-developed paragraph (or the number specified)
-- Do NOT expand into a multi-section essay
-- Plain text only — no markdown`;
-
-                    } else if (fmt === 'essay') {
-                        formatInstructions = `FORMAT — ACADEMIC ESSAY:
-- Introduction with explicit thesis in final sentence
-- Body paragraphs: one main point each; after every claim, name the specific consequence ("So what?")
-- At least one paragraph must engage a counterargument and refute it with specific reasoning
-- No two paragraphs may cover the same dimension
-- Conclusion: synthesize, don't summarize
-- Vary sentence openings; formal academic tone throughout`;
-
-                    } else {
-                        formatInstructions = `FORMAT — MATCH THE TASK EXACTLY:
-- Identify what format the task asks for and produce ONLY that
-- NEVER write a multi-section essay unless the task uses the word "essay"
-- Do NOT add titles, headers, or sections the task did not ask for
-- Plain text — no markdown`;
-                    }
-
-                    const prompt = `Complete the following task accurately.
-
-TASK:
-${userTask}
-${pdfContext}${fileContext}
-${researchSources.length > 0 ? `\nRESEARCH SOURCES (use for ideas and content only — do NOT include citations, author names, or references in your output now):\n${sourceInfo}` : ''}
-
-${formatInstructions}
-
-CRITICAL RULES — ALWAYS APPLY:
-- Do NOT include any in-text citations, author names, or source references anywhere in the output
-- Do NOT add a reference list, "Sources:", or bibliography section at the end
-- Do NOT mention specific researchers, papers, or organisations by name
-- Do NOT start with any preamble — begin with the actual content immediately
-- Do NOT use direct quotes from sources — paraphrase all source material
-- NEVER start a sentence with "Because" — lead with the subject or claim instead
-- NEVER write a vague sentence that makes an observation without naming a specific consequence
-${imageFiles.length > 0 ? '- Carefully analyze any uploaded images as part of the response.' : ''}
-
-Complete the task now:`;
+                    const formatInstructions = AgentPrompts.getWriteFormatInstructions(fmt);
+                    const prompt = AgentPrompts.buildWritePrompt(
+                        userTask,
+                        researchSources.length > 0 ? sourceInfo : null,
+                        pdfContext, fileContext,
+                        formatInstructions,
+                        imageFiles.length > 0
+                    );
 
                     const rawText = imageFiles.length > 0
                         ? await GeminiAPI.vision(prompt, GEMINI, imageFiles)
                         : await GeminiAPI.chat(prompt, GEMINI);
 
-                    let plainText = stripBecauseStarts(stripHollowFiller(ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))))));
-                    const writeChecks = await checkWithGroq(plainText, fmt, GROQ);
+                    let plainText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(rawText)))));
+                    const writeChecks = await checkWithGroq(plainText, GROQ);
                     plainText = applyFixes(plainText, writeChecks);
                     result.output = plainText;
                     result.outputHtml = buildEssayHTML(plainText);
@@ -593,6 +387,7 @@ Complete the task now:`;
                     const input = context.previousOutput || '';
                     if (!input) { result.output = ''; result.outputHtml = ''; break; }
 
+                    // Run text through humanizerHandler
                     const runHumanizer = async text => {
                         if (!text.trim()) return text;
                         let out = '';
@@ -602,6 +397,7 @@ Complete the task now:`;
                         return (out.success && out.result) ? out.result : text;
                     };
 
+                    // Split into {header, lines[]} pairs so headers are never passed to the humanizer
                     const isHdr = s => /^[A-Z][A-Z\s\(\)\/\-&]{2,}:?\s*$/.test(s.trim()) && s.trim().length < 80;
                     const inputLines = input.split('\n');
                     const sections = [];
@@ -617,6 +413,7 @@ Complete the task now:`;
                     }
                     if (cur) sections.push(cur);
 
+                    // Humanize each section's body independently
                     const humanizedSections = await Promise.all(sections.map(async section => {
                         const bodyText = section.lines.join('\n').trim();
                         if (!bodyText) return section.header;
@@ -626,6 +423,7 @@ Complete the task now:`;
 
                         let humanizedBody;
                         if (isBulletSection) {
+                            // Humanize each bullet individually, restore the dash prefix
                             const humanizedBullets = await Promise.all(
                                 bodyLines.map(async l => {
                                     const bulletText = l.replace(/^\s*[-•]\s+/, '');
@@ -652,24 +450,25 @@ Complete the task now:`;
                 case 'CITE': {
                     const sources = context.researchSources || [];
                     const style = options.citationStyle || 'apa7';
-                    const type = (options.citationType || 'in-text').toLowerCase().trim();
-                    const isBibliographyOnly = type === 'bibliography';
-                    const isFootnotes = type === 'footnotes';
+                    const type = options.citationType || 'in-text';
                     const isApa = style.includes('apa');
                     const isMla = style.includes('mla');
 
                     const rawInput = (context.previousOutput || '').trim() || (context.task || '').trim();
+                    // Strip any pre-existing citations so model inserts only clean, correct ones
                     const input = stripExistingCitations(stripSourceAppendix(stripRefs(rawInput)));
 
-                    const sourcesWithCitations = sources.map(s => ({
+                    // Ensure all sources have a formatted citation string
+                    const sourcesWithCitations = (sources.length ? sources : []).map(s => ({
                         ...s,
                         citation: s.citation || SourceFinderAPI._formatCitation(s, style)
                     }));
 
+                    // Helper: build bibliography and populate result
                     const finish = (essayText, citedSources, insertionOrder = null) => {
                         const bib = buildBibliographyHTML(
                             citedSources, style,
-                            isFootnotes ? 'footnotes' : 'bibliography',
+                            type === 'footnotes' ? 'footnotes' : 'bibliography',
                             insertionOrder
                         );
                         result.output = essayText;
@@ -683,115 +482,58 @@ Complete the task now:`;
                     if (!sourcesWithCitations.length) { finish(input, []); break; }
                     if (!input) { finish('', sourcesWithCitations); break; }
 
-                    // ── BIBLIOGRAPHY ONLY ─────────────────────────────────────
-                    if (isBibliographyOnly) {
-                        finish(input, sourcesWithCitations);
-                        break;
-                    }
-
-                    // ── IN-TEXT or FOOTNOTES ──────────────────────────────────
-                    const digest = await buildSourceDigest(sourcesWithCitations, style, GEMINI);
-                    const sentences = splitSentences(input);
-
+                    // Compact source list with exact in-text key model must copy verbatim
                     const sourceList = sourcesWithCitations.slice(0, 12).map((s, i) => {
-                        const key = s.url || s.doi || s.id || s.title;
-                        const d = digest[key] || {};
                         const lastName = fmtAuthorLastOnly(s, isMla ? 'mla' : 'apa');
                         const inTextKey = isApa
                             ? `(${lastName}, ${s.year})`
                             : isMla ? `(${lastName})` : `(${lastName} ${s.year})`;
-                        return `[${i}] CITE-AS: ${inTextKey}\n    Main idea: ${d.mainIdea || (s.text||'').substring(0,150)}\n    Title: "${s.title}"`;
+                        return `[${i+1}] CITE-AS: ${inTextKey}\n    Title: "${s.title}"\n    About: ${(s.text||'').substring(0,200)||'N/A'}`;
                     }).join('\n\n');
 
-                    const numberedSentences = sentences.map((s, i) => `[${i}] ${s.trim()}`).join('\n');
+                    const citationFormat = AgentPrompts.getCitationFormat(type, isApa, isMla);
+                    const citeFmt = detectTaskFormat(context.task || '');
+                    const hasStructuredHeadersCite = citeFmt === 'table' || citeFmt === 'steps' || citeFmt === 'structured';
+                    const prompt = AgentPrompts.buildCitePrompt(input, sourceList, citationFormat, type, hasStructuredHeadersCite);
 
-                    if (!isFootnotes) {
-                        // ── IN-TEXT ───────────────────────────────────────────
-                        const citePrompt = `You are inserting parenthetical in-text citations into an academic text.
+                    let citedText = await GeminiAPI.chat(prompt, GEMINI);
+                    citedText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(citedText)))));
+                    const citeChecks = await checkWithGroq(citedText, GROQ);
+                    citedText = applyFixes(citedText, citeChecks);
 
-SENTENCES (numbered by index):
-${numberedSentences}
+                    if (type === 'footnotes') {
+                        const fixPrompt = AgentPrompts.buildFootnoteFixPrompt(citedText, sourceList);
+                        citedText = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(await GeminiAPI.chat(fixPrompt, GEMINI))))));
 
-SOURCES:
-${sourceList}
-
-CITATION FORMAT: ${isApa ? 'APA 7th: (LastName, Year) — use & not "and" for multiple authors' : isMla ? 'MLA 9th: (LastName)' : 'Chicago: (LastName Year)'}
-Copy the CITE-AS key exactly — do not alter names, ampersands, or years.
-
-RULES:
-1. Return a JSON object: keys = sentence indices (strings), values = citation to append e.g. "(Smith & Jones, 2020)"
-2. Distribute citations across the WHOLE text — do not cluster at the end
-3. Only cite sentences where a source is genuinely relevant to the specific claim made
-4. Duplicate citations of the same source at different locations ARE allowed
-5. SOURCE DIVERSITY: Do not assign the same citation to more than 2 consecutive sentences
-6. NEVER use footnote superscripts — ONLY parenthetical format
-7. Do NOT add new sentences
-
-Return ONLY valid JSON:`;
-
-                        try {
-                            const raw = await GeminiAPI.chat(citePrompt, GEMINI, 0.3);
-                            const jsonMatch = raw.match(/\{[\s\S]*\}/);
-                            if (jsonMatch) {
-                                const insertionMap = JSON.parse(jsonMatch[0]);
-                                const cited = applyInsertions(sentences, insertionMap);
-                                const citedClean = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(cited)))));
-                                const checks = await checkWithGroq(citedClean, detectTaskFormat(context.task || ''), GROQ);
-                                finish(applyFixes(citedClean, checks), sourcesWithCitations);
-                                break;
-                            }
-                        } catch(e) {
-                            console.error('[Agent] CITE in-text JSON parse failed:', e.message);
-                        }
-                        finish(input, sourcesWithCitations);
+                        const superToNum={'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
+                        const toSuper=n=>String(n).split('').map(d=>'⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
+                        let normalized=citedText.replace(/<sup>(\d+)<\/sup>/gi,(_,n)=>toSuper(parseInt(n)));
+                        const allMatches=[...normalized.matchAll(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g)];
+                        const parseSuper=str=>{
+                            const n=parseInt(str.split('').map(c=>superToNum[c]??0).join(''));
+                            if(n>0&&n<=sources.length) return [n];
+                            return str.split('').map(c=>superToNum[c]).filter(n=>n>0&&n<=sources.length);
+                        };
+                        const noteEntries=[],matchToNewNums=new Map();
+                        allMatches.forEach((m,idx)=>{
+                            const nums=parseSuper(m[0]).map(sNum=>{
+                                const src=sourcesWithCitations[sNum-1]; if(!src) return null;
+                                noteEntries.push(src); return noteEntries.length;
+                            }).filter(Boolean);
+                            if(nums.length) matchToNewNums.set(idx,nums);
+                        });
+                        let rewritten=normalized,offset=0;
+                        allMatches.forEach((m,idx)=>{
+                            const nums=matchToNewNums.get(idx); if(!nums?.length) return;
+                            const sup=nums.map(toSuper).join('');
+                            rewritten=rewritten.slice(0,m.index+offset)+sup+rewritten.slice(m.index+offset+m[0].length);
+                            offset+=sup.length-m[0].length;
+                        });
+                        finish(rewritten, sourcesWithCitations, noteEntries);
                         break;
                     }
 
-                    // ── FOOTNOTES ─────────────────────────────────────────────
-                    const footnotePrompt = `You are inserting superscript footnote numbers into an academic text.
-
-SENTENCES (numbered by index):
-${numberedSentences}
-
-SOURCES:
-${sourceList}
-
-RULES:
-1. Return a JSON object: keys = sentence indices (strings), values = superscript to append e.g. "¹" or "²"
-2. Number footnotes sequentially (¹²³…) in order of first appearance in the text
-3. The same source reused later gets the SAME superscript number
-4. Distribute across the text — do not cluster at the end
-5. SOURCE DIVERSITY: Do not assign the same superscript to more than 2 consecutive sentences
-6. NEVER use parenthetical (Author, Year) format — ONLY superscript numbers
-7. Do NOT add new sentences
-
-Return ONLY valid JSON:`;
-
-                    try {
-                        const raw = await GeminiAPI.chat(footnotePrompt, GEMINI, 0.3);
-                        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            const insertionMap = JSON.parse(jsonMatch[0]);
-                            const superToNum = {'¹':1,'²':2,'³':3,'⁴':4,'⁵':5,'⁶':6,'⁷':7,'⁸':8,'⁹':9,'⁰':0};
-                            const noteOrder = [];
-                            const seenSups = new Set();
-                            sentences.forEach((_, idx) => {
-                                const sup = insertionMap[String(idx)];
-                                if (sup && !seenSups.has(sup)) {
-                                    seenSups.add(sup);
-                                    const num = parseInt(String(sup).split('').map(c => superToNum[c] ?? 0).join(''));
-                                    const src = sourcesWithCitations[num - 1] || sourcesWithCitations[noteOrder.length];
-                                    if (src) noteOrder.push(src);
-                                }
-                            });
-                            const cited = applyInsertions(sentences, insertionMap);
-                            finish(ensureHeaders(cited), sourcesWithCitations, noteOrder.length ? noteOrder : null);
-                            break;
-                        }
-                    } catch(e) {
-                        console.error('[Agent] CITE footnotes JSON parse failed:', e.message);
-                    }
-                    finish(input, sourcesWithCitations);
+                    finish(citedText, sourcesWithCitations);
                     break;
                 }
 
@@ -801,82 +543,54 @@ Return ONLY valid JSON:`;
                     const sources = context.researchSources || [];
                     if (!input || !sources.length) { result.output=input; result.outputHtml=buildEssayHTML(input); result.type='text'; break; }
 
-                    const style = options.citationStyle || 'apa7';
-                    const digest = await buildSourceDigest(sources, style, GEMINI);
+                    // Filter out abstract boilerplate — meta-descriptions, methodology, and vague framing
+                    const isUselessQuote = s => {
+                        // "This article/paper/study reviews/examines/discusses..."
+                        if (/\b(?:this|the present|our|the current)\s+(?:article|paper|study|review|report|chapter|work|analysis|research|investigation|manuscript)\b/i.test(s)) return true;
+                        // "We review/examine/discuss/present/describe..."
+                        if (/\b(?:we|here|herein)\s+(?:review|examine|discuss|explore|present|describe|analyze|analyse|investigate|summarize|assess|aim|propose|argue|contend|consider|outline|highlight|address|focus|seek|provide)\b/i.test(s)) return true;
+                        // "The aim/purpose/goal of this..."
+                        if (/\bthe\s+(?:aim|purpose|goal|objective|focus|scope|intent)\s+of\s+(?:this|the)\b/i.test(s)) return true;
+                        // Vague framing: "systematic review is crucial", "informed decision-making", "responsible utilization"
+                        if (/\b(?:systematic review|informed decision|responsible utiliz|guiding future research|full potential|transformative impact|crucial for|broad scope of applicability)\b/i.test(s)) return true;
+                        // Methodology: "In January 2019, we met at..."
+                        if (/\b(?:we met|we conducted|we performed|we collected|we recruited|we selected|we identified|we searched|we assessed|we evaluated)\b/i.test(s)) return true;
+                        // Too vague to be useful as a quote
+                        if (/\b(?:has emerged as|has been proposed|has attracted|is widely|is increasingly|is well known|it is important)\b/i.test(s)) return true;
+                        return false;
+                    };
 
-                    const availableQuotes = [];
-                    for (const [key, d] of Object.entries(digest)) {
-                        for (const quote of d.quotes) {
-                            if (quote.length > 40) {
-                                availableQuotes.push({ quote, inTextKey: d.inTextKey, mainIdea: d.mainIdea });
-                            }
-                        }
-                    }
+                    const quotesFromSources = sources.slice(0,10).map(s => {
+                        const author = fmtAuthorLastOnly(s);
+                        const sentences = (s.text||'').match(/[^.!?]+[.!?]+/g)||[];
+                        const usable = sentences.filter(sent => sent.length > 40 && sent.length < 250 && !isUselessQuote(sent));
+                        // Prefer sentences with concrete findings/data, fall back to any usable sentence
+                        const good = usable.find(sent =>
+                            /\b(?:found that|results show|data suggest|evidence indicate|led to|caused|increased|decreased|reduced|improved|associated with|correlated|resulted in|demonstrated that|revealed that|significantly)\b/i.test(sent)
+                        ) || usable.find(sent => sent.length > 50) || usable[0] || '';
+                        return { author, year:s.year, title:s.title, quote:good.trim() };
+                    }).filter(q=>q.quote);
 
-                    if (!availableQuotes.length) {
+                    const quotesList=quotesFromSources.map((q,i)=>
+                        `[${i+1}] ${q.author} (${q.year}): "${q.quote}" — From: "${q.title}"`
+                    ).join('\n\n');
+
+                    // If no usable quotes found, pass through unchanged
+                    if (!quotesFromSources.length) {
+                        console.log('[Agent] QUOTES: no usable quotes extracted from sources, skipping');
                         result.output = input;
                         result.outputHtml = buildEssayHTML(input);
                         result.type = 'text';
                         break;
                     }
 
-                    const sentences = splitSentences(input);
-                    const numberedSentences = sentences.map((s, i) => `[${i}] ${s.trim()}`).join('\n');
-
-                    const quoteList = availableQuotes.slice(0, 8).map((q, i) =>
-                        `[${i}] ${q.inTextKey}: "${q.quote}"\n    Source about: ${q.mainIdea}`
-                    ).join('\n\n');
-
-                    const quotesPrompt = `You are inserting 2-3 direct quotes into an academic essay to support specific claims.
-
-ESSAY SENTENCES (numbered by index):
-${numberedSentences}
-
-AVAILABLE QUOTES:
-${quoteList}
-
-RULES:
-1. Return a JSON object: keys = sentence indices AFTER which to insert the quote block, values = the full insertion text
-2. Insert EXACTLY 2-3 quotes total — spread across different sections, do NOT place two quotes consecutively
-3. Only use quotes with SPECIFIC FINDINGS, DATA, or CONCRETE CONCLUSIONS — skip anything describing what a paper does
-4. Do NOT insert into the DECISION section
-5. Each inserted value must follow this structure:
-   - Transition sentence explaining WHY this quote is relevant to the surrounding argument
-   - The direct quote with citation: "..." (Author, Year).
-   - Analysis sentence answering "So what?" — name the SPECIFIC implication, not a vague observation
-6. FORBIDDEN analysis endings:
-   "This highlights the importance of..." → FORBIDDEN
-   "This underscores the need for..." → FORBIDDEN
-   "This demonstrates the significance of..." → FORBIDDEN
-   Instead name a concrete consequence: what breaks, what happens, who is affected and how.
-7. Do NOT repeat content already stated in surrounding sentences
-
-Return ONLY valid JSON:`;
-
-                    let withQuotes = input;
-                    try {
-                        const raw = await GeminiAPI.chat(quotesPrompt, GEMINI, 0.4);
-                        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            const insertionMap = JSON.parse(jsonMatch[0]);
-                            const resultSentences = [];
-                            sentences.forEach((sentence, idx) => {
-                                resultSentences.push(sentence);
-                                const key = String(idx);
-                                if (insertionMap[key]) resultSentences.push(insertionMap[key]);
-                            });
-                            withQuotes = resultSentences.join(' ');
-                        }
-                    } catch(e) {
-                        console.error('[Agent] QUOTES JSON parse failed:', e.message);
-                    }
-
-                    withQuotes = stripBecauseStarts(stripHollowFiller(ensureHeaders(stripPreamble(stripMarkdown(withQuotes)))));
-                    const quoteChecks = await checkWithGroq(withQuotes, detectTaskFormat(context.task || ''), GROQ);
+                    const prompt = AgentPrompts.buildQuotesPrompt(input, quotesList);
+                    let withQuotes=ensureHeaders(stripPreamble(stripMarkdown(await GeminiAPI.chat(prompt,GEMINI))));
+                    const quoteChecks = await checkWithGroq(withQuotes, GROQ);
                     withQuotes = applyFixes(withQuotes, quoteChecks);
-                    result.output = withQuotes;
-                    result.outputHtml = buildEssayHTML(withQuotes);
-                    result.type = 'text';
+                    result.output=withQuotes;
+                    result.outputHtml=buildEssayHTML(withQuotes);
+                    result.type='text';
                     break;
                 }
 
@@ -885,9 +599,12 @@ Return ONLY valid JSON:`;
                     const text = context.previousOutput || '';
                     if (!text) { result.output={grade:'N/A',feedback:'No text to grade.'}; result.type='grade'; break; }
 
+                    // Build the full submission for grading:
+                    // essay text + bibliography if available (grader needs to see both)
                     const citedSources = context.researchSources || [];
                     let fullSubmission = text;
                     if (citedSources.length && options.enableCite) {
+                        // Append the plain-text reference list so grader can evaluate citation quality
                         const bibStyle = options.citationStyle || 'apa7';
                         const bibType = options.citationType || 'in-text';
                         const bib = buildBibliographyHTML(citedSources, bibStyle, bibType === 'footnotes' ? 'footnotes' : 'bibliography');
