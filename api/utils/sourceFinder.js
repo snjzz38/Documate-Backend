@@ -174,16 +174,23 @@ export const SourceFinderAPI = {
         console.log('[SourceFinder] Main idea:', analysis?.[0]);
         console.log('[SourceFinder] Search query:', searchQuery);
 
-        // Step 2: Single focused search using Gemini's query
-        const results = await this.search(searchQuery, Math.min(limit + 5, 20));
+        // Step 2: Search raw topic first (most precise), then Gemini query as fallback
+        const isDifferent = searchQuery.toLowerCase().trim() !== topic.toLowerCase().trim();
+        const [primaryResults, secondaryResults] = await Promise.all([
+            this.search(topic, limit),
+            isDifferent ? this.search(searchQuery, limit) : Promise.resolve([])
+        ]);
 
-        // Step 3: Deduplicate by DOI
+        // Step 3: Merge — primary results first, fill remaining slots from secondary
         const seen = new Set();
-        const deduplicated = results.filter(p => {
-            if (seen.has(p.doi)) return false;
-            seen.add(p.doi);
-            return true;
-        }).slice(0, limit);
+        const deduplicated = [];
+        for (const p of [...primaryResults, ...secondaryResults]) {
+            if (p.doi && !seen.has(p.doi)) {
+                seen.add(p.doi);
+                deduplicated.push(p);
+                if (deduplicated.length >= limit) break;
+            }
+        }
 
         console.log(`[SourceFinder] ${deduplicated.length} results`);
 
