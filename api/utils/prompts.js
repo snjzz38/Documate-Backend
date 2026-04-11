@@ -833,7 +833,8 @@ RULES:
 6. Do NOT add a references section, bibliography, or source list at the end
 7. Do NOT start with commentary like "Here is..."
 8. The output must have the SAME NUMBER OF SENTENCES as the input — you are only adding citation markers, not new text
-${hasStructuredHeaders ? '9. CRITICAL: Preserve ALL section headers exactly as written on their own lines. Do not merge headers with other text.' : ''}
+9. FREQUENCY — cite sparingly: a well-cited paragraph has 2-4 citations total, NOT one per sentence. Only cite sentences that state a specific fact, statistic, or claim that directly requires attribution. Background context, logical transitions, and conclusions drawn from already-cited claims do NOT need their own citation.
+${hasStructuredHeaders ? '10. CRITICAL: Preserve ALL section headers exactly as written on their own lines. Do not merge headers with other text.' : ''}
 
 Return ONLY the text with citations inserted:`;
     },
