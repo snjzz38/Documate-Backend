@@ -413,7 +413,7 @@ export default async function handler(req, res) {
                     }
                     if (cur) sections.push(cur);
 
-                    // Humanize each section's body independently
+                    // Humanize each section's body in one call (humanizer handles batching internally)
                     const humanizedSections = await Promise.all(sections.map(async section => {
                         const bodyText = section.lines.join('\n').trim();
                         if (!bodyText) return section.header;
@@ -423,15 +423,16 @@ export default async function handler(req, res) {
 
                         let humanizedBody;
                         if (isBulletSection) {
-                            // Humanize each bullet individually, restore the dash prefix
-                            const humanizedBullets = await Promise.all(
-                                bodyLines.map(async l => {
-                                    const bulletText = l.replace(/^\s*[-•]\s+/, '');
-                                    const h = await runHumanizer(bulletText);
-                                    return `- ${h}`;
-                                })
-                            );
-                            humanizedBody = humanizedBullets.join('\n');
+                            // Join all bullet bodies as paragraphs — humanizer batches all sentences in one call
+                            const bulletBodies = bodyLines.map(l => l.replace(/^\s*[-•]\s+/, ''));
+                            const bulkText = bulletBodies.join('\n\n');
+                            const humanizedBulk = await runHumanizer(bulkText);
+                            // Re-split on paragraph breaks to recover individual bullets
+                            const humanizedParagraphs = humanizedBulk.split(/\n{2,}/);
+                            humanizedBody = bodyLines.map((_, i) => {
+                                const h = (humanizedParagraphs[i] || bulletBodies[i]).trim();
+                                return `- ${h}`;
+                            }).join('\n');
                         } else {
                             humanizedBody = await runHumanizer(bodyText);
                         }
