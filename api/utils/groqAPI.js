@@ -3,7 +3,6 @@
 
 // NOTE: Smart quote fixed on the last line
 const GROQ_MODELS = [
-    "qwen/qwen3-32b",
     "llama-3.1-8b-instant",
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-guard-4-12b",
