@@ -1,5 +1,6 @@
 // api/features/humanizer.js
 import { GeminiAPI } from '../utils/geminiAPI.js';
+import { HumanizerPrompts } from '../utils/prompts.js';
 
 function getRandomTemperature() {
     return 0.7 + Math.random() * 0.6; // 0.7 to 1.3 — high enough for variety, low enough for grammar
@@ -68,42 +69,6 @@ function applyWordSwaps(text) {
 function splitIntoSentences(text) {
     const raw = text.match(/[^.!?]+[.!?]+[\s]*/g) || [text];
     return raw.map(s => s.trim()).filter(s => s.length > 0);
-}
-
-// ==========================================================================
-// SINGLE SENTENCE HUMANIZER PROMPT
-// ==========================================================================
-
-function buildSentencePrompt(sentence, context) {
-    // Randomly pick a style hint to encourage variation
-    const styleHints = [
-        "Try starting with the subject directly.",
-        "Try starting with 'When', 'Because', 'Since', or 'Although'.",
-        "Try making this sentence shorter and punchier.",
-        "Try combining ideas with 'and' or 'but'.",
-        "Try a straightforward declarative structure.",
-    ];
-    const randomHint = styleHints[Math.floor(Math.random() * styleHints.length)];
-    
-    return `Rewrite this single sentence so it sounds like a human wrote it. Keep the exact same meaning. Keep an academic tone.
-
-CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow):
-"${context}"
-
-SENTENCE TO REWRITE:
-"${sentence}"
-
-RULES:
-1. Output ONE sentence only — no commentary, no quotes around it
-2. Keep the same meaning — don't add or remove facts
-3. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
-4. NEVER use semicolons or em dashes
-5. NEVER use ", which" relative clauses
-6. NEVER use filler like "as a matter of course", "it should be noted", "essentially"
-7. Use contractions naturally: it's, don't, we're, that's
-8. ${randomHint}
-
-Output ONLY the rewritten sentence.`;
 }
 
 // ==========================================================================
@@ -310,7 +275,7 @@ export default async function handler(req, res) {
                 if (i < sentences.length - 1) contextParts.push(sentences[i + 1]);
                 const context = contextParts.join(' ');
 
-                const prompt = buildSentencePrompt(sentence, context);
+                const prompt = HumanizerPrompts.buildSentencePrompt(sentence, context);
 
                 try {
                     const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
