@@ -329,7 +329,7 @@ OUTPUT: Return JSON only:
     /**
      * STEP 2: Generate insertion points
      */
-    buildStep2(outputType, style, context, sources, formattedCitations) {
+    buildStep2(outputType, style, context, sources) {
         const sourceContext = Helpers.buildSourceContext(sources, false);
         const citationFormat = Helpers.getInTextFormat(style);
         const modeInstructions = Helpers.getModeInstructions(outputType);
@@ -407,7 +407,7 @@ IF ANY IS NO → Add more citations before outputting!
         // ==================== QUOTES MODE ====================
         if (type === 'quotes') {
             // Build source context with clear URL emphasis
-            const sourceContext = safeSources.map((s, idx) => {
+            const sourceContext = safeSources.map((s) => {
                 return `[ID:${s.id}]
 TITLE: ${s.title}
 FULL_URL: ${s.link}
@@ -504,3 +504,383 @@ OUTPUT JSON:
 
 // Export helpers for use in other modules if needed
 export { Helpers, Templates };
+
+// ==========================================================================
+// HUMANIZER PROMPTS
+// ==========================================================================
+
+export const HumanizerPrompts = {
+    buildSentencePrompt(sentence, context) {
+        const styleHints = [
+            "Try starting with the subject directly.",
+            "Try starting with 'When', 'Because', 'Since', or 'Although'.",
+            "Try making this sentence shorter and punchier.",
+            "Try combining ideas with 'and' or 'but'.",
+            "Try a straightforward declarative structure.",
+        ];
+        const randomHint = styleHints[Math.floor(Math.random() * styleHints.length)];
+        return `Rewrite this single sentence so it sounds like a human wrote it. Keep the exact same meaning. Keep an academic tone.
+
+CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow):
+"${context}"
+
+SENTENCE TO REWRITE:
+"${sentence}"
+
+RULES:
+1. Output ONE sentence only — no commentary, no quotes around it
+2. Keep the same meaning — don't add or remove facts
+3. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
+4. NEVER use semicolons or em dashes
+5. NEVER use ", which" relative clauses
+6. NEVER use filler like "as a matter of course", "it should be noted", "essentially"
+7. Use contractions naturally: it's, don't, we're, that's
+8. ${randomHint}
+
+Output ONLY the rewritten sentence.`;
+    }
+};
+
+// ==========================================================================
+// GRADER PROMPTS
+// ==========================================================================
+
+const _formatCriteria = (criteria) => {
+    if (!criteria || criteria.length === 0) return null;
+    let out = "RUBRIC CRITERIA (Grade EACH criterion):\n";
+    criteria.forEach((c, i) => {
+        out += c.points ? `${i + 1}. ${c.name} (${c.points} points)\n` : `${i + 1}. ${c.name}\n`;
+    });
+    return out;
+};
+
+export const GraderPrompts = {
+    buildGradingPrompt(studentText, instructions, rubric, analysis, parsedCriteria) {
+        const parts = [];
+
+        parts.push(`ROLE: You are an experienced, fair, and constructive academic grader.
+Your goal is to help students IMPROVE. Be specific, actionable, and encouraging.
+
+GRADING PHILOSOPHY:
+- Be strict but fair
+- Every critique must include HOW to fix it
+- Highlight what works well (students need encouragement)
+- Reference SPECIFIC parts of the student's work
+- If a rubric is provided, grade EACH criterion explicitly`);
+
+        if (analysis.assignmentType !== 'general') {
+            parts.push(`\nASSIGNMENT TYPE: ${analysis.assignmentType.toUpperCase()}
+Key areas to evaluate: ${analysis.keyRequirements.join(', ')}`);
+        }
+
+        if (instructions && instructions.trim()) {
+            parts.push(`\n═══════════════════════════════════════════════════════════════
+ASSIGNMENT INSTRUCTIONS (What the student was asked to do):
+═══════════════════════════════════════════════════════════════
+${instructions.trim()}`);
+        }
+
+        if (parsedCriteria) {
+            parts.push(`\n═══════════════════════════════════════════════════════════════
+GRADING RUBRIC (You MUST grade each criterion):
+═══════════════════════════════════════════════════════════════
+${_formatCriteria(parsedCriteria)}`);
+        } else if (rubric && rubric.trim()) {
+            parts.push(`\n═══════════════════════════════════════════════════════════════
+GRADING CRITERIA:
+═══════════════════════════════════════════════════════════════
+${rubric.trim()}`);
+        }
+
+        parts.push(`\n═══════════════════════════════════════════════════════════════
+STUDENT SUBMISSION:
+═══════════════════════════════════════════════════════════════
+${studentText}`);
+
+        let outputFormat = `\n═══════════════════════════════════════════════════════════════
+OUTPUT FORMAT (Follow this structure exactly):
+═══════════════════════════════════════════════════════════════
+
+## 📊 Overall Grade: [Letter Grade]
+[1-2 sentence summary of overall performance]
+
+`;
+        if (parsedCriteria && parsedCriteria.length > 0) {
+            outputFormat += `## 📋 Rubric Breakdown\n`;
+            parsedCriteria.forEach((c) => {
+                outputFormat += c.points
+                    ? `### ${c.name} (___/${c.points} points)\n- Score justification\n- Specific evidence from submission\n\n`
+                    : `### ${c.name}\n- Assessment\n- Specific evidence from submission\n\n`;
+            });
+        }
+
+        outputFormat += `## ✅ Strengths
+- [Specific strength with quote/example from text]
+- [Another strength]
+- [What the student did well]
+
+## ⚠️ Areas for Improvement
+- [Specific issue]: "[Quote from text]" → [How to fix it]
+- [Another issue]: [Specific example] → [Actionable improvement]
+- [Pattern or recurring problem] → [Strategy to address it]
+
+## 🎯 Priority Improvements (Top 3)
+1. **[Most important fix]**: [Exactly what to do and why it matters]
+2. **[Second priority]**: [Specific steps to improve]
+3. **[Third priority]**: [Actionable advice]
+
+## 💡 Next Steps
+[2-3 sentences of encouragement and specific next actions the student should take]`;
+
+        parts.push(outputFormat);
+
+        parts.push(`\n═══════════════════════════════════════════════════════════════
+CRITICAL GRADING RULES:
+═══════════════════════════════════════════════════════════════
+1. If a RUBRIC is provided, you MUST score each criterion
+2. Every criticism MUST include a specific fix
+3. Quote the student's actual text when pointing out issues
+4. Be encouraging - help them improve, don't just criticize
+5. The "Priority Improvements" section is the MOST IMPORTANT - make it actionable
+6. Grade based ONLY on the provided instructions/rubric, not your own expectations`);
+
+        return parts.join('\n');
+    },
+
+    buildFollowupPrompt(question, context) {
+        return `SYSTEM: You are an expert academic grader having a follow-up conversation with a student about their graded work.
+
+CONTEXT:
+- You already graded their submission
+- Be helpful, specific, and encouraging
+- Reference the original feedback when relevant
+- Keep responses concise but thorough
+
+ORIGINAL STUDENT SUBMISSION:
+${context.studentText.substring(0, 5000)}
+
+${context.instructions ? `ASSIGNMENT INSTRUCTIONS:\n${context.instructions.substring(0, 1000)}\n` : ''}
+
+YOUR PREVIOUS FEEDBACK:
+${context.feedback.substring(0, 3000)}
+
+CONVERSATION HISTORY:
+${context.chatHistory.slice(-6).map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n')}
+
+STUDENT'S QUESTION: ${question}
+
+Respond to the student's question naturally and helpfully. Be specific and reference their work when applicable.`;
+    }
+};
+
+// ==========================================================================
+// AGENT PROMPTS
+// ==========================================================================
+
+export const AgentPrompts = {
+    groqCheckMessages(text) {
+        return [
+            { role: 'system', content: 'You are a QA checker. Return ONLY valid JSON. No thinking, no explanation.' },
+            { role: 'user', content: `Check this academic text and return a JSON object with these boolean fields:
+- "hasCommentary": true if ANY sentence comments on a source rather than arguing (e.g. "Indeed, Author highlights...", "As Author points out...", "Author effectively illustrates...", "This highlights the importance of...")
+- "hasBecauseStarts": true if ANY sentence or bullet starts with the word "Because"
+- "hasMetaDescriptions": true if ANY sentence describes what a study IS rather than what it FOUND (e.g. "This study reviews...", "This article examines...")
+- "headersIntact": true if section headers like "ARGUMENTS FOR", "DECISION:", "JUSTIFICATION:" each appear on their own line
+- "bulletsCorrectLength": true if every bullet (lines starting with "- ") has 2-3 sentences (not more)
+
+TEXT:
+${text}
+
+Return ONLY the JSON object:` }
+        ];
+    },
+
+    getWriteFormatInstructions(fmt) {
+        if (fmt === 'table') {
+            return `FORMAT — STRUCTURED TABLE ASSIGNMENT. Output EXACTLY these four sections with their headers on their own lines.
+
+ARGUMENTS FOR (EMBRACE):
+- [Argument 1: EXACTLY 2-3 sentences. State the claim, explain why it matters, give a concrete example or consequence. NO padding sentences.]
+- [Argument 2: different angle — 2-3 sentences only]
+- [Argument 3: different angle — 2-3 sentences only]
+- [Argument 4: different angle — 2-3 sentences only]
+
+ARGUMENTS AGAINST (PANIC):
+- [Argument 1: EXACTLY 2-3 sentences. Same structure as above.]
+- [Argument 2: different angle — 2-3 sentences only]
+- [Argument 3: different angle — 2-3 sentences only]
+- [Argument 4: different angle — 2-3 sentences only]
+
+DECISION:
+One sentence only. Start with "Panic." or "Embrace." then state why.
+
+JUSTIFICATION:
+3-4 paragraphs. Requirements:
+- First sentence: "I choose to [panic/embrace] because..."
+- Each paragraph: topic sentence → reasoning → tie back to decision
+- Final paragraph: synthesis — explain WHY the risks/benefits tip the scale
+- Do NOT include citations or a reference section
+
+LENGTH RULES — STRICTLY ENFORCED:
+- Each bullet in FOR/AGAINST = EXACTLY 2-3 sentences. NOT 4, NOT 5, NOT 6. If you write more than 3 sentences for a bullet, you have failed.
+- Do NOT pad arguments with filler like "This represents a profound advancement" or "This perspective highlights..."
+- Do NOT repeat the same point in different words within one bullet
+- Every sentence must add NEW information — no restating
+
+SENTENCE STARTER RULES — STRICTLY ENFORCED:
+- NEVER start any bullet with "Because". Start with the actual claim instead.
+- NEVER start two consecutive sentences with the same word anywhere in the output
+- BAD: "Because gene editing can..." → GOOD: "Gene editing can..."
+- BAD: "Because parents naturally..." → GOOD: "Parents naturally..."
+- Vary starters: use the subject, a condition, a contrast, a fact — anything but "Because" as a first word
+
+CRITICAL: All four headers (ARGUMENTS FOR (EMBRACE):, ARGUMENTS AGAINST (PANIC):, DECISION:, JUSTIFICATION:) MUST appear verbatim on their own lines.`;
+        }
+        if (fmt === 'steps' || fmt === 'structured') {
+            return `FORMAT — STRUCTURED ASSIGNMENT:
+This task has specific sections or steps. Output each section with its label, in order:
+- Read the task carefully and identify each distinct section or deliverable
+- Complete each section fully, in the order given
+- Use the exact section labels from the task
+- Do NOT convert this into a prose essay
+- Do NOT skip any sections
+- Plain text, no markdown formatting`;
+        }
+        if (fmt === 'questions') {
+            return `FORMAT — ANSWER EACH QUESTION:
+- Answer each question directly and completely, keeping original numbering
+- Each answer: thorough and specific
+- Plain text only — no markdown`;
+        }
+        if (fmt === 'list') {
+            return `FORMAT — LIST:
+- Clear, organized structure
+- Plain text only — no markdown`;
+        }
+        if (fmt === 'paragraph') {
+            return `FORMAT — PARAGRAPH RESPONSE:
+- Write a single well-developed paragraph (or the number of paragraphs the task specifies)
+- Do NOT expand into a multi-section essay with introduction/body/conclusion headings
+- Do NOT add a title or section labels unless the task asks for them
+- Plain text only — no markdown`;
+        }
+        if (fmt === 'essay') {
+            return `FORMAT — ACADEMIC ESSAY (apply all of these):
+STRUCTURE:
+- Introduction: Open with context, then state your EXPLICIT thesis/decision in the final sentence of the intro (e.g. "This paper argues that...")
+- Body paragraphs: Each paragraph covers ONE main point. Start with a topic sentence. Support with evidence. End by connecting back to the thesis — never restate the topic sentence
+- Conclusion: Synthesize the argument; do not just summarize. Restate thesis in new words and explain the broader significance
+
+WRITING QUALITY:
+- Vary sentence openings and lengths — no two consecutive sentences should start the same way
+- Paraphrase all source material; avoid direct quotes unless uniquely necessary
+- Every claim should logically advance the argument; cut filler phrases like "it is important to note"
+- Formal academic tone throughout`;
+        }
+        return `FORMAT — MATCH THE TASK EXACTLY:
+STEP 1: Identify what output format the task is asking for (e.g. a letter, a list, Q&A, a paragraph, a table, a short answer).
+STEP 2: Produce ONLY that format.
+
+STRICT RULES:
+- If the task asks for 1 paragraph — write 1 paragraph, NOT an essay
+- If the task asks for a letter — write a letter
+- If the task asks for Q&A or numbered questions — answer each question directly and separately
+- If the task has labeled sections — use those exact labels
+- NEVER write a multi-section academic essay (no Introduction/Body/Conclusion structure) unless the task explicitly uses the word "essay"
+- Do NOT add titles, headers, or extra sections the task did not ask for
+- Plain text — no markdown unless the task specifically requires it`;
+    },
+
+    buildWritePrompt(userTask, sourceInfo, pdfContext, fileContext, formatInstructions, hasImages) {
+        return `Complete the following task accurately.
+
+TASK:
+${userTask}
+${pdfContext}${fileContext}
+${sourceInfo ? `\nRESEARCH SOURCES (use for ideas and content only — do NOT include citations, author names, or references in your output now):\n${sourceInfo}` : ''}
+
+${formatInstructions}
+
+CRITICAL RULES — ALWAYS APPLY:
+- Do NOT include any in-text citations, author names, or source references anywhere in the output
+- Do NOT add a reference list, "Sources:", or bibliography section at the end
+- Do NOT mention specific researchers, papers, or organisations by name
+- Do NOT write a generic essay if the task asks for something else
+- Do NOT start with commentary like "Here's your essay:", "Sure!", or any preamble — begin with the actual content immediately
+${hasImages ? '- Carefully analyze any uploaded images as part of the response.' : ''}
+
+Complete the task now:`;
+    },
+
+    getCitationFormat(type, isApa, isMla) {
+        if (type === 'in-text') {
+            if (isApa) return `APA 7th in-text: parenthetical = (LastName, Year) | narrative = LastName (Year). Use ONLY the CITE-AS key shown — do not alter it.
+Do NOT use footnotes, superscript numbers (¹²³), or endnotes. ONLY parenthetical/narrative in-text citations.`;
+            if (isMla) return `MLA 9th in-text: parenthetical = (LastName). No year in the parenthetical. Use ONLY the CITE-AS key shown — do not alter it.
+Do NOT use footnotes, superscript numbers (¹²³), or endnotes. ONLY parenthetical in-text citations.`;
+            return `Chicago in-text: (LastName Year). Use ONLY the CITE-AS key shown — do not alter it.
+Do NOT use footnotes, superscript numbers (¹²³), or endnotes. ONLY parenthetical in-text citations.`;
+        }
+        return `Superscript footnotes numbered sequentially (¹²³…). New number for each use.
+Do NOT use parenthetical citations like (Author, Year) or (Author). ONLY superscript footnote numbers.`;
+    },
+
+    buildCitePrompt(input, sourceList, citationFormat, type, hasStructuredHeaders) {
+        return `Insert citations into the text below using ONLY the sources listed.
+
+TEXT:
+${input}
+
+SOURCES — copy the CITE-AS key verbatim. Do not invent or modify author names:
+${sourceList}
+
+FORMAT: ${citationFormat}
+
+RULES:
+1. ONLY insert citation keys — do NOT add ANY new sentences or words beyond the citation marker itself
+2. FORBIDDEN: Adding commentary like "Indeed, Author (Year) underscores...", "Furthermore, Author highlights...", "Author (Year) directly addresses this concern..." — these are NOT citations, they are new content. NEVER do this.
+3. CORRECT citation insertion: place the CITE-AS key at the end of an EXISTING sentence, e.g. "Gene editing carries risks (Author, Year)." — do NOT write a new sentence about the source
+4. Copy the CITE-AS key exactly as written — no variations
+5. ${type === 'in-text' ? 'NEVER use footnotes or superscript numbers. ONLY parenthetical/narrative in-text citations.' : 'Use superscript footnote numbers ONLY. NEVER use parenthetical (Author, Year) citations.'}
+6. Do NOT add a references section, bibliography, or source list at the end
+7. Do NOT start with commentary like "Here is..."
+8. The output must have the SAME NUMBER OF SENTENCES as the input — you are only adding citation markers, not new text
+${hasStructuredHeaders ? '9. CRITICAL: Preserve ALL section headers exactly as written on their own lines. Do not merge headers with other text.' : ''}
+
+Return ONLY the text with citations inserted:`;
+    },
+
+    buildFootnoteFixPrompt(text, sourceList) {
+        return `Wherever an author name appears without a footnote superscript, add the correct one. Do not change anything else. Do not add a reference list. Do not start with commentary.
+
+TEXT:
+${text}
+
+SOURCES:
+${sourceList}
+
+Return the corrected text only:`;
+    },
+
+    buildQuotesPrompt(input, quotesList) {
+        return `Insert 3-5 direct quotes into this text with analytical transitions.
+
+TEXT:
+${input}
+
+AVAILABLE QUOTES:
+${quotesList}
+
+INSTRUCTIONS:
+1. Pick quotes that contain SPECIFIC FINDINGS, DATA, or CONCLUSIONS — not general descriptions of what a paper is about
+2. SKIP any quote that just describes what the study does (e.g. "This article reviews..." or "We examine...") — these add nothing
+3. Introduce each quote with a transition that explains its relevance to your argument
+4. Follow each quote with 1-2 sentences of your own analysis connecting it to the argument
+5. Keep ALL existing text and citations intact
+6. Do NOT add a bibliography or reference section
+7. Do NOT start with commentary like "Here is..." — output ONLY the text with quotes inserted
+8. A good quote adds EVIDENCE. A bad quote just describes a paper. Only use good quotes.
+
+Return the text with quotes inserted:`;
+    }
+};
