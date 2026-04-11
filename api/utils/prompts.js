@@ -510,34 +510,22 @@ export { Helpers, Templates };
 // ==========================================================================
 
 export const HumanizerPrompts = {
-    buildSentencePrompt(sentence, context) {
-        const styleHints = [
-            "Try starting with the subject directly.",
-            "Try starting with 'When', 'Because', 'Since', or 'Although'.",
-            "Try making this sentence shorter and punchier.",
-            "Try combining ideas with 'and' or 'but'.",
-            "Try a straightforward declarative structure.",
-        ];
-        const randomHint = styleHints[Math.floor(Math.random() * styleHints.length)];
-        return `Rewrite this single sentence so it sounds like a human wrote it. Keep the exact same meaning. Keep an academic tone.
+    buildBatchPrompt(sentences) {
+        const numbered = sentences.map((s, i) => `${i + 1}. ${s}`).join('\n');
+        return `Rewrite each numbered sentence to sound human-written. Preserve exact meaning, all facts, and citations. Academic tone throughout.
 
-CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow):
-"${context}"
+RULES (apply to every sentence):
+1. Same meaning — no added or removed facts
+2. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
+3. No semicolons, em dashes, or ", which" clauses
+4. No filler: "essentially", "it should be noted", "as a matter of course"
+5. Use contractions naturally: it's, don't, we're, that's
+6. Vary sentence openings across the list
 
-SENTENCE TO REWRITE:
-"${sentence}"
+SENTENCES:
+${numbered}
 
-RULES:
-1. Output ONE sentence only — no commentary, no quotes around it
-2. Keep the same meaning — don't add or remove facts
-3. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
-4. NEVER use semicolons or em dashes
-5. NEVER use ", which" relative clauses
-6. NEVER use filler like "as a matter of course", "it should be noted", "essentially"
-7. Use contractions naturally: it's, don't, we're, that's
-8. ${randomHint}
-
-Output ONLY the rewritten sentence.`;
+Output ONLY the numbered rewrites in the same order, no commentary:`;
     }
 };
 
