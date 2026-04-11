@@ -259,41 +259,56 @@ export default async function handler(req, res) {
         let processed = applyWordSwaps(text);
         logs.push('Applied banned word replacements');
 
-        // Step 2: Split into sentences
-        const sentences = splitIntoSentences(processed);
-        logs.push(`Split into ${sentences.length} sentences`);
-
-        // Step 3: Humanize each sentence individually, in parallel
+        // Step 2: Split into paragraphs (preserves \n\n separators for multi-block input)
         const temperature = getRandomTemperature();
         logs.push(`Temperature: ${temperature.toFixed(2)}`);
 
-        const humanizedSentences = await Promise.all(
-            sentences.map(async (sentence, i) => {
-                const contextParts = [];
-                if (i > 0) contextParts.push(sentences[i - 1]);
-                contextParts.push(`>>> ${sentence} <<<`);
-                if (i < sentences.length - 1) contextParts.push(sentences[i + 1]);
-                const context = contextParts.join(' ');
+        const inputParagraphs = processed.split(/\n\n+/).filter(p => p.trim().length > 0);
+        logs.push(`Paragraphs: ${inputParagraphs.length}`);
 
-                const prompt = HumanizerPrompts.buildSentencePrompt(sentence, context);
+        // Step 3: Humanize each paragraph in parallel — each paragraph = 1 batched Gemini call
+        const humanizedParagraphs = await Promise.all(inputParagraphs.map(async (para) => {
+            const sentences = splitIntoSentences(para);
 
-                try {
-                    const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
-                    const cleaned = raw.trim().replace(/^["']|["']$/g, '');
-                    logs.push(`Sentence ${i + 1}/${sentences.length}: OK`);
-                    return cleaned;
-                } catch (err) {
-                    logs.push(`Sentence ${i + 1}/${sentences.length}: FAILED (${err.message}), using original`);
-                    return sentence;
-                }
-            })
-        );
+            // Deduplicate sentences within paragraph
+            const seen = new Set();
+            const unique = sentences.filter(s => {
+                const key = s.trim().toLowerCase();
+                if (seen.has(key)) { logs.push(`Removed duplicate: "${s.substring(0, 40)}"`); return false; }
+                seen.add(key);
+                return true;
+            });
 
-        // Step 4: Rejoin and post-process
-        let result = humanizedSentences.join(' ');
-        result = postProcess(result, logs);
+            if (unique.length === 0) return '';
 
-        // Step 5: Final word swap pass
+            const prompt = HumanizerPrompts.buildBatchPrompt(unique);
+            try {
+                const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
+                const lines = raw.split('\n');
+                const humanized = unique.map((original, i) => {
+                    const prefix = new RegExp(`^\\s*${i + 1}[.):] ?`);
+                    const line = lines.find(l => prefix.test(l));
+                    if (line) {
+                        const text = line.replace(prefix, '').trim().replace(/^["']|["']$/g, '');
+                        return text || original;
+                    }
+                    return original;
+                });
+                logs.push(`Para OK (${unique.length} sentences)`);
+                return humanized.join(' ');
+            } catch (err) {
+                logs.push(`Para FAILED (${err.message}), using originals`);
+                return unique.join(' ');
+            }
+        }));
+
+        // Step 4: Post-process each paragraph, then rejoin
+        const processedParagraphs = humanizedParagraphs
+            .filter(p => p.trim())
+            .map(p => postProcess(p, logs));
+        let result = processedParagraphs.join('\n\n');
+
+        // Step 5: Final word swap pass (applied to full result)
         result = applyWordSwaps(result);
 
         logs.push(`Final: ${result.length} chars`);
