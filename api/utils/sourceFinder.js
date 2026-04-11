@@ -1,58 +1,34 @@
 // api/utils/sourceFinder.js
 import { DoiAPI } from './doiAPI.js';
-import { GeminiAPI } from './geminiAPI.js';
 
 const OPENALEX_BASE = 'https://api.openalex.org/works';
-
-// Ask Gemini to understand the topic and return:
-// [0] main idea (1-2 sentences)
-// [1] a search string that will return high-quality citations from OpenAlex
-const analyzeTopicWithGemini = async (topic, apiKey) => {
-    const prompt = `You are an academic librarian. A student needs peer-reviewed sources for this topic:
-
-"${topic}"
-
-Return a JSON array with exactly 2 elements:
-- Index 0: A 1-2 sentence description of the main idea or subject of this topic
-- Index 1: A single search string of 3-5 words maximum that will return the most relevant peer-reviewed papers from the OpenAlex academic database. Use the most specific and distinctive terms only — the core subject plus 1-2 key descriptors. Fewer, more precise words work better than many words.
-
-Example for "yellow Labrador Retriever":
-["The topic concerns the Labrador Retriever breed, specifically the yellow coat variant, covering its behavior, health, and characteristics.", "Labrador Retriever yellow coat genetics"]
-
-Example for "CRISPR gene editing ethics":
-["The topic concerns the ethical implications of CRISPR-Cas9 technology for editing human genomes, particularly germline modification.", "CRISPR germline editing ethics"]
-
-Return ONLY the JSON array, nothing else.`;
-
-    try {
-        const raw = await GeminiAPI.chat(prompt, apiKey, 0.1);
-        const match = raw.match(/\[[\s\S]*?\]/);
-        if (!match) return null;
-        const parsed = JSON.parse(match[0]);
-        if (!Array.isArray(parsed) || parsed.length < 2) return null;
-        if (typeof parsed[0] !== 'string' || typeof parsed[1] !== 'string') return null;
-        return parsed;
-    } catch (e) {
-        console.error('[SourceFinder] Gemini topic analysis failed:', e.message);
-        return null;
-    }
-};
 
 export const SourceFinderAPI = {
 
     async fetchAllCitations(sources, style = 'apa7') {
         if (!sources?.length) return sources;
+        console.log(`[SourceFinder] Fetching ${sources.length} citations in ${style} format...`);
+
         const results = [];
         const batchSize = 3;
+
         for (let i = 0; i < sources.length; i += batchSize) {
             const batch = sources.slice(i, i + batchSize);
             const enriched = await Promise.all(batch.map(async src => {
-                if (!src.doi) return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
+                if (!src.doi) {
+                    return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
+                }
                 const meta = await DoiAPI.fetchFromCrossref(src.doi);
-                if (!meta) return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
+                if (!meta) {
+                    return { ...src, citation: this._formatCitation(src, style), citationSource: 'generated' };
+                }
+
+                // Merge Crossref metadata — fill gaps from OpenAlex
                 let mergedAuthors = meta.authors?.length ? meta.authors : src.authors;
+                // Filter out bad single-letter family names
                 mergedAuthors = mergedAuthors.filter(a => a.family && a.family.length > 1 && !/^\d+$/.test(a.family));
-                if (!mergedAuthors.length) mergedAuthors = (src.authors || []).filter(a => a.family && a.family.length > 1);
+                if (mergedAuthors.length === 0) mergedAuthors = (src.authors || []).filter(a => a.family && a.family.length > 1);
+
                 const enrichedSrc = {
                     ...src,
                     authors: mergedAuthors,
@@ -68,9 +44,13 @@ export const SourceFinderAPI = {
                 return enrichedSrc;
             }));
             results.push(...enriched);
-            if (i + batchSize < sources.length) await new Promise(r => setTimeout(r, 300));
+            if (i + batchSize < sources.length) {
+                await new Promise(r => setTimeout(r, 300));
+            }
         }
-        console.log(`[SourceFinder] ${results.filter(s => s.citationSource === 'crossref').length}/${results.length} enriched from Crossref`);
+
+        const crossrefCount = results.filter(s => s.citationSource === 'crossref').length;
+        console.log(`[SourceFinder] ${crossrefCount}/${results.length} enriched from Crossref`);
         return results;
     },
 
@@ -82,38 +62,54 @@ export const SourceFinderAPI = {
 
     _formatApa(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-        const fmt = a => a.given
-            ? `${a.family}, ${a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')}`
-            : a.family;
+        const formatAuthor = a => {
+            const initials = a.given
+                ? a.given.split(/[\s\-]+/).filter(Boolean).map(n => n[0].toUpperCase() + '.').join(' ')
+                : '';
+            return initials ? `${a.family}, ${initials}` : a.family;
+        };
+
         let authorStr = source.author || 'Unknown';
-        if (authors.length === 1) authorStr = fmt(authors[0]);
-        else if (authors.length === 2) authorStr = `${fmt(authors[0])} & ${fmt(authors[1])}`;
-        else if (authors.length === 3) authorStr = `${fmt(authors[0])}, ${fmt(authors[1])}, & ${fmt(authors[2])}`;
-        else if (authors.length > 3) authorStr = `${fmt(authors[0])}, et al.`;
+        if (authors.length === 1) authorStr = formatAuthor(authors[0]);
+        else if (authors.length === 2) authorStr = `${formatAuthor(authors[0])} & ${formatAuthor(authors[1])}`;
+        else if (authors.length === 3) authorStr = `${formatAuthor(authors[0])}, ${formatAuthor(authors[1])}, & ${formatAuthor(authors[2])}`;
+        else if (authors.length > 3) authorStr = `${formatAuthor(authors[0])}, et al.`;
+
+        const year = source.year || 'n.d.';
+        const title = source.title || 'Untitled';
+        const journal = source.venue || '';
+        const volume = source.volume ? `, ${source.volume}` : '';
+        const issue = source.issue ? `(${source.issue})` : '';
+        const pages = source.pages ? `, ${source.pages}` : '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        let citation = `${authorStr} (${source.year || 'n.d.'}). ${source.title || 'Untitled'}.`;
-        if (source.venue) citation += ` ${source.venue}${source.volume ? `, ${source.volume}` : ''}${source.issue ? `(${source.issue})` : ''}${source.pages ? `, ${source.pages}` : ''}.`;
+
+        let citation = `${authorStr} (${year}). ${title}.`;
+        if (journal) citation += ` ${journal}${volume}${issue}${pages}.`;
         if (doi) citation += ` ${doi}`;
         return citation.trim();
     },
 
     _formatMla(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-        const fmtFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
-        const fmtRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+
         let authorStr = source.author || 'Unknown';
-        if (authors.length === 1) authorStr = fmtFirst(authors[0]);
-        else if (authors.length === 2) authorStr = `${fmtFirst(authors[0])}, and ${fmtRest(authors[1])}`;
-        else if (authors.length >= 3) authorStr = `${fmtFirst(authors[0])}, et al.`;
+        if (authors.length === 1) authorStr = formatFirst(authors[0]);
+        else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
+        else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
+
+        const title = source.title || 'Untitled';
+        const journal = source.venue || '';
+        const year = source.year || 'n.d.';
+        const volume = source.volume ? `vol. ${source.volume}` : '';
+        const issue = source.issue ? `no. ${source.issue}` : '';
+        const pages = source.pages ? `pp. ${source.pages}` : '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        let citation = `${authorStr}. "${source.title || 'Untitled'}."`;
-        if (source.venue) citation += ` ${source.venue},`;
-        const details = [
-            source.volume ? `vol. ${source.volume}` : '',
-            source.issue ? `no. ${source.issue}` : '',
-            source.year || 'n.d.',
-            source.pages ? `pp. ${source.pages}` : ''
-        ].filter(Boolean).join(', ');
+
+        let citation = `${authorStr}. "${title}."`;
+        if (journal) citation += ` ${journal},`;
+        const details = [volume, issue, year, pages].filter(Boolean).join(', ');
         if (details) citation += ` ${details}`;
         citation += '.';
         if (doi) citation += ` ${doi}.`;
@@ -122,19 +118,28 @@ export const SourceFinderAPI = {
 
     _formatChicago(source) {
         const authors = (source.authors || []).filter(a => a.family && a.family.length > 1);
-        const fmtFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
-        const fmtRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+        const formatFirst = a => a.given ? `${a.family}, ${a.given}` : a.family;
+        const formatRest = a => a.given ? `${a.given} ${a.family}` : a.family;
+
         let authorStr = source.author || 'Unknown';
-        if (authors.length === 1) authorStr = fmtFirst(authors[0]);
-        else if (authors.length === 2) authorStr = `${fmtFirst(authors[0])}, and ${fmtRest(authors[1])}`;
-        else if (authors.length >= 3) authorStr = `${fmtFirst(authors[0])}, et al.`;
+        if (authors.length === 1) authorStr = formatFirst(authors[0]);
+        else if (authors.length === 2) authorStr = `${formatFirst(authors[0])}, and ${formatRest(authors[1])}`;
+        else if (authors.length >= 3) authorStr = `${formatFirst(authors[0])}, et al.`;
+
+        const title = source.title || 'Untitled';
+        const journal = source.venue || '';
+        const year = source.year || 'n.d.';
+        const volume = source.volume || '';
+        const issue = source.issue ? `no. ${source.issue}` : '';
+        const pages = source.pages || '';
         const doi = source.doi ? `https://doi.org/${source.doi}` : (source.url || '');
-        let citation = `${authorStr}. "${source.title || 'Untitled'}."`;
-        if (source.venue) citation += ` ${source.venue}`;
-        if (source.volume) citation += ` ${source.volume}`;
-        if (source.issue) citation += `, no. ${source.issue}`;
-        citation += ` (${source.year || 'n.d.'})`;
-        if (source.pages) citation += `: ${source.pages}`;
+
+        let citation = `${authorStr}. "${title}."`;
+        if (journal) citation += ` ${journal}`;
+        if (volume) citation += ` ${volume}`;
+        if (issue) citation += `, ${issue}`;
+        citation += ` (${year})`;
+        if (pages) citation += `: ${pages}`;
         citation += '.';
         if (doi) citation += ` ${doi}.`;
         return citation.trim();
@@ -143,10 +148,11 @@ export const SourceFinderAPI = {
     async search(query, limit = 12) {
         if (!query || query.trim().length < 3) return [];
         try {
+            const cleanQuery = query.trim().toLowerCase();
             const params = new URLSearchParams({
-                search: query.trim(),
+                search: cleanQuery,
                 filter: 'is_oa:true,has_abstract:true,has_doi:true',
-                'per-page': String(limit),
+                'per-page': '25',
                 sort: 'relevance_score:desc'
             });
             const response = await fetch(`${OPENALEX_BASE}?${params}`, {
@@ -155,76 +161,65 @@ export const SourceFinderAPI = {
             if (!response.ok) throw new Error(`OpenAlex returned ${response.status}`);
             const data = await response.json();
             if (!data.results?.length) return [];
+
             return data.results
                 .map(work => this._transformWork(work))
-                .filter(p => p.doi && p.abstract);
+                .filter(p => {
+                    if (!p.doi) return false;
+                    if (!p.abstract || p.abstract.length < 150) return false;
+                    const queryWords = cleanQuery.split(/\s+/).filter(w => w.length > 3);
+                    const titleLower = p.title.toLowerCase();
+                    const abstractLower = p.abstract.toLowerCase();
+                    const matchCount = queryWords.filter(w =>
+                        titleLower.includes(w) || abstractLower.includes(w)
+                    ).length;
+                    return matchCount >= Math.ceil(queryWords.length / 2);
+                })
+                .slice(0, limit);
         } catch (e) {
             console.error('[SourceFinder] Search failed:', e.message);
             return [];
         }
     },
 
-    async searchTopic(topic, limit = 12, citationStyle = null, apiKey = null) {
-        const geminiKey = apiKey || process.env.GEMINI_API_KEY;
+    async searchTopic(topic, limit = 12, citationStyle = null) {
+        const queries = this._generateQueries(topic);
+        console.log('[SourceFinder] Generated queries:', queries);
 
-        // Step 1: Gemini understands the topic and generates the search string
-        const analysis = await analyzeTopicWithGemini(topic, geminiKey);
-        const searchQuery = analysis?.[1] || topic;
-        console.log('[SourceFinder] Main idea:', analysis?.[0]);
-        console.log('[SourceFinder] Search query:', searchQuery);
+        const allResults = await Promise.all(queries.map(q => this.search(q, 8)));
 
-        // Step 2: Search raw topic first
-        const primaryResults = await this.search(topic, limit);
-
-        // Step 3: Relevance check — ask Gemini if the top results actually match the topic
-        const relevant = await this._checkRelevance(topic, primaryResults.slice(0, 4), geminiKey);
-
-        let finalResults = primaryResults;
-
-        if (!relevant) {
-            // Primary results are off-topic — fall back to Gemini's query
-            console.log('[SourceFinder] Primary results failed relevance check, trying Gemini query:', searchQuery);
-            const fallbackResults = await this.search(searchQuery, limit);
-            // Merge: fallback first (more relevant), then fill from primary
-            const seen = new Set();
-            finalResults = [];
-            for (const p of [...fallbackResults, ...primaryResults]) {
-                if (p.doi && !seen.has(p.doi)) {
-                    seen.add(p.doi);
-                    finalResults.push(p);
-                    if (finalResults.length >= limit) break;
+        const seen = new Set();
+        const deduplicated = [];
+        for (const results of allResults) {
+            for (const paper of results) {
+                if (paper.doi && !seen.has(paper.doi)) {
+                    seen.add(paper.doi);
+                    deduplicated.push(paper);
                 }
             }
         }
 
-        console.log(`[SourceFinder] ${finalResults.length} results (relevant: ${relevant})`);
+        const topResults = deduplicated
+            .sort((a, b) => (b.citationCount || 0) - (a.citationCount || 0))
+            .slice(0, limit);
 
-        if (citationStyle) return await this.fetchAllCitations(finalResults, citationStyle);
-        return finalResults;
+        if (citationStyle) {
+            return await this.fetchAllCitations(topResults, citationStyle);
+        }
+        return topResults;
     },
 
-    // Ask Gemini whether the returned paper titles are actually about the topic
-    async _checkRelevance(topic, papers, apiKey) {
-        if (!apiKey || !papers.length) return true; // assume ok if no key or no results
-        try {
-            const titles = papers.map((p, i) => `${i + 1}. "${p.title}"`).join('\n');
-            const prompt = `A student is researching this topic: "${topic}"
-
-These are the academic paper titles returned by a search:
-${titles}
-
-Are these papers directly relevant to the topic? Answer with ONLY "yes" or "no".
-"yes" = the papers are genuinely about the topic or closely related subject matter
-"no" = the papers are off-topic, unrelated, or only tangentially connected`;
-
-            const raw = await GeminiAPI.chat(prompt, apiKey, 0.1);
-            const answer = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim().toLowerCase();
-            console.log('[SourceFinder] Relevance check:', answer);
-            return !answer.startsWith('no');
-        } catch (e) {
-            console.error('[SourceFinder] Relevance check failed:', e.message);
-            return true; // assume relevant on error
+    _generateQueries(topic) {
+        const lower = topic.toLowerCase();
+        const queries = [topic];
+        if (lower.includes('designer bab') || lower.includes('gene edit') || lower.includes('crispr')) {
+            queries.push('designer babies ethics genetic engineering', 'CRISPR human embryo editing ethics', 'germline editing ethical implications', 'preimplantation genetic diagnosis ethics');
+        } else if (lower.includes('climate') || lower.includes('global warming')) {
+            queries.push('climate change mitigation policy', 'global warming environmental impact', 'carbon emissions reduction strategies');
+        } else if (lower.includes('artificial intelligence') || lower.includes(' ai ')) {
+            queries.push('artificial intelligence ethics society', 'machine learning bias fairness', 'AI regulation governance policy');
         }
+        return queries.slice(0, 4);
     },
 
     _transformWork(work) {
@@ -232,28 +227,25 @@ Are these papers directly relevant to the topic? Answer with ONLY "yes" or "no".
         const authors = (work.authorships || []).slice(0, 5).map(a => {
             const name = a.author?.display_name || '';
             const parts = name.split(' ');
-            return parts.length >= 2
-                ? { given: parts.slice(0, -1).join(' '), family: parts[parts.length - 1] }
-                : { given: '', family: name };
+            if (parts.length >= 2) return { given: parts.slice(0, -1).join(' '), family: parts[parts.length - 1] };
+            return { given: '', family: name };
         }).filter(a => a.family);
-        const displayAuthor = authors.length === 0 ? 'Unknown'
-            : authors.length > 2 ? `${authors[0].family} et al.`
-            : authors.map(a => a.family).join(' & ');
+
+        let displayAuthor = 'Unknown';
+        if (authors.length > 0) {
+            displayAuthor = authors.length > 2 ? `${authors[0].family} et al.` : authors.map(a => a.family).join(' & ');
+        }
+
         const venue = work.primary_location?.source?.display_name || work.host_venue?.display_name || '';
         const doi = work.doi ? work.doi.replace('https://doi.org/', '') : null;
+
         return {
-            id: work.id,
-            title: work.title || 'Untitled',
-            authors,
-            author: displayAuthor,
-            displayName: displayAuthor,
+            id: work.id, title: work.title || 'Untitled',
+            authors, author: displayAuthor, displayName: displayAuthor,
             year: work.publication_year || 'n.d.',
-            venue,
-            citationCount: work.cited_by_count || 0,
+            venue, citationCount: work.cited_by_count || 0,
             url: doi ? `https://doi.org/${doi}` : work.id,
-            doi,
-            abstract,
-            text: abstract
+            doi, abstract, text: abstract
         };
     },
 
