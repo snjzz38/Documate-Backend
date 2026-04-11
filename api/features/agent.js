@@ -483,6 +483,12 @@ export default async function handler(req, res) {
                     if (!sourcesWithCitations.length) { finish(input, []); break; }
                     if (!input) { finish('', sourcesWithCitations); break; }
 
+                    // Bibliography-only mode: don't touch the text, just attach the reference list
+                    if (type === 'bibliography') {
+                        finish(input, sourcesWithCitations);
+                        break;
+                    }
+
                     // Compact source list with exact in-text key model must copy verbatim
                     const sourceList = sourcesWithCitations.slice(0, 12).map((s, i) => {
                         const lastName = fmtAuthorLastOnly(s, isMla ? 'mla' : 'apa');
