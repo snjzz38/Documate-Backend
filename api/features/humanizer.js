@@ -203,7 +203,7 @@ function postProcess(text, logs) {
 
     // Structural fixes
     if (/;/.test(result)) { result = result.replace(/;/g, '.'); logs.push('Fixed: semicolons → periods'); }
-    if (/[—–]/.test(result)) { result = result.replace(/\s*[—–]\s*/g, ', '); logs.push('Fixed: em dashes → commas'); }
+    if (/[—–]/.test(result)) { result = result.replace(/\s*[—–]\s*/g, ', ');logs.push('Fixed: em dashes → commas'); }
     if (/,\s*which\s+/i.test(result)) { result = result.replace(/,\s*which\s+(\w+)/gi, '. It $1'); logs.push('Fixed: ", which" → ". It"'); }
 
     // Contractions
@@ -293,13 +293,19 @@ export default async function handler(req, res) {
 
         const batchResults = await Promise.all(batches.map(async (batch) => {
             const numbered = batch.map((e, i) => `[${i}] ${e.text}`).join('\n');
-            const prompt = `Rewrite each sentence below to sound natural and human-written. Keep the exact same meaning and all factual claims. Use contractions where natural. Vary sentence openings. Keep academic tone — do not make it casual.
+            const prompt = `Rewrite each sentence to sound human-written. Keep exact meaning. Academic tone. Use contractions naturally. Vary sentence openings.
+
+FORBIDDEN PATTERNS - NEVER USE:
+- "isn't X, it's Y" or "is not X, it is Y"
+- "not just X, but also Y" or "don't just X, but Y"  
+- "doesn't just X, it Y"
+- semicolons or em dashes
+- ", which" clauses
 
 SENTENCES:
 ${numbered}
 
-Return a JSON object ONLY — no explanation, no markdown:
-{"0": "rewritten sentence", "1": "rewritten sentence", ...}`;
+Return JSON ONLY: {"0": "rewritten", "1": "rewritten", ...}`;
 
             try {
                 const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
