@@ -71,42 +71,6 @@ function splitIntoSentences(text) {
 }
 
 // ==========================================================================
-// SINGLE SENTENCE HUMANIZER PROMPT
-// ==========================================================================
-
-function buildSentencePrompt(sentence, context) {
-    // Randomly pick a style hint to encourage variation
-    const styleHints = [
-        "Try starting with the subject directly.",
-        "Try starting with 'When', 'Because', 'Since', or 'Although'.",
-        "Try making this sentence shorter and punchier.",
-        "Try combining ideas with 'and' or 'but'.",
-        "Try a straightforward declarative structure.",
-    ];
-    const randomHint = styleHints[Math.floor(Math.random() * styleHints.length)];
-    
-    return `Rewrite this single sentence so it sounds like a human wrote it. Keep the exact same meaning. Keep an academic tone.
-
-CONTEXT (surrounding sentences — do NOT rewrite these, just use them for flow):
-"${context}"
-
-SENTENCE TO REWRITE:
-"${sentence}"
-
-RULES:
-1. Output ONE sentence only — no commentary, no quotes around it
-2. Keep the same meaning — don't add or remove facts
-3. NEVER use "isn't X, it's Y" or "not just X, but Y" constructions
-4. NEVER use semicolons or em dashes
-5. NEVER use ", which" relative clauses
-6. NEVER use filler like "as a matter of course", "it should be noted", "essentially"
-7. Use contractions naturally: it's, don't, we're, that's
-8. ${randomHint}
-
-Output ONLY the rewritten sentence.`;
-}
-
-// ==========================================================================
 // POST-PROCESSING
 // ==========================================================================
 
@@ -294,41 +258,90 @@ export default async function handler(req, res) {
         let processed = applyWordSwaps(text);
         logs.push('Applied banned word replacements');
 
-        // Step 2: Split into sentences
-        const sentences = splitIntoSentences(processed);
-        logs.push(`Split into ${sentences.length} sentences`);
-
-        // Step 3: Humanize each sentence individually, in parallel
+        // Step 2: Split into paragraphs, flatten ALL sentences into one global list
         const temperature = getRandomTemperature();
         logs.push(`Temperature: ${temperature.toFixed(2)}`);
 
-        const humanizedSentences = await Promise.all(
-            sentences.map(async (sentence, i) => {
-                const contextParts = [];
-                if (i > 0) contextParts.push(sentences[i - 1]);
-                contextParts.push(`>>> ${sentence} <<<`);
-                if (i < sentences.length - 1) contextParts.push(sentences[i + 1]);
-                const context = contextParts.join(' ');
+        const inputParagraphs = processed.split(/\n\n+/).filter(p => p.trim().length > 0);
+        logs.push(`Paragraphs: ${inputParagraphs.length}`);
 
-                const prompt = buildSentencePrompt(sentence, context);
+        // Collect every sentence with its paragraph index; deduplicate globally
+        const allEntries = []; // { text, paraIdx, rewritten }
+        const globalSeen = new Set();
+        inputParagraphs.forEach((para, paraIdx) => {
+            splitIntoSentences(para).forEach(s => {
+                const key = s.trim().toLowerCase();
+                if (globalSeen.has(key)) { logs.push(`Removed dup: "${s.substring(0, 40)}"`); return; }
+                globalSeen.add(key);
+                allEntries.push({ text: s.trim(), paraIdx, rewritten: null });
+            });
+        });
 
-                try {
-                    const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
-                    const cleaned = raw.trim().replace(/^["']|["']$/g, '');
-                    logs.push(`Sentence ${i + 1}/${sentences.length}: OK`);
-                    return cleaned;
-                } catch (err) {
-                    logs.push(`Sentence ${i + 1}/${sentences.length}: FAILED (${err.message}), using original`);
-                    return sentence;
-                }
-            })
-        );
+        // Short sentences (< 40 chars) skip the LLM — word swaps + post-process is enough
+        const toLLM = allEntries.filter(e => e.text.length >= 40);
+        const skipped = allEntries.filter(e => e.text.length < 40);
+        skipped.forEach(e => { e.rewritten = e.text; });
+        logs.push(`Sentences: ${allEntries.length} total, ${toLLM.length} to LLM, ${skipped.length} skipped`);
 
-        // Step 4: Rejoin and post-process
-        let result = humanizedSentences.join(' ');
-        result = postProcess(result, logs);
+        // Step 3: Global batches of 10 — far fewer calls than per-paragraph batches of 4
+        const BATCH_SIZE = 10;
+        const batches = [];
+        for (let i = 0; i < toLLM.length; i += BATCH_SIZE) {
+            batches.push(toLLM.slice(i, i + BATCH_SIZE));
+        }
+        logs.push(`Batches: ${batches.length}`);
 
-        // Step 5: Final word swap pass
+        const batchResults = await Promise.all(batches.map(async (batch) => {
+            const numbered = batch.map((e, i) => `[${i}] ${e.text}`).join('\n');
+            const prompt = `Rewrite each sentence below to sound natural and human-written. Keep the exact same meaning and all factual claims. Use contractions where natural. Vary sentence openings. Keep academic tone — do not make it casual.
+
+SENTENCES:
+${numbered}
+
+Return a JSON object ONLY — no explanation, no markdown:
+{"0": "rewritten sentence", "1": "rewritten sentence", ...}`;
+
+            try {
+                const raw = await GeminiAPI.chat(prompt, GEMINI_KEY, temperature);
+                const jsonMatch = raw.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) { logs.push('Batch parse failed — using originals'); return batch.map(e => e.text); }
+                const parsed = JSON.parse(jsonMatch[0]);
+                return batch.map((e, i) => (parsed[String(i)] || e.text).replace(/^["']|["']$/g, '').trim());
+            } catch (err) {
+                logs.push(`Batch FAILED (${err.message})`);
+                return batch.map(e => e.text);
+            }
+        }));
+
+        // Map rewritten text back onto entries
+        const flatRewritten = batchResults.flat();
+        toLLM.forEach((e, i) => { e.rewritten = flatRewritten[i]; });
+
+        // Deduplicate outputs globally
+        const outSeen = new Set();
+        allEntries.forEach(e => {
+            const key = (e.rewritten || e.text).trim().toLowerCase();
+            if (outSeen.has(key)) { e.rewritten = null; logs.push('Removed output dup'); }
+            else outSeen.add(key);
+        });
+
+        // Step 4: Reconstruct paragraphs from the flattened entry list
+        const paraMap = new Map();
+        allEntries.forEach(e => {
+            if (e.rewritten === null) return;
+            if (!paraMap.has(e.paraIdx)) paraMap.set(e.paraIdx, []);
+            paraMap.get(e.paraIdx).push(e.rewritten);
+        });
+
+        const humanizedParagraphs = inputParagraphs.map((_, i) => (paraMap.get(i) || []).join(' '));
+
+        // Step 5: Post-process each paragraph, then rejoin
+        const processedParagraphs = humanizedParagraphs
+            .filter(p => p.trim())
+            .map(p => postProcess(p, logs));
+        let result = processedParagraphs.join('\n\n');
+
+        // Step 6: Final word swap pass (catches anything introduced by the LLM)
         result = applyWordSwaps(result);
 
         logs.push(`Final: ${result.length} chars`);
