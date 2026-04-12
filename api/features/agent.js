@@ -408,11 +408,13 @@ export default async function handler(req, res) {
 
         // ── PLAN ──────────────────────────────────────────────────────────────
         if (action === 'plan') {
+            const fast = options.fastMode === true;
             const steps = [{ tool: 'RESEARCH', action: 'Find academic sources' }];
             if (options.enableWrite !== false) steps.push({ tool: 'WRITE', action: 'Write response' });
-            if (options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
+            // Fast mode: skip humanize, quotes, and QA — cuts 2–3 API calls
+            if (!fast && options.enableHumanize) steps.push({ tool: 'HUMANIZE', action: 'Humanize text' });
             if (options.enableCite) steps.push({ tool: 'CITE', action: `Add ${options.citationType || 'in-text'} citations` });
-            if (options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Insert quotes with transitions' });
+            if (!fast && options.enableQuotes) steps.push({ tool: 'QUOTES', action: 'Insert quotes with transitions' });
             if (options.enableGrade) steps.push({ tool: 'GRADE', action: 'Grade work' });
             return res.status(200).json({ success: true, plan: { steps } });
         }
@@ -459,18 +461,19 @@ export default async function handler(req, res) {
                     const pdfFiles = allFiles.filter(f => f.type === 'application/pdf');
                     const otherFiles = allFiles.filter(f => !f.type?.startsWith('image/') && f.type !== 'application/pdf');
 
+                    const taskTopic = extractTopic(userTask);
                     let pdfContext = '';
                     for (const pdf of pdfFiles) {
                         try {
-                            const pdfText = await GeminiAPI.vision(`Extract and summarize all key information from this PDF thoroughly.`, GEMINI, [pdf]);
+                            const pdfText = await GeminiAPI.vision(`Extract ONLY information relevant to: "${taskTopic}". Summarize key findings, arguments, and data. Skip unrelated sections.`, GEMINI, [pdf]);
                             pdfContext += `\nUPLOADED DOCUMENT (${pdf.name}):\n${pdfText}\n`;
                         } catch(e) { console.error('[Agent] PDF extraction failed:', e.message); }
                     }
                     const fileContext = otherFiles.length > 0
                         ? `\nUSER FILES: ${otherFiles.map(f=>f.name).join(', ')} - consider this context.\n` : '';
 
-                    const sourceInfo = researchSources.slice(0, 10).map((s, i) =>
-                        `SOURCE ${i+1} [Key: ${fmtAuthorLastOnly(s)}, ${s.year}]:\nTitle: "${s.title}"\nSummary: ${(s.text||'').substring(0, 350)||'N/A'}`
+                    const sourceInfo = researchSources.slice(0, 5).map((s, i) =>
+                        `SOURCE ${i+1} [Key: ${fmtAuthorLastOnly(s)}, ${s.year}]:\nTitle: "${s.title}"\nSummary: ${(s.text||'').substring(0, 120)||'N/A'}`
                     ).join('\n\n');
 
                     const fmt = detectTaskFormat(userTask);
@@ -731,7 +734,59 @@ Complete the task now:`;
 
                     if (!isFootnotes) {
                         // ── IN-TEXT ───────────────────────────────────────────
-                        const citePrompt = `You are inserting parenthetical in-text citations into an academic text.
+                        // If QUOTES step follows, merge both into this single call
+                        const availableQuotes = [];
+                        for (const [, d] of Object.entries(digest)) {
+                            for (const q of d.quotes) {
+                                if (q.length > 40) availableQuotes.push({ quote: q, inTextKey: d.inTextKey, mainIdea: d.mainIdea });
+                            }
+                        }
+                        const mergeQuotes = options.enableQuotes && availableQuotes.length > 0;
+                        const citeFormat = isApa
+                            ? 'APA 7th: (LastName, Year) — use & not "and" for multiple authors'
+                            : isMla ? 'MLA 9th: (LastName)' : 'Chicago: (LastName Year)';
+
+                        let citePrompt;
+                        if (mergeQuotes) {
+                            const quoteList = availableQuotes.slice(0, 8).map((q, i) =>
+                                `[${i}] ${q.inTextKey}: "${q.quote}"\n    Source about: ${q.mainIdea}`
+                            ).join('\n\n');
+                            citePrompt = `Insert in-text citations AND 2–3 direct quotes into this academic text.
+
+SENTENCES:
+${numberedSentences}
+
+SOURCES:
+${sourceList}
+
+AVAILABLE QUOTES:
+${quoteList}
+
+CITATION FORMAT: ${citeFormat}
+Copy CITE-AS keys exactly — do not alter names, ampersands, or years.
+
+Return JSON ONLY in this shape:
+{
+  "citations": { "sentence_index": "citation_string" },
+  "quotes": { "sentence_index_to_insert_after": "full insertion block" }
+}
+
+Citations rules:
+1. Distribute evenly across the text, do NOT cluster at end
+2. Only cite sentences where the source is genuinely relevant
+3. Max 2 consecutive sentences with the same citation
+
+Quotes rules:
+1. Insert EXACTLY 2–3 quotes — spread across different sections, never back-to-back
+2. Only use quotes with SPECIFIC FINDINGS, DATA, or CONCRETE CONCLUSIONS
+3. Do NOT insert into a DECISION section
+4. Each inserted block must be: transition sentence → "quote" (Author, Year). → specific consequence
+5. FORBIDDEN endings: "This highlights the importance of..." / "This underscores the need for..."
+   Instead: name exactly what breaks, who is affected, or what specifically happens
+
+Return ONLY valid JSON:`;
+                        } else {
+                            citePrompt = `You are inserting parenthetical in-text citations into an academic text.
 
 SENTENCES (numbered by index):
 ${numberedSentences}
@@ -739,7 +794,7 @@ ${numberedSentences}
 SOURCES:
 ${sourceList}
 
-CITATION FORMAT: ${isApa ? 'APA 7th: (LastName, Year) — use & not "and" for multiple authors' : isMla ? 'MLA 9th: (LastName)' : 'Chicago: (LastName Year)'}
+CITATION FORMAT: ${citeFormat}
 Copy the CITE-AS key exactly — do not alter names, ampersands, or years.
 
 RULES:
@@ -752,16 +807,42 @@ RULES:
 7. Do NOT add new sentences
 
 Return ONLY valid JSON:`;
+                        }
 
                         try {
                             const raw = await GeminiAPI.chat(citePrompt, GEMINI, 0.3);
                             const jsonMatch = raw.match(/\{[\s\S]*\}/);
                             if (jsonMatch) {
-                                const insertionMap = JSON.parse(jsonMatch[0]);
-                                const cited = applyInsertions(sentences, insertionMap);
-                                const citedClean = ensureHeaders(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(cited)))));
-                                const checks = await checkWithGroq(citedClean, detectTaskFormat(context.task || ''), GROQ);
-                                finish(applyFixes(citedClean, checks), sourcesWithCitations);
+                                const json = JSON.parse(jsonMatch[0]);
+                                const citationMap = mergeQuotes ? (json.citations || {}) : json;
+                                const quoteMap = mergeQuotes ? (json.quotes || {}) : {};
+
+                                // Apply citations
+                                const cited = applyInsertions(sentences, citationMap);
+
+                                // Apply quotes (inserted after specified sentence indices)
+                                let finalText = cited;
+                                if (mergeQuotes && Object.keys(quoteMap).length) {
+                                    const citedSentences = splitSentences(cited);
+                                    const withQuotesSentences = [];
+                                    citedSentences.forEach((sentence, idx) => {
+                                        withQuotesSentences.push(sentence);
+                                        if (quoteMap[String(idx)]) withQuotesSentences.push(quoteMap[String(idx)]);
+                                    });
+                                    finalText = withQuotesSentences.join(' ');
+                                }
+
+                                const citedClean = ensureHeaders(stripBecauseStarts(stripHollowFiller(stripPreamble(stripMarkdown(stripRefs(stripSourceAppendix(finalText)))))));
+
+                                if (mergeQuotes) result.quotesHandledInCite = true;
+
+                                // Run QA here only when QUOTES won't run (avoids double QA call)
+                                if (!mergeQuotes && !options.enableQuotes && GROQ && citedClean.length > 1000) {
+                                    const checks = await checkWithGroq(citedClean, detectTaskFormat(context.task || ''), GROQ);
+                                    finish(applyFixes(citedClean, checks), sourcesWithCitations);
+                                } else {
+                                    finish(citedClean, sourcesWithCitations);
+                                }
                                 break;
                             }
                         } catch(e) {
@@ -823,12 +904,32 @@ Return ONLY valid JSON:`;
                 case 'QUOTES': {
                     const input = context.previousOutput || '';
                     const sources = context.researchSources || [];
+                    const taskFmt = detectTaskFormat(context.task || '');
+
+                    const runFinalQA = async text => {
+                        if (!GROQ || text.length < 1000) return text;
+                        try {
+                            const checks = await checkWithGroq(text, taskFmt, GROQ);
+                            return applyFixes(text, checks);
+                        } catch (e) { return text; }
+                    };
+
                     if (!input || !sources.length) { result.output=input; result.outputHtml=buildEssayHTML(input); result.type='text'; break; }
 
-                    // Skip if the task doesn't ask for quotes/evidence — avoids unnecessary digest + Gemini call
+                    // Quotes were already merged into CITE — just run final QA and exit
+                    if (context.quotesHandledInCite) {
+                        const cleaned = await runFinalQA(stripBecauseStarts(stripHollowFiller(input)));
+                        result.output = cleaned;
+                        result.outputHtml = buildEssayHTML(cleaned);
+                        result.type = 'text';
+                        break;
+                    }
+
+                    // Skip quote insertion if task doesn't call for them — still run QA
                     if (!/quote|evidence|support|direct quote/i.test(context.task || '')) {
-                        result.output = input;
-                        result.outputHtml = buildEssayHTML(input);
+                        const cleaned = await runFinalQA(input);
+                        result.output = cleaned;
+                        result.outputHtml = buildEssayHTML(cleaned);
                         result.type = 'text';
                         break;
                     }
@@ -838,7 +939,7 @@ Return ONLY valid JSON:`;
                     const digest = context.sourceDigest || await buildSourceDigest(sources, style, GEMINI);
 
                     const availableQuotes = [];
-                    for (const [key, d] of Object.entries(digest)) {
+                    for (const [, d] of Object.entries(digest)) {
                         for (const quote of d.quotes) {
                             if (quote.length > 40) {
                                 availableQuotes.push({ quote, inTextKey: d.inTextKey, mainIdea: d.mainIdea });
@@ -847,8 +948,9 @@ Return ONLY valid JSON:`;
                     }
 
                     if (!availableQuotes.length) {
-                        result.output = input;
-                        result.outputHtml = buildEssayHTML(input);
+                        const cleaned = await runFinalQA(input);
+                        result.output = cleaned;
+                        result.outputHtml = buildEssayHTML(cleaned);
                         result.type = 'text';
                         break;
                     }
@@ -905,8 +1007,8 @@ Return ONLY valid JSON:`;
                     }
 
                     withQuotes = stripBecauseStarts(stripHollowFiller(ensureHeaders(stripPreamble(stripMarkdown(withQuotes)))));
-                    const quoteChecks = await checkWithGroq(withQuotes, detectTaskFormat(context.task || ''), GROQ);
-                    withQuotes = applyFixes(withQuotes, quoteChecks);
+                    // Single QA pass — final text step
+                    withQuotes = await runFinalQA(withQuotes);
                     result.output = withQuotes;
                     result.outputHtml = buildEssayHTML(withQuotes);
                     result.type = 'text';
