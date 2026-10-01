@@ -14,7 +14,6 @@
 
 const GROQ_MODELS = [
     "meta-llama/llama-prompt-guard-2-22m",
-    "meta-llama/llama-prompt-guard-2-86m",
 ];
 
 // ==========================================================================
