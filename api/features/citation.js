@@ -23,11 +23,12 @@
 // MODULE 1: DEPENDENCIES & CONFIGURATION
 // ==========================================================================
 
-import { OpenalexAPI } from '../_utils/openalex.js'; // Renamed from GoogleSearchAPI
-import { SearxAPI } from '../_utils/searx.js'; // Added SearXNG import for general search
+import { OpenalexAPI } from '../_utils/openalex.js';
+import { SearxAPI } from '../_utils/searx.js';
 import { ScraperAPI } from '../_utils/scraper.js';
 import { GroqAPI } from '../_utils/groqAPI.js';
 import { DoiAPI } from '../_utils/doiAPI.js';
+import quotesHandler from './quotes.js'; // MUST BE AT TOP OF FILE
 
 const TODAY = () => new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
@@ -448,7 +449,6 @@ Rules:
 // ==========================================================================
 // MODULE 6: MAIN HANDLER
 // ==========================================================================
-import quotesHandler from './quotes.js';
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
