@@ -2,32 +2,12 @@
 // FILE PATH: api/features/quotes.js
 // ==========================================================================
 
-/*
- * TABLE OF CONTENTS
- * -------------------------------------------------------
- * 1. DEPENDENCIES & CONFIGURATION
- * 2. PROMPT & EXTRACTION HELPERS
- * 3. MAIN HANDLER
- */
-
-// ==========================================================================
-// MODULE 1: DEPENDENCIES & CONFIGURATION
-// ==========================================================================
 import { OpenalexAPI } from '../_utils/openalex.js';
 import { SearxAPI } from '../_utils/searx.js';
 import { ScraperAPI } from '../_utils/scraper.js';
 import { GroqAPI } from '../_utils/groqAPI.js';
 
-// ==========================================================================
-// MODULE 2: PROMPT & EXTRACTION HELPERS
-// ==========================================================================
-
-/**
- * Builds a compact prompt strictly under 250 tokens to comply with
- * Groq's 512-token Prompt Guard limit.
- */
 function buildSourceQuotePrompt(title, text) {
-    // Keep text under ~600 chars (~120-150 tokens) to guarantee < 512 tokens total
     const slice = (text || '').slice(0, 600).trim();
     return `Extract 1-2 verbatim quotes (1-2 sentences each) directly from the excerpt below.
 
@@ -37,34 +17,28 @@ EXCERPT:
 
 RULES:
 - Must be exact, word-for-word text from EXCERPT.
-- Return ONLY the quotes preceded by "> ". Do not add preamble or commentary.`;
+- Return ONLY the quotes, each starting with '> "'.
+- Do NOT add introductory remarks or explanations.`;
 }
 
 async function extractQuoteForSource(source, index, groqKey) {
-    const title = source.title || 'Untitled Source';
+    const title = source.title || 'Source';
     const url = source.doi ? `https://doi.org/${source.doi}` : (source.link || source.url || '');
     const content = source.content || source.snippet || '';
 
-    if (!content || content.length < 50) {
-        return null;
-    }
+    if (!content || content.length < 50) return null;
 
     try {
         const prompt = buildSourceQuotePrompt(title, content);
         const quote = await GroqAPI.chat([{ role: 'user', content: prompt }], groqKey, false);
-
-        if (!quote || quote.trim().length === 0) return null;
-
+        if (!quote || !quote.trim()) return null;
         return `**[${index + 1}] ${title}** - ${url}\n${quote.trim()}`;
     } catch (err) {
-        console.warn(`[Quotes] Failed to extract quote for source [${index + 1}]:`, err.message);
+        console.warn(`[Quotes] Failed for source ${index + 1}:`, err.message);
         return null;
     }
 }
 
-// ==========================================================================
-// MODULE 3: MAIN HANDLER
-// ==========================================================================
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -80,22 +54,18 @@ export default async function handler(req, res) {
 
         let targetSources = [];
 
-        // 1. Resolve Sources
         if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
             targetSources = preLoadedSources;
         } else if (context) {
-            console.log('[Quotes] No cached sources provided. Searching on the fly...');
             const [academicResults, generalResults] = await Promise.all([
                 OpenalexAPI.search(context, GKEY, GCX, GROQ, OPENALEX),
                 SearxAPI.search(context, 5)
             ]);
-            const raw = [...academicResults, ...generalResults];
-            targetSources = await ScraperAPI.scrape(raw);
+            targetSources = await ScraperAPI.scrape([...academicResults, ...generalResults]);
         } else {
             return res.status(400).json({ success: false, error: 'Context or preLoadedSources required.' });
         }
 
-        // 2. Ensure Sources Have Scraped Content
         const sourcesWithContent = await Promise.all(targetSources.map(async (s) => {
             if (!s.content || s.content.length < 200) {
                 try {
@@ -108,7 +78,6 @@ export default async function handler(req, res) {
             return s;
         }));
 
-        // 3. Extract Quotes in Parallel (Each individual call stays under 512 tokens)
         const quoteResults = await Promise.all(
             sourcesWithContent.map((source, idx) => extractQuoteForSource(source, idx, GROQ))
         );
@@ -117,7 +86,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
             success: true,
-            text: formattedOutput || 'No direct quotes could be extracted from the provided sources.',
+            text: formattedOutput || 'No direct quotes could be extracted.',
             citations: sourcesWithContent,
             count: sourcesWithContent.length
         });
