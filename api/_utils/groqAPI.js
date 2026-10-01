@@ -13,10 +13,7 @@
  */
 
 const GROQ_MODELS = [
-    "llama-3.1-8b-instant",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "meta-llama/llama-guard-4-12b",
-    "moonshotai/kimi-k2-instruct-0905"
+    "gpt-oss-20b"
 ];
 
 // ==========================================================================
