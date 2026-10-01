@@ -448,6 +448,8 @@ Rules:
 // ==========================================================================
 // MODULE 6: MAIN HANDLER
 // ==========================================================================
+import quotesHandler from './quotes.js';
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -461,15 +463,18 @@ export default async function handler(req, res) {
         const GCX = process.env.SEARCH_ENGINE_ID;
         const OPENALEX = process.env.OPENALEX_API_KEY;
 
+        // BACKWARD COMPATIBILITY: If older extension calls citation with preLoadedSources, delegate to quotes
+        if (preLoadedSources?.length && !isAgent) {
+            return await quotesHandler(req, res);
+        }
+
         // SEARCH & SCRAPE
         let sources = [];
         let raw = null;
 
         if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
-            console.log('[Citation] Re-using pre-loaded research sources...');
             sources = preLoadedSources;
         } else {
-            console.log('[Citation] Starting on-the-fly search...');
             const [academicResults, generalResults] = await Promise.all([
                 OpenalexAPI.search(context, GKEY, GCX, GROQ, OPENALEX),
                 SearxAPI.search(context, 8)
@@ -479,12 +484,11 @@ export default async function handler(req, res) {
             if (!raw || raw.length === 0) {
                 return res.status(200).json({ 
                     success: false, 
-                    error: 'No search results. The search service may be temporarily unavailable.',
+                    error: 'No search results found.',
                     sources: [], text: '', citations: [], stats: null, count: 0
                 });
             }
             sources = await ScraperAPI.scrape(raw);
-            console.log('[Citation] Scraped:', sources?.length || 0, 'sources');
         }
 
         // BIBLIOGRAPHY MODE
@@ -499,7 +503,14 @@ export default async function handler(req, res) {
             
             sortSourcesAlphabetically(uniqueSources);
             const bibs = uniqueSources.map(s => DoiAPI.formatBib(s, style)).join('\n\n');
-            return res.status(200).json({ success: true, sources: uniqueSources, text: bibs, citations: uniqueSources, stats: raw?.stats || null, count: uniqueSources.length });
+            return res.status(200).json({ 
+                success: true, 
+                sources: uniqueSources, 
+                text: bibs, 
+                citations: uniqueSources, 
+                stats: raw?.stats || null, 
+                count: uniqueSources.length 
+            });
         }
 
         // CITATION MODE
@@ -516,7 +527,6 @@ export default async function handler(req, res) {
 
         const result = processInsertions(context, insertions, sources, style, outputType, isAgent);
 
-        // Generate matching bibliography HTML/Plain payload
         const seen = new Set();
         const uniqueSources = sources.filter(s => {
             const key = s.doi || s.link || s.url;
@@ -547,4 +557,3 @@ export default async function handler(req, res) {
         console.error('[Citation] Error:', error);
         return res.status(500).json({ success: false, error: error.message });
     }
-}
