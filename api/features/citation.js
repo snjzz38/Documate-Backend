@@ -459,67 +459,12 @@ export default async function handler(req, res) {
         const GROQ = apiKey || process.env.GROQ_API_KEY;
         const GKEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const GCX = process.env.SEARCH_ENGINE_ID;
-        
         const OPENALEX = process.env.OPENALEX_API_KEY;
 
-        // DYNAMIC QUOTES ROUTER — Multi-purpose gate compatible with both manual Sidebar and Swarm Agent contexts [1]
-        const isQuotesMode = preLoadedSources?.length && !isAgent;
-
-        if (isQuotesMode) {
-            let targetSources = [];
-            
-            if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
-                targetSources = preLoadedSources;
-            } else {
-                // If no preloaded sources are passed, perform a live targeted search based on the user's argument context [1]
-                console.log('[Citation] No pre-loaded sources for quotes. Executing search...');
-                const [academicResults, generalResults] = await Promise.all([
-                    OpenalexAPI.search(context, GKEY, GCX, GROQ, OPENALEX),
-                    SearxAPI.search(context, 5)
-                ]);
-                const raw = [...academicResults, ...generalResults];
-                targetSources = await ScraperAPI.scrape(raw);
-            }
-
-            const sourcesWithContent = await Promise.all(targetSources.map(async (s) => {
-                const url = s.link || s.url;
-                if (!s.content || s.content.length < 200) {
-                    try { return (await ScraperAPI.scrape([s]))[0] || s; } 
-                    catch { return s; }
-                }
-                return s;
-            }));
-
-            const srcList = sourcesWithContent.map((s, i) => {
-                const content = (s.content || s.snippet || '').substring(0, 1500);
-                return `[${i + 1}] ${s.title}\nURL: ${s.link || s.url}\nCONTENT:\n${content}`;
-            }).join('\n\n---\n\n');
-
-            // RESTORED: Lightweight, highly reliable Quotes Prompt (completely avoids context window bloat) [1]
-            const prompt = `Extract 1-3 verbatim quotes from EACH source.
-
-SOURCES:
-${srcList}
-
-RULES:
-1. Quotes must be EXACT text from CONTENT - word for word
-2. Each quote: 1-4 sentences
-3. Use FULL URL provided
-4. Skip sources with no usable content
-
-FORMAT:
-**[1] Title** - URL
-> "Exact quote..."`;
-
-            let result = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
-            return res.status(200).json({ success: true, text: result, citations: sourcesWithContent, stats: null, count: sourcesWithContent.length });
-        }
-
-        // SEARCH & SCRAPE (default Citation mode)
+        // SEARCH & SCRAPE
         let sources = [];
         let raw = null;
 
-        // If pre-loaded sources are passed, bypass search and re-use them immediately
         if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
             console.log('[Citation] Re-using pre-loaded research sources...');
             sources = preLoadedSources;
@@ -530,7 +475,6 @@ FORMAT:
                 SearxAPI.search(context, 8)
             ]);
             raw = [...academicResults, ...generalResults];
-            console.log(`[Citation] Search returned: ${academicResults.length} academic and ${generalResults.length} general results.`);
             
             if (!raw || raw.length === 0) {
                 return res.status(200).json({ 
@@ -553,14 +497,12 @@ FORMAT:
                 return true;
             });
             
-            // Alphabetize Bibliography Mode sources by author family name
             sortSourcesAlphabetically(uniqueSources);
-            
             const bibs = uniqueSources.map(s => DoiAPI.formatBib(s, style)).join('\n\n');
             return res.status(200).json({ success: true, sources: uniqueSources, text: bibs, citations: uniqueSources, stats: raw?.stats || null, count: uniqueSources.length });
         }
 
-        // CITATION MODE — Passes down the isAgent boolean flag cleanly
+        // CITATION MODE
         const prompt = buildPrompt(context, sources);
         const response = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, true);
         
@@ -574,7 +516,7 @@ FORMAT:
 
         const result = processInsertions(context, insertions, sources, style, outputType, isAgent);
 
-        // Generate matching bibliography HTML/Plain payload for the secondary textbox
+        // Generate matching bibliography HTML/Plain payload
         const seen = new Set();
         const uniqueSources = sources.filter(s => {
             const key = s.doi || s.link || s.url;
@@ -605,4 +547,4 @@ FORMAT:
         console.error('[Citation] Error:', error);
         return res.status(500).json({ success: false, error: error.message });
     }
-}
+}s
