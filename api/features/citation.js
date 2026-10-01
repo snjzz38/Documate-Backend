@@ -18,7 +18,6 @@
  *    - handler()
  */
 
-
 // ==========================================================================
 // MODULE 1: DEPENDENCIES & CONFIGURATION
 // ==========================================================================
@@ -28,14 +27,13 @@ import { SearxAPI } from '../_utils/searx.js';
 import { ScraperAPI } from '../_utils/scraper.js';
 import { GroqAPI } from '../_utils/groqAPI.js';
 import { DoiAPI } from '../_utils/doiAPI.js';
-import quotesHandler from './quotes.js'; // MUST BE AT TOP OF FILE
+import quotesHandler from './quotes.js';
 
 const TODAY = () => new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-
-// ════════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 // MODULE 2: AUTHOR & METADATA CLEANING
-// ════════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 
 function cleanAuthorName(author, source) {
     if (!author) return null;
@@ -102,14 +100,10 @@ function getYear(source) {
     return contentMatch ? contentMatch[0] : 'n.d.';
 }
 
-
-// ════════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 // MODULE 3: ACADEMIC CITATION FORMATTING (APA, MLA, CHICAGO)
-// ════════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 
-/**
- * Format authors strictly according to APA 7th Edition rules (Initials + Ampersands)
- */
 function formatAPAAuthors(authors) {
     if (!authors || !Array.isArray(authors) || authors.length === 0) return null;
     
@@ -118,7 +112,6 @@ function formatAPAAuthors(authors) {
         const given = (a.given || '').trim();
         if (!family) return '';
         
-        // Convert given names to capitalized initials (e.g., "Hanna Bertilsdotter" -> "H. B.")
         const initials = given
             ? given.split(/[\s-]+/).map(part => `${part[0].toUpperCase()}.`).join(' ')
             : '';
@@ -129,16 +122,12 @@ function formatAPAAuthors(authors) {
     if (formatted.length === 1) return formatted[0];
     if (formatted.length === 2) return `${formatted[0]}, & ${formatted[1]}`;
     
-    // APA 7 supports listing up to 20 authors before using ellipses
     if (formatted.length <= 20) {
         return formatted.slice(0, -1).join(', ') + `, & ${formatted[formatted.length - 1]}`;
     }
     return formatted.slice(0, 19).join(', ') + ', ... ' + formatted[formatted.length - 1];
 }
 
-/**
- * Format authors for MLA / Chicago Style (First Author Reversed, rest natural)
- */
 function formatStandardAuthors(authors, useAnd = true) {
     if (!authors || !Array.isArray(authors) || authors.length === 0) return null;
     
@@ -148,10 +137,8 @@ function formatStandardAuthors(authors, useAnd = true) {
         if (!family) return '';
         
         if (i === 0) {
-            // First author reversed: "Stenning, Anna"
             return given ? `${family}, ${given}` : family;
         } else {
-            // Subsequent authors natural: "Hanna Bertilsdotter Rosqvist"
             return given ? `${given} ${family}` : family;
         }
     }).filter(Boolean);
@@ -163,9 +150,6 @@ function formatStandardAuthors(authors, useAnd = true) {
     return formatted.slice(0, -1).join(', ') + `, ${amp} ${formatted[formatted.length - 1]}`;
 }
 
-/**
- * Capitalizes a string to Title Case (for APA Journal Titles)
- */
 function toTitleCase(str) {
     if (!str) return '';
     const minorWords = /^(a|an|the|and|but|or|for|nor|on|in|at|by|to|for|of|with|about|as)$/i;
@@ -207,7 +191,6 @@ function formatBib(source, style) {
     const title = source.title || 'Untitled';
     const today = TODAY();
 
-    // Pull journal metadata if extracted by DoiAPI
     const volume = source.meta?.volume || source.volume || null;
     const issue = source.meta?.issue || source.issue || null;
     const pages = source.meta?.pages || source.pages || null;
@@ -222,7 +205,6 @@ function formatBib(source, style) {
             
         const cleanSite = toTitleCase(site);
         
-        // Build APA 7 Journal specs: Volume(Issue), Pages
         let journalSpecs = '';
         if (volume) {
             journalSpecs += `, *${volume}*`;
@@ -240,7 +222,6 @@ function formatBib(source, style) {
             ? formatStandardAuthors(source.meta.authors, true)
             : (cleanAuthorName(source.meta?.author, source) || site);
 
-        // Build MLA container specifications
         let containerSpecs = '';
         if (volume) containerSpecs += `, vol. ${volume}`;
         if (issue) containerSpecs += `, no. ${issue}`;
@@ -249,7 +230,6 @@ function formatBib(source, style) {
         return `${author}. "${title}." *${site}*${containerSpecs}, ${year}, ${url}.`;
     }
 
-    // Chicago Notes-Bibliography fallback
     author = hasDoiAuthors
         ? formatStandardAuthors(source.meta.authors, true)
         : (cleanAuthorName(source.meta?.author, source) || site);
@@ -268,14 +248,10 @@ function formatBib(source, style) {
     return `${author}. "${title}." *${site}*${chicagoSpecs}. ${url} (Accessed ${today})`;
 }
 
-
 // ==========================================================================
 // MODULE 4: INSERTION PROCESSING
 // ==========================================================================
 
-/**
- * Universal alphabetical sorting helper (Primary Author Family Name -> Site Fallback -> Title)
- */
 function sortSourcesAlphabetically(srcList) {
     if (!srcList || !Array.isArray(srcList)) return [];
     return srcList.sort((a, b) => {
@@ -332,7 +308,6 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
             }
         }
 
-        // Fuzzy fallback match (tolerates 1 minor word deviation)
         if (words.length >= 4) {
             for (let i = 0; i <= tokens.length - words.length; i++) {
                 if (claimedIndices.has(i)) continue;
@@ -371,12 +346,10 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
 
     const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
     
-    // Process positions in reverse order to maintain accurate character indexing
     [...sortedPositions].reverse().forEach(pos => {
         const d = posData.get(pos);
         if (!d) return;
 
-        // Academic Punctuation Look-Ahead
         let adjustedPos = pos;
         while (adjustedPos < text.length && /^[.,;:!?"']/.test(text[adjustedPos])) {
             adjustedPos++;
@@ -386,12 +359,10 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
         result = result.slice(0, adjustedPos) + insert + result.slice(adjustedPos);
     });
 
-    // If requested by the Swarm Agent, bypass the appended references footer (kept clean for UI textboxes) [1]
     if (isAgent) {
         return result;
     }
 
-    // Standalone Citation Machine: Generate and append the standard academic footnotes/references footer
     let footer = '\n\n';
     if (outputType === 'footnotes') {
         footer += '### Footnotes\n\n';
@@ -417,6 +388,7 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
 // ==========================================================================
 // MODULE 5: PROMPT BUILDING
 // ==========================================================================
+
 function buildPrompt(text, sources) {
     const srcList = sources.map(s => {
         const author = (s.meta?.isDOI && s.meta?.authors?.length > 0)
@@ -445,11 +417,11 @@ Rules:
 4. CITATION PLACEMENT FLOW: Choose anchors that are at the END of sentences or clauses (e.g., right before a period, comma, or coordinating conjunction) to maintain reading flow. Avoid choosing mid-phrase anchors.`;
 }
 
-
 // ==========================================================================
 // MODULE 6: MAIN HANDLER
 // ==========================================================================
-export default async function handler(req, res) 
+
+export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -556,3 +528,4 @@ export default async function handler(req, res)
         console.error('[Citation] Error:', error);
         return res.status(500).json({ success: false, error: error.message });
     }
+}
