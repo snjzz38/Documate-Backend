@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "headers": [
     {
       "source": "/api/(.*)",
@@ -10,10 +11,22 @@
       ]
     }
   ],
+  "rewrites": [
+    {
+      "source": "/api/features/:feature",
+      "destination": "/api/gateway?feature=:feature"
+    },
+    {
+      "source": "/api/gateway",
+      "destination": "/api/gateway"
+    }
+  ],
   "functions": {
+    "api/gateway.js": { "maxDuration": 280 },
     "api/features/agent.js": { "maxDuration": 280 },
     "api/features/citation.js": { "maxDuration": 60 },
     "api/features/grader.js": { "maxDuration": 60 },
-    "api/features/humanizer.js": { "maxDuration": 120 }
+    "api/features/humanizer.js": { "maxDuration": 120 },
+    "api/features/quotes.js": { "maxDuration": 60 }
   }
 }
