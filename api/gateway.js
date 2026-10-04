@@ -20,38 +20,80 @@ const HANDLERS = {
     humanize: humanizerHandler
 };
 
+/**
+ * Heuristic detector for legacy Chrome Extension builds.
+ * Fingerprints incoming payloads when `feature` is not explicitly declared.
+ */
+function detectFeature(body = {}, query = {}) {
+    // 1. Explicit feature in body, query param, or Vercel rewrite param
+    const explicit = body.feature || query.feature || query.match;
+    if (explicit && typeof explicit === 'string') {
+        return explicit.toLowerCase().trim();
+    }
+
+    // 2. Swarm Agent: has 'action' ('plan' | 'run_swarm') or 'task' + 'options'
+    if (body.action === 'plan' || body.action === 'run_swarm' || (body.task && body.options)) {
+        return 'agent';
+    }
+
+    // 3. Grader: has 'followup' action, rubric, instructions, files, or studentText
+    if (
+        body.action === 'followup' ||
+        body.rubric !== undefined ||
+        body.instructions !== undefined ||
+        body.files !== undefined ||
+        (body.context && typeof body.context === 'object' && body.context.studentText)
+    ) {
+        return 'grader';
+    }
+
+    // 4. Quotes: has preLoadedSources
+    if (body.preLoadedSources !== undefined) {
+        return 'quotes';
+    }
+
+    // 5. Citation: has academic style / outputType configuration
+    if (body.style !== undefined || body.outputType !== undefined || body.citationStyle !== undefined) {
+        return 'citation';
+    }
+
+    // 6. Humanizer: only sends { text, apiKey } without instructions, rubric, or actions
+    if (body.text && !body.instructions && !body.rubric && !body.action) {
+        return 'humanizer';
+    }
+
+    // 7. Citation context fallback: legacy citations using context: string
+    if (body.context && typeof body.context === 'string') {
+        return 'citation';
+    }
+
+    return null;
+}
+
 export default async function handler(req, res) {
+    // Universal CORS configuration
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
         const body = req.body || {};
-        
-        // 1. Determine Feature (Explicitly or via Auto-Detection)
-        let feature = (body.feature || '').toLowerCase().trim();
+        const query = req.query || {};
 
-        if (!feature) {
-            // Smart auto-detection for backwards compatibility
-            if (body.preLoadedSources) feature = 'quotes';
-            else if (body.action === 'plan' || body.action === 'run_swarm') feature = 'agent';
-            else if (body.rubric || body.action === 'followup') feature = 'grader';
-            else if (body.style || body.outputType) feature = 'citation';
-            else if (body.text && !body.context) feature = 'humanizer';
-            else feature = 'citation';
-        }
+        // Resolve feature (works for both old and new extension builds)
+        const feature = detectFeature(body, query);
 
-        const targetHandler = HANDLERS[feature];
-
-        if (!targetHandler) {
-            return res.status(400).json({ 
-                success: false, 
-                error: `[Gateway] Unknown feature: "${feature}". Available: ${Object.keys(HANDLERS).join(', ')}` 
+        if (!feature || !HANDLERS[feature]) {
+            console.warn('[Gateway] Unresolved request payload:', JSON.stringify(body).slice(0, 150));
+            return res.status(400).json({
+                success: false,
+                error: `[Gateway] Could not resolve target feature. Available features: ${Object.keys(HANDLERS).filter((v, i, a) => a.indexOf(v) === i).join(', ')}`
             });
         }
 
-        // 2. Delegate directly to the feature module
+        // Forward to the target feature handler
+        const targetHandler = HANDLERS[feature];
         return await targetHandler(req, res);
 
     } catch (error) {
