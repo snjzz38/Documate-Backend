@@ -1,6 +1,6 @@
 // ==========================================================================
 // FILE PATH: api/features/citation.js
-// ==========================================================================k
+// ==========================================================================
 
 /*
  * TABLE OF CONTENTS
@@ -18,22 +18,23 @@
  *    - handler()
  */
 
+
 // ==========================================================================
 // MODULE 1: DEPENDENCIES & CONFIGURATION
 // ==========================================================================
 
-import { OpenalexAPI } from '../_utils/openalex.js';
-import { SearxAPI } from '../_utils/searx.js';
+import { OpenalexAPI } from '../_utils/openalex.js'; // Renamed from GoogleSearchAPI
+import { SearxAPI } from '../_utils/searx.js'; // Added SearXNG import for general search
 import { ScraperAPI } from '../_utils/scraper.js';
 import { GroqAPI } from '../_utils/groqAPI.js';
 import { DoiAPI } from '../_utils/doiAPI.js';
-import quotesHandler from './quotes.js';
 
 const TODAY = () => new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-// ==========================================================================
+
+// ════════════════════════════════════════════════════════════════════════════
 // MODULE 2: AUTHOR & METADATA CLEANING
-// ==========================================================================
+// ════════════════════════════════════════════════════════════════════════════
 
 function cleanAuthorName(author, source) {
     if (!author) return null;
@@ -100,10 +101,14 @@ function getYear(source) {
     return contentMatch ? contentMatch[0] : 'n.d.';
 }
 
-// ==========================================================================
-// MODULE 3: ACADEMIC CITATION FORMATTING (APA, MLA, CHICAGO)
-// ==========================================================================
 
+// ════════════════════════════════════════════════════════════════════════════
+// MODULE 3: ACADEMIC CITATION FORMATTING (APA, MLA, CHICAGO)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Format authors strictly according to APA 7th Edition rules (Initials + Ampersands)
+ */
 function formatAPAAuthors(authors) {
     if (!authors || !Array.isArray(authors) || authors.length === 0) return null;
     
@@ -112,6 +117,7 @@ function formatAPAAuthors(authors) {
         const given = (a.given || '').trim();
         if (!family) return '';
         
+        // Convert given names to capitalized initials (e.g., "Hanna Bertilsdotter" -> "H. B.")
         const initials = given
             ? given.split(/[\s-]+/).map(part => `${part[0].toUpperCase()}.`).join(' ')
             : '';
@@ -122,12 +128,16 @@ function formatAPAAuthors(authors) {
     if (formatted.length === 1) return formatted[0];
     if (formatted.length === 2) return `${formatted[0]}, & ${formatted[1]}`;
     
+    // APA 7 supports listing up to 20 authors before using ellipses
     if (formatted.length <= 20) {
         return formatted.slice(0, -1).join(', ') + `, & ${formatted[formatted.length - 1]}`;
     }
     return formatted.slice(0, 19).join(', ') + ', ... ' + formatted[formatted.length - 1];
 }
 
+/**
+ * Format authors for MLA / Chicago Style (First Author Reversed, rest natural)
+ */
 function formatStandardAuthors(authors, useAnd = true) {
     if (!authors || !Array.isArray(authors) || authors.length === 0) return null;
     
@@ -137,8 +147,10 @@ function formatStandardAuthors(authors, useAnd = true) {
         if (!family) return '';
         
         if (i === 0) {
+            // First author reversed: "Stenning, Anna"
             return given ? `${family}, ${given}` : family;
         } else {
+            // Subsequent authors natural: "Hanna Bertilsdotter Rosqvist"
             return given ? `${given} ${family}` : family;
         }
     }).filter(Boolean);
@@ -150,6 +162,9 @@ function formatStandardAuthors(authors, useAnd = true) {
     return formatted.slice(0, -1).join(', ') + `, ${amp} ${formatted[formatted.length - 1]}`;
 }
 
+/**
+ * Capitalizes a string to Title Case (for APA Journal Titles)
+ */
 function toTitleCase(str) {
     if (!str) return '';
     const minorWords = /^(a|an|the|and|but|or|for|nor|on|in|at|by|to|for|of|with|about|as)$/i;
@@ -191,6 +206,7 @@ function formatBib(source, style) {
     const title = source.title || 'Untitled';
     const today = TODAY();
 
+    // Pull journal metadata if extracted by DoiAPI
     const volume = source.meta?.volume || source.volume || null;
     const issue = source.meta?.issue || source.issue || null;
     const pages = source.meta?.pages || source.pages || null;
@@ -205,6 +221,7 @@ function formatBib(source, style) {
             
         const cleanSite = toTitleCase(site);
         
+        // Build APA 7 Journal specs: Volume(Issue), Pages
         let journalSpecs = '';
         if (volume) {
             journalSpecs += `, *${volume}*`;
@@ -222,6 +239,7 @@ function formatBib(source, style) {
             ? formatStandardAuthors(source.meta.authors, true)
             : (cleanAuthorName(source.meta?.author, source) || site);
 
+        // Build MLA container specifications
         let containerSpecs = '';
         if (volume) containerSpecs += `, vol. ${volume}`;
         if (issue) containerSpecs += `, no. ${issue}`;
@@ -230,6 +248,7 @@ function formatBib(source, style) {
         return `${author}. "${title}." *${site}*${containerSpecs}, ${year}, ${url}.`;
     }
 
+    // Chicago Notes-Bibliography fallback
     author = hasDoiAuthors
         ? formatStandardAuthors(source.meta.authors, true)
         : (cleanAuthorName(source.meta?.author, source) || site);
@@ -248,10 +267,14 @@ function formatBib(source, style) {
     return `${author}. "${title}." *${site}*${chicagoSpecs}. ${url} (Accessed ${today})`;
 }
 
+
 // ==========================================================================
 // MODULE 4: INSERTION PROCESSING
 // ==========================================================================
 
+/**
+ * Universal alphabetical sorting helper (Primary Author Family Name -> Site Fallback -> Title)
+ */
 function sortSourcesAlphabetically(srcList) {
     if (!srcList || !Array.isArray(srcList)) return [];
     return srcList.sort((a, b) => {
@@ -308,6 +331,7 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
             }
         }
 
+        // Fuzzy fallback match (tolerates 1 minor word deviation)
         if (words.length >= 4) {
             for (let i = 0; i <= tokens.length - words.length; i++) {
                 if (claimedIndices.has(i)) continue;
@@ -346,10 +370,12 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
 
     const toSuper = n => n.toString().split('').map(d => '⁰¹²³⁴⁵⁶⁷⁸⁹'[+d]).join('');
     
+    // Process positions in reverse order to maintain accurate character indexing
     [...sortedPositions].reverse().forEach(pos => {
         const d = posData.get(pos);
         if (!d) return;
 
+        // Academic Punctuation Look-Ahead
         let adjustedPos = pos;
         while (adjustedPos < text.length && /^[.,;:!?"']/.test(text[adjustedPos])) {
             adjustedPos++;
@@ -359,10 +385,12 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
         result = result.slice(0, adjustedPos) + insert + result.slice(adjustedPos);
     });
 
+    // If requested by the Swarm Agent, bypass the appended references footer (kept clean for UI textboxes) [1]
     if (isAgent) {
         return result;
     }
 
+    // Standalone Citation Machine: Generate and append the standard academic footnotes/references footer
     let footer = '\n\n';
     if (outputType === 'footnotes') {
         footer += '### Footnotes\n\n';
@@ -385,17 +413,14 @@ function processInsertions(text, insertions, sources, style, outputType, isAgent
     return result + footer;
 }
 
-// ==========================================================================
+// ════════════════════════════════════════════════════════════════════════════
 // MODULE 5: PROMPT BUILDING
-// ==========================================================================
+// ════════════════════════════════════════════════════════════════════════════
 
 function buildPrompt(text, sources) {
     const srcList = sources.map(s => {
-        const author = (s.meta?.isDOI && s.meta?.authors?.length > 0)
-            ? s.meta.authors[0].family
-            : (DoiAPI.cleanAuthorName(s.meta?.author) || DoiAPI.cleanSiteName(s.meta?.siteName || s.title));
-            
-        const year = DoiAPI.getYear(s);
+        const author = getAuthorName(s);
+        const year = getYear(s);
         return `[${s.id}] ${author} (${year}) - ${s.title.substring(0, 50)}`;
     }).join('\n');
 
@@ -411,16 +436,15 @@ Return JSON only:
 {"insertions":[{"anchor":"3-6 exact words from text","source_id":1}]}
 
 Rules:
-1. anchor = exact consecutive words from the text
-2. Create 10+ insertions across all paragraphs
-3. Distribute sources evenly
-4. CITATION PLACEMENT FLOW: Choose anchors that are at the END of sentences or clauses (e.g., right before a period, comma, or coordinating conjunction) to maintain reading flow. Avoid choosing mid-phrase anchors.`;
+- anchor = exact consecutive words from the text
+- Create 10+ insertions across all paragraphs
+- Distribute sources evenly`;
 }
+
 
 // ==========================================================================
 // MODULE 6: MAIN HANDLER
 // ==========================================================================
-
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -432,34 +456,92 @@ export default async function handler(req, res) {
         const GROQ = apiKey || process.env.GROQ_API_KEY;
         const GKEY = googleKey || process.env.GOOGLE_SEARCH_API_KEY;
         const GCX = process.env.SEARCH_ENGINE_ID;
+        
         const OPENALEX = process.env.OPENALEX_API_KEY;
 
-        // BACKWARD COMPATIBILITY: If older extension calls citation with preLoadedSources, delegate to quotes
-        if (preLoadedSources?.length && !isAgent) {
-            return await quotesHandler(req, res);
+        // DYNAMIC QUOTES ROUTER — Multi-purpose gate compatible with both manual Sidebar and Swarm Agent contexts [1]
+        const isQuotesMode = outputType === 'quotes' || (preLoadedSources?.length && !['in-text', 'footnotes', 'bibliography'].includes(outputType));
+
+        if (isQuotesMode) {
+            let targetSources = [];
+            
+            if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
+                targetSources = preLoadedSources;
+            } else {
+                // If no preloaded sources are passed, perform a live targeted search based on the user's argument context [1]
+                console.log('[Citation] No pre-loaded sources for quotes. Executing search...');
+                const [academicResults, generalResults] = await Promise.all([
+                    OpenalexAPI.search(context, GKEY, GCX, GROQ, OPENALEX),
+                    SearxAPI.search(context, 5)
+                ]);
+                const raw = [...academicResults, ...generalResults];
+                targetSources = await ScraperAPI.scrape(raw);
+            }
+
+            const sourcesWithContent = await Promise.all(targetSources.map(async (s) => {
+                const url = s.link || s.url;
+                if (!s.content || s.content.length < 200) {
+                    try { return (await ScraperAPI.scrape([s]))[0] || s; } 
+                    catch { return s; }
+                }
+                return s;
+            }));
+
+            const srcList = sourcesWithContent.map((s, i) => {
+                const content = (s.content || s.snippet || '').substring(0, 1500);
+                return `[${i + 1}] ${s.title}\nURL: ${s.link || s.url}\nCONTENT:\n${content}`;
+            }).join('\n\n---\n\n');
+
+            // Formulate high-relevance prompt to extract quotes aligning with and supporting the user's argument [1]
+            const prompt = `You are an academic researcher. Extract exactly 1-2 powerful, direct verbatim quotes from each source's CONTENT that directly align with and support the user's core argument or topic.
+
+USER'S CONTEXT / ARGUMENT:
+"${context || 'general research'}"
+
+SOURCES:
+${srcList}
+
+RULES:
+1. Quotes must be EXACT text from CONTENT - word for word
+2. Select quotes that are highly relevant to and support the USER'S CONTEXT above
+3. Each quote must be 1-4 sentences
+4. Use full URLs provided
+5. Skip sources with no usable content
+
+FORMAT:
+**[1] Title** - URL
+> "Exact quote..."`;
+
+            let result = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, false);
+            return res.status(200).json({ success: true, text: result, citations: sourcesWithContent, stats: null, count: sourcesWithContent.length });
         }
 
-        // SEARCH & SCRAPE
+        // SEARCH & SCRAPE (default Citation mode)
         let sources = [];
         let raw = null;
 
+        // If pre-loaded sources are passed, bypass search and re-use them immediately
         if (preLoadedSources && Array.isArray(preLoadedSources) && preLoadedSources.length > 0) {
+            console.log('[Citation] Re-using pre-loaded research sources...');
             sources = preLoadedSources;
         } else {
+            console.log('[Citation] Starting on-the-fly search...');
             const [academicResults, generalResults] = await Promise.all([
                 OpenalexAPI.search(context, GKEY, GCX, GROQ, OPENALEX),
                 SearxAPI.search(context, 8)
             ]);
             raw = [...academicResults, ...generalResults];
+            console.log(`[Citation] Search returned: ${academicResults.length} academic and ${generalResults.length} general results.`);
             
             if (!raw || raw.length === 0) {
                 return res.status(200).json({ 
                     success: false, 
-                    error: 'No search results found.',
+                    error: 'No search results. The search service may be temporarily unavailable.',
                     sources: [], text: '', citations: [], stats: null, count: 0
                 });
             }
             sources = await ScraperAPI.scrape(raw);
+            console.log('[Citation] Scraped:', sources?.length || 0, 'sources');
         }
 
         // BIBLIOGRAPHY MODE
@@ -472,19 +554,14 @@ export default async function handler(req, res) {
                 return true;
             });
             
+            // Alphabetize Bibliography Mode sources by author family name
             sortSourcesAlphabetically(uniqueSources);
+            
             const bibs = uniqueSources.map(s => DoiAPI.formatBib(s, style)).join('\n\n');
-            return res.status(200).json({ 
-                success: true, 
-                sources: uniqueSources, 
-                text: bibs, 
-                citations: uniqueSources, 
-                stats: raw?.stats || null, 
-                count: uniqueSources.length 
-            });
+            return res.status(200).json({ success: true, sources: uniqueSources, text: bibs, citations: uniqueSources, stats: raw?.stats || null, count: uniqueSources.length });
         }
 
-        // CITATION MODE
+        // CITATION MODE — Passes down the isAgent boolean flag cleanly
         const prompt = buildPrompt(context, sources);
         const response = await GroqAPI.chat([{ role: 'user', content: prompt }], GROQ, true);
         
@@ -498,6 +575,7 @@ export default async function handler(req, res) {
 
         const result = processInsertions(context, insertions, sources, style, outputType, isAgent);
 
+        // Generate matching bibliography HTML/Plain payload for the secondary textbox
         const seen = new Set();
         const uniqueSources = sources.filter(s => {
             const key = s.doi || s.link || s.url;
