@@ -11,6 +11,7 @@
     }
   ],
   "functions": {
+    "api/features/quotes.js": { "maxDuration": 60 },
     "api/features/agent.js": { "maxDuration": 280 },
     "api/features/citation.js": { "maxDuration": 60 },
     "api/features/grader.js": { "maxDuration": 60 },
