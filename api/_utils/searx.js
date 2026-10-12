@@ -211,34 +211,17 @@ async function searchWebFallback(query, limit = 5) {
 // MODULE 5: SEARXAPI EXPORT INTERFACE
 // ==========================================================================
 export const SearxAPI = {
-    /**
-     * Reduces input to 3-5 keywords using Groq AI, then searches DuckDuckGo Lite.
-     * 
-     * @param {string} query - Full context, essay, or topic
-     * @param {number} limit - Target number of sources
-     * @param {string|null} apiKey - Optional custom Groq API key override
-     * @returns {Promise<Array<Object>>} Formatted search results
-     */
     async search(query, limit = 6, apiKey = null) {
         if (!query || typeof query !== 'string' || !query.trim()) return [];
 
-        // 1. Distill context into strictly 3 to 5 keywords with Groq AI
+        // 1. Distill context into 3 to 5 core keywords with Groq AI
         const distilledKeywords = await reduceToKeywordsWithGroq(query, apiKey);
-        console.log(`[WebSearch] Groq distilled query to 3-5 words: "${distilledKeywords}"`);
+        console.log(`[WebSearch] Querying open index for: "${distilledKeywords}"`);
 
-        // 2. Query DuckDuckGo Lite with the short keyword string
-        try {
-            const ddgResults = await searchDDGLite(distilledKeywords, limit);
-            if (ddgResults && ddgResults.length > 0) {
-                return ddgResults;
-            }
-        } catch (err) {
-            console.warn(`[WebSearch] DDG Lite failed (${err.message}). Using web fallback.`);
-        }
-
-        // 3. Guaranteed fallback on network error/block
+        // 2. Query open index directly (never blocked by Vercel datacenter IPs)
         return await searchWebFallback(distilledKeywords, limit);
     }
 };
 
+export default SearxAPI;
 export default SearxAPI;
