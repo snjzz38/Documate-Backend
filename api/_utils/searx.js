@@ -1,146 +1,274 @@
 // ==========================================================================
-// FILE PATH: api/_utils/searx.js (Upgraded to Universal Web/Academic Engine)
+// FILE PATH: api/_utils/searx.js
 // ==========================================================================
 
 /**
- * api/_utils/searx.js - Resilient Multi-Provider Fallback Engine
- * Combines Crossref (Open Academic DOI Index) and DuckDuckGo Lite
- * to replace broken public SearXNG instances.
+ * api/_utils/searx.js
+ * Universal Web Search & Metadata Extraction Engine (DuckDuckGo Lite System)
+ * 
+ * Table of Contents:
+ * 1. Configuration & Request Headers
+ * 2. URL & HTML Sanitization Helpers
+ * 3. DuckDuckGo Lite Parser Core
+ * 4. Resilient Academic Fallback (Crossref)
+ * 5. Exported SearxAPI Interface
  */
 
-const USER_AGENT = 'DocuMate/1.0 (https://documate.app; mailto:contact@documate.app)';
+// ==========================================================================
+// MODULE 1: CONFIGURATION & REQUEST HEADERS
+// ==========================================================================
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const TIMEOUT_MS = 6000;
 
-export const SearxAPI = {
-    async search(query, limit = 6) {
-        if (!query || query.trim().length === 0) return [];
-        const cleanQuery = query.replace(/[^\w\s-]/g, ' ').trim();
+// ==========================================================================
+// MODULE 2: URL & HTML SANITIZATION HELPERS
+// ==========================================================================
 
-        // Run Crossref (Academic) and DuckDuckGo Lite (General Web) concurrently
-        const [crossrefResults, webResults] = await Promise.allSettled([
-            this.searchCrossref(cleanQuery, limit),
-            this.searchDuckDuckGo(cleanQuery, limit)
-        ]);
+/**
+ * Unwraps DuckDuckGo's internal redirection wrapper (uddg query parameter)
+ */
+function unwrapDDGUrl(rawHref) {
+    if (!rawHref) return null;
+    let target = rawHref.trim();
 
-        const combined = [];
-        if (crossrefResults.status === 'fulfilled') combined.push(...crossrefResults.value);
-        if (webResults.status === 'fulfilled') combined.push(...webResults.value);
-
-        // Deduplicate by URL
-        const seen = new Set();
-        return combined.filter(item => {
-            const id = item.doi || item.url;
-            if (!id || seen.has(id)) return false;
-            seen.add(id);
-            return true;
-        }).slice(0, limit);
-    },
-
-    /**
-     * Crossref API: 100% Free open peer-reviewed papers with complete citation metadata
-     */
-    async searchCrossref(query, limit) {
+    if (target.includes('uddg=')) {
         try {
-            const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${limit}&select=DOI,title,URL,abstract,author,published-print,published-online`;
-            const res = await fetch(url, {
-                headers: { 'User-Agent': USER_AGENT }
-            });
+            const base = target.startsWith('//')
+                ? `https:${target}`
+                : (target.startsWith('/') ? `https://duckduckgo.com${target}` : target);
+            const parsed = new URL(base);
+            const decoded = parsed.searchParams.get('uddg');
+            if (decoded) return decoded;
+        } catch (_) {
+            const match = target.match(/uddg=([^&]+)/);
+            if (match) return decodeURIComponent(match[1]);
+        }
+    }
 
-            if (!res.ok) return [];
-            const data = await res.json();
-            const items = data.message?.items || [];
+    if (target.startsWith('//')) return `https:${target}`;
+    return target;
+}
 
-            return items.map(item => {
-                const title = Array.isArray(item.title) ? item.title[0] : (item.title || 'Untitled Academic Paper');
-                const doi = item.DOI;
-                const link = item.URL || (doi ? `https://doi.org/${doi}` : '');
-                const year = item['published-print']?.['date-parts']?.[0]?.[0] || 
-                             item['published-online']?.['date-parts']?.[0]?.[0] || 'n.d.';
-                
-                const authorList = (item.author || []).map(a => `${a.given || ''} ${a.family || ''}`.trim()).filter(Boolean);
-                const author = authorList.length ? authorList.join(', ') : 'Academic Contributor';
+/**
+ * Strips HTML tags and decodes common HTML entities
+ */
+function cleanText(rawHtml) {
+    if (!rawHtml) return '';
+    return rawHtml
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
 
-                return {
+/**
+ * Derives a human-readable publisher/site name from a destination URL
+ */
+function extractSiteName(urlString) {
+    try {
+        const host = new URL(urlString).hostname.replace(/^www\./i, '');
+        const main = host.split('.')[0] || 'Web';
+        return main.charAt(0).toUpperCase() + main.slice(1);
+    } catch (_) {
+        return 'Web Source';
+    }
+}
+
+/**
+ * Heuristically extracts a publication year from the snippet text
+ */
+function extractYearFromSnippet(snippet) {
+    if (!snippet) return 'n.d.';
+    const match = snippet.match(/\b(202[0-6]|201\d|200\d|19\d{2})\b/);
+    return match ? match[0] : 'n.d.';
+}
+
+// ==========================================================================
+// MODULE 3: DUCKDUCKGO LITE PARSER CORE
+// ==========================================================================
+
+/**
+ * Fetches and parses organic search results from DuckDuckGo Lite
+ */
+async function fetchDuckDuckGoLite(query, limit = 8) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    try {
+        const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+
+        const response = await fetch(url, {
+            method: 'GET',
+            signal: controller.signal,
+            headers: {
+                'User-Agent': BROWSER_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://lite.duckduckgo.com/'
+            }
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+            throw new Error(`DDG Lite HTTP status ${response.status}`);
+        }
+
+        const html = await response.text();
+
+        // Detect bot anomaly challenge
+        if (html.includes('anomaly-modal') || html.includes('bots use DuckDuckGo too')) {
+            throw new Error('DuckDuckGo Lite rate-limit/bot challenge encountered');
+        }
+
+        const results = [];
+        // Pairs the result anchor and its corresponding snippet table cell
+        const entryRegex = /<a[^>]+class=['"]result-link['"][^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>[\s\S]*?<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
+
+        let match;
+        while ((match = entryRegex.exec(html)) !== null && results.length < limit) {
+            const rawHref = match[1];
+            const rawTitle = match[2];
+            const rawSnippet = match[3];
+
+            const decodedUrl = unwrapDDGUrl(rawHref);
+            const title = cleanText(rawTitle);
+            const snippet = cleanText(rawSnippet);
+
+            // Filter internal DDG loops and ads
+            if (decodedUrl && !decodedUrl.includes('duckduckgo.com') && title.length > 2) {
+                results.push({
                     title,
-                    url: link,
-                    link,
-                    doi,
-                    content: item.abstract || `${title} (${year}). Published in peer-reviewed proceedings.`,
-                    snippet: item.abstract || title,
+                    url: decodedUrl,
+                    link: decodedUrl,
+                    snippet,
+                    content: snippet,
                     meta: {
-                        isDOI: !!doi,
-                        author,
-                        year,
-                        siteName: 'Crossref / Academic Index'
+                        isDOI: false,
+                        author: null,
+                        year: extractYearFromSnippet(snippet),
+                        siteName: extractSiteName(decodedUrl)
                     }
-                };
-            });
-        } catch (e) {
-            console.warn('[Crossref] Failed:', e.message);
+                });
+            }
+        }
+
+        return results;
+
+    } catch (err) {
+        clearTimeout(timeout);
+        throw err;
+    }
+}
+
+// ==========================================================================
+// MODULE 4: RESILIENT ACADEMIC FALLBACK (CROSSREF)
+// ==========================================================================
+
+/**
+ * Fallback to Crossref's open metadata index if DDG Lite is throttled
+ */
+async function fetchCrossrefFallback(query, limit = 6) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    try {
+        const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${limit}&select=DOI,title,URL,abstract,author,published-print,published-online`;
+        
+        const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+                'User-Agent': 'DocuMate/1.0 (mailto:support@documate.app)'
+            }
+        });
+
+        clearTimeout(timeout);
+        if (!response.ok) return [];
+
+        const data = await response.json();
+        const items = data.message?.items || [];
+
+        return items.map(item => {
+            const title = Array.isArray(item.title) ? item.title[0] : (item.title || 'Academic Research');
+            const doi = item.DOI;
+            const link = item.URL || (doi ? `https://doi.org/${doi}` : '');
+            const year = item['published-print']?.['date-parts']?.[0]?.[0] || 
+                         item['published-online']?.['date-parts']?.[0]?.[0] || 'n.d.';
+            
+            const authors = (item.author || [])
+                .map(a => `${a.given || ''} ${a.family || ''}`.trim())
+                .filter(Boolean);
+            const author = authors.length > 0 ? authors.join(', ') : null;
+            const snippet = cleanText(item.abstract) || `${title} (${year}). Peer-reviewed findings.`;
+
+            return {
+                title,
+                url: link,
+                link,
+                doi,
+                snippet,
+                content: snippet,
+                meta: {
+                    isDOI: !!doi,
+                    author,
+                    year: String(year),
+                    siteName: 'Crossref Academic Index'
+                }
+            };
+        });
+
+    } catch (_) {
+        clearTimeout(timeout);
+        return [];
+    }
+}
+
+// ==========================================================================
+// MODULE 5: EXPORTED SEARXAPI INTERFACE
+// ==========================================================================
+export const SearxAPI = {
+    /**
+     * Executes DuckDuckGo Lite search with automatic Crossref fallback.
+     * Perfectly mirrors the legacy SearX schema consumed by citation.js and quotes.js.
+     * 
+     * @param {string} query - Search prompt or extracted context query
+     * @param {number} limit - Maximum number of search sources to resolve
+     * @returns {Promise<Array<Object>>} Formatted search source records
+     */
+    async search(query, limit = 8) {
+        if (!query || typeof query !== 'string' || query.trim().length === 0) {
             return [];
         }
-    },
 
-    /**
-     * DuckDuckGo Lite: Parses clean organic web search results without API keys
-     */
-    async searchDuckDuckGo(query, limit) {
+        const sanitizedQuery = query
+            .replace(/[^\w\s-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
         try {
-            const url = `https://lite.duckduckgo.com/lite/`;
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-                },
-                body: `q=${encodeURIComponent(query)}`
-            });
-
-            if (!res.ok) return [];
-            const html = await res.text();
-
-            // Extract links and snippets from DuckDuckGo Lite table format
-            const results = [];
-            const linkRegex = /<a[^>]+class=['"]result-link['"][^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
-            const snippetRegex = /<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
-
-            const links = [];
-            let match;
-            while ((match = linkRegex.exec(html)) && links.length < limit) {
-                // Decode DDG redirect URL if applicable
-                let targetUrl = match[1];
-                if (targetUrl.includes('uddg=')) {
-                    const parsed = new URL('https://lite.duckduckgo.com' + targetUrl);
-                    targetUrl = decodeURIComponent(parsed.searchParams.get('uddg') || targetUrl);
-                }
-                const title = match[2].replace(/<[^>]+>/g, '').trim();
-                links.push({ url: targetUrl, title });
+            // Primary pass: Extract organic web results via DDG Lite
+            const webResults = await fetchDuckDuckGoLite(sanitizedQuery, limit);
+            if (webResults && webResults.length > 0) {
+                return webResults;
             }
+            throw new Error('DuckDuckGo Lite returned 0 records');
 
-            const snippets = [];
-            while ((match = snippetRegex.exec(html)) && snippets.length < limit) {
-                snippets.push(match[1].replace(/<[^>]+>/g, '').trim());
+        } catch (primaryErr) {
+            console.warn('[SearxAPI:DDG-Lite] Primary search failed, invoking academic fallback:', primaryErr.message);
+
+            // Secondary pass: Resilient open DOI fallback prevents empty returns
+            try {
+                const fallbackResults = await fetchCrossrefFallback(sanitizedQuery, limit);
+                return fallbackResults;
+            } catch (fallbackErr) {
+                console.error('[SearxAPI] Both primary and fallback search channels failed:', fallbackErr.message);
+                return [];
             }
-
-            for (let i = 0; i < links.length; i++) {
-                if (links[i].url && !links[i].url.includes('duckduckgo.com')) {
-                    results.push({
-                        title: links[i].title,
-                        url: links[i].url,
-                        link: links[i].url,
-                        snippet: snippets[i] || links[i].title,
-                        content: snippets[i] || '',
-                        meta: {
-                            isDOI: false,
-                            siteName: new URL(links[i].url).hostname.replace(/^www\./, '')
-                        }
-                    });
-                }
-            }
-
-            return results;
-        } catch (e) {
-            console.warn('[DDG Lite] Failed:', e.message);
-            return [];
         }
     }
 };
