@@ -4,28 +4,30 @@
 
 /**
  * api/_utils/searx.js
- * Universal Web Search & Metadata Extraction Engine (DuckDuckGo Lite System)
+ * Dedicated DuckDuckGo Lite Search & Extraction Engine
+ * 
+ * Replaces SearX entirely with DuckDuckGo's static search pipelines.
+ * Retains the filename and SearxAPI export for seamless backend integration.
  * 
  * Table of Contents:
- * 1. Configuration & Request Headers
- * 2. URL & HTML Sanitization Helpers
- * 3. DuckDuckGo Lite Parser Core
- * 4. Resilient Academic Fallback (Crossref)
- * 5. Exported SearxAPI Interface
+ * 1. Configuration & Headers
+ * 2. URL Unwrapping & Text Sanitization
+ * 3. DuckDuckGo Parser Core (Lite & Static Endpoints)
+ * 4. SearxAPI Export Interface
  */
 
 // ==========================================================================
-// MODULE 1: CONFIGURATION & REQUEST HEADERS
+// MODULE 1: CONFIGURATION & HEADERS
 // ==========================================================================
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const TIMEOUT_MS = 6000;
+const TIMEOUT_MS = 12000; // 12 seconds to prevent premature fetch aborts
 
 // ==========================================================================
-// MODULE 2: URL & HTML SANITIZATION HELPERS
+// MODULE 2: URL UNWRAPPING & TEXT SANITIZATION
 // ==========================================================================
 
 /**
- * Unwraps DuckDuckGo's internal redirection wrapper (uddg query parameter)
+ * Unwraps DuckDuckGo's redirection link to recover the real destination URL
  */
 function unwrapDDGUrl(rawHref) {
     if (!rawHref) return null;
@@ -50,7 +52,7 @@ function unwrapDDGUrl(rawHref) {
 }
 
 /**
- * Strips HTML tags and decodes common HTML entities
+ * Strips HTML tags and decodes common entities
  */
 function cleanText(rawHtml) {
     if (!rawHtml) return '';
@@ -67,7 +69,7 @@ function cleanText(rawHtml) {
 }
 
 /**
- * Derives a human-readable publisher/site name from a destination URL
+ * Extracts a readable domain/site name
  */
 function extractSiteName(urlString) {
     try {
@@ -80,68 +82,86 @@ function extractSiteName(urlString) {
 }
 
 /**
- * Heuristically extracts a publication year from the snippet text
+ * Extracts publication year from snippet if present
  */
-function extractYearFromSnippet(snippet) {
+function extractYear(snippet) {
     if (!snippet) return 'n.d.';
     const match = snippet.match(/\b(202[0-6]|201\d|200\d|19\d{2})\b/);
     return match ? match[0] : 'n.d.';
 }
 
 // ==========================================================================
-// MODULE 3: DUCKDUCKGO LITE PARSER CORE
+// MODULE 3: DUCKDUCKGO PARSER CORE (LITE & STATIC ENDPOINTS)
 // ==========================================================================
 
 /**
- * Fetches and parses organic search results from DuckDuckGo Lite
+ * Parses DuckDuckGo Lite HTML table structure
  */
-async function fetchDuckDuckGoLite(query, limit = 8) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+function parseDDGLiteHtml(html, limit) {
+    const results = [];
+    const linkRegex = /<a[^>]+class=["']result-link["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const snippetRegex = /<td[^>]+class=["']result-snippet["'][^>]*>([\s\S]*?)<\/td>/gi;
 
-    try {
-        const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-
-        const response = await fetch(url, {
-            method: 'GET',
-            signal: controller.signal,
-            headers: {
-                'User-Agent': BROWSER_UA,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://lite.duckduckgo.com/'
-            }
+    const links = [];
+    let lMatch;
+    while ((lMatch = linkRegex.exec(html)) !== null) {
+        links.push({
+            href: lMatch[1],
+            title: cleanText(lMatch[2])
         });
+    }
 
-        clearTimeout(timeout);
+    const snippets = [];
+    let sMatch;
+    while ((sMatch = snippetRegex.exec(html)) !== null) {
+        snippets.push(cleanText(sMatch[1]));
+    }
 
-        if (!response.ok) {
-            throw new Error(`DDG Lite HTTP status ${response.status}`);
+    for (let i = 0; i < links.length && results.length < limit; i++) {
+        const decodedUrl = unwrapDDGUrl(links[i].href);
+        const title = links[i].title;
+        const snippet = snippets[i] || '';
+
+        if (decodedUrl && !decodedUrl.includes('duckduckgo.com') && title.length > 1) {
+            results.push({
+                title,
+                url: decodedUrl,
+                link: decodedUrl,
+                snippet,
+                content: snippet,
+                meta: {
+                    isDOI: false,
+                    author: null,
+                    year: extractYear(snippet),
+                    siteName: extractSiteName(decodedUrl)
+                }
+            });
         }
+    }
 
-        const html = await response.text();
+    return results;
+}
 
-        // Detect bot anomaly challenge
-        if (html.includes('anomaly-modal') || html.includes('bots use DuckDuckGo too')) {
-            throw new Error('DuckDuckGo Lite rate-limit/bot challenge encountered');
-        }
+/**
+ * Parses DuckDuckGo HTML endpoint structure (secondary fallback)
+ */
+function parseDDGStaticHtml(html, limit) {
+    const results = [];
+    const blockRegex = /<div[^>]+class=["'][^"']*result__body[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
 
-        const results = [];
-        // Pairs the result anchor and its corresponding snippet table cell
-        const entryRegex = /<a[^>]+class=['"]result-link['"][^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>[\s\S]*?<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
+    let bMatch;
+    while ((bMatch = blockRegex.exec(html)) !== null && results.length < limit) {
+        const block = bMatch[1];
+        const urlMatch = block.match(/<a[^>]+class=["'][^"']*result__(?:url|title)[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i) ||
+                         block.match(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+        const snipMatch = block.match(/<a[^>]+class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/i);
 
-        let match;
-        while ((match = entryRegex.exec(html)) !== null && results.length < limit) {
-            const rawHref = match[1];
-            const rawTitle = match[2];
-            const rawSnippet = match[3];
+        if (urlMatch) {
+            const decodedUrl = unwrapDDGUrl(urlMatch[1]);
+            const title = cleanText(urlMatch[2]);
+            const snippet = snipMatch ? cleanText(snipMatch[1]) : '';
 
-            const decodedUrl = unwrapDDGUrl(rawHref);
-            const title = cleanText(rawTitle);
-            const snippet = cleanText(rawSnippet);
-
-            // Filter internal DDG loops and ads
-            if (decodedUrl && !decodedUrl.includes('duckduckgo.com') && title.length > 2) {
+            if (decodedUrl && !decodedUrl.includes('duckduckgo.com') && title.length > 1) {
                 results.push({
                     title,
                     url: decodedUrl,
@@ -151,93 +171,100 @@ async function fetchDuckDuckGoLite(query, limit = 8) {
                     meta: {
                         isDOI: false,
                         author: null,
-                        year: extractYearFromSnippet(snippet),
+                        year: extractYear(snippet),
                         siteName: extractSiteName(decodedUrl)
                     }
                 });
             }
         }
+    }
 
-        return results;
+    return results;
+}
+
+/**
+ * Primary search using DuckDuckGo Lite via form POST
+ */
+async function queryDuckDuckGoLite(query, limit) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    try {
+        const res = await fetch('https://lite.duckduckgo.com/lite/', {
+            method: 'POST',
+            signal: controller.signal,
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': BROWSER_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Origin': 'https://lite.duckduckgo.com',
+                'Referer': 'https://lite.duckduckgo.com/'
+            },
+            body: `q=${encodeURIComponent(query)}&kl=wt-wt`
+        });
+
+        clearTimeout(timer);
+
+        if (!res.ok) throw new Error(`DDG Lite HTTP ${res.status}`);
+        const html = await res.text();
+
+        if (html.includes('anomaly-modal') || html.includes('bots use DuckDuckGo too')) {
+            throw new Error('DDG Lite bot challenge triggered');
+        }
+
+        return parseDDGLiteHtml(html, limit);
 
     } catch (err) {
-        clearTimeout(timeout);
+        clearTimeout(timer);
+        throw err;
+    }
+}
+
+/**
+ * Secondary search using DuckDuckGo Static HTML endpoint
+ */
+async function queryDuckDuckGoStatic(query, limit) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    try {
+        const res = await fetch('https://html.duckduckgo.com/html/', {
+            method: 'POST',
+            signal: controller.signal,
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': BROWSER_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Origin': 'https://html.duckduckgo.com',
+                'Referer': 'https://html.duckduckgo.com/'
+            },
+            body: `q=${encodeURIComponent(query)}&b=`
+        });
+
+        clearTimeout(timer);
+
+        if (!res.ok) throw new Error(`DDG Static HTTP ${res.status}`);
+        const html = await res.text();
+
+        return parseDDGStaticHtml(html, limit);
+
+    } catch (err) {
+        clearTimeout(timer);
         throw err;
     }
 }
 
 // ==========================================================================
-// MODULE 4: RESILIENT ACADEMIC FALLBACK (CROSSREF)
-// ==========================================================================
-
-/**
- * Fallback to Crossref's open metadata index if DDG Lite is throttled
- */
-async function fetchCrossrefFallback(query, limit = 6) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-    try {
-        const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${limit}&select=DOI,title,URL,abstract,author,published-print,published-online`;
-        
-        const response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-                'User-Agent': 'DocuMate/1.0 (mailto:support@documate.app)'
-            }
-        });
-
-        clearTimeout(timeout);
-        if (!response.ok) return [];
-
-        const data = await response.json();
-        const items = data.message?.items || [];
-
-        return items.map(item => {
-            const title = Array.isArray(item.title) ? item.title[0] : (item.title || 'Academic Research');
-            const doi = item.DOI;
-            const link = item.URL || (doi ? `https://doi.org/${doi}` : '');
-            const year = item['published-print']?.['date-parts']?.[0]?.[0] || 
-                         item['published-online']?.['date-parts']?.[0]?.[0] || 'n.d.';
-            
-            const authors = (item.author || [])
-                .map(a => `${a.given || ''} ${a.family || ''}`.trim())
-                .filter(Boolean);
-            const author = authors.length > 0 ? authors.join(', ') : null;
-            const snippet = cleanText(item.abstract) || `${title} (${year}). Peer-reviewed findings.`;
-
-            return {
-                title,
-                url: link,
-                link,
-                doi,
-                snippet,
-                content: snippet,
-                meta: {
-                    isDOI: !!doi,
-                    author,
-                    year: String(year),
-                    siteName: 'Crossref Academic Index'
-                }
-            };
-        });
-
-    } catch (_) {
-        clearTimeout(timeout);
-        return [];
-    }
-}
-
-// ==========================================================================
-// MODULE 5: EXPORTED SEARXAPI INTERFACE
+// MODULE 4: EXPORTED SEARXAPI INTERFACE
 // ==========================================================================
 export const SearxAPI = {
     /**
-     * Executes DuckDuckGo Lite search with automatic Crossref fallback.
-     * Perfectly mirrors the legacy SearX schema consumed by citation.js and quotes.js.
+     * Executes DuckDuckGo web search using Lite (POST) with Static HTML fallback.
      * 
-     * @param {string} query - Search prompt or extracted context query
-     * @param {number} limit - Maximum number of search sources to resolve
+     * @param {string} query - The search query
+     * @param {number} limit - Target number of results (default: 8)
      * @returns {Promise<Array<Object>>} Formatted search source records
      */
     async search(query, limit = 8) {
@@ -250,25 +277,26 @@ export const SearxAPI = {
             .replace(/\s+/g, ' ')
             .trim();
 
+        // 1. Primary Attempt: DuckDuckGo Lite POST
         try {
-            // Primary pass: Extract organic web results via DDG Lite
-            const webResults = await fetchDuckDuckGoLite(sanitizedQuery, limit);
-            if (webResults && webResults.length > 0) {
-                return webResults;
+            const results = await queryDuckDuckGoLite(sanitizedQuery, limit);
+            if (results && results.length > 0) {
+                return results;
             }
-            throw new Error('DuckDuckGo Lite returned 0 records');
-
-        } catch (primaryErr) {
-            console.warn('[SearxAPI:DDG-Lite] Primary search failed, invoking academic fallback:', primaryErr.message);
-
-            // Secondary pass: Resilient open DOI fallback prevents empty returns
-            try {
-                const fallbackResults = await fetchCrossrefFallback(sanitizedQuery, limit);
-                return fallbackResults;
-            } catch (fallbackErr) {
-                console.error('[SearxAPI] Both primary and fallback search channels failed:', fallbackErr.message);
-                return [];
-            }
+        } catch (liteErr) {
+            console.warn('[DDG-Lite] Primary POST failed, trying static HTML endpoint:', liteErr.message);
         }
+
+        // 2. Secondary Attempt: DuckDuckGo HTML POST
+        try {
+            const staticResults = await queryDuckDuckGoStatic(sanitizedQuery, limit);
+            if (staticResults && staticResults.length > 0) {
+                return staticResults;
+            }
+        } catch (staticErr) {
+            console.error('[DDG-Static] Secondary search failed:', staticErr.message);
+        }
+
+        return [];
     }
 };
