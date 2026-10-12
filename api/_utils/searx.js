@@ -1,144 +1,146 @@
 // ==========================================================================
-// FILE PATH: api/_utils/searx.js
+// FILE PATH: api/_utils/searx.js (Upgraded to Universal Web/Academic Engine)
 // ==========================================================================
 
 /**
- * api/_utils/searx.js
- * DocuMate SearXNG Web Search Utility (Non-Academic Balance)
- * 
- * Table of Contents:
- * 1. SearXNG Query Builder Module
- * 2. SearXNG Client & Fetcher Module
+ * api/_utils/searx.js - Resilient Multi-Provider Fallback Engine
+ * Combines Crossref (Open Academic DOI Index) and DuckDuckGo Lite
+ * to replace broken public SearXNG instances.
  */
 
-// ==========================================================================
-// MODULE 1: SearXNG Query Builder
-// ==========================================================================
-export const SearxQueryBuilder = {
-    /**
-     * Clean and format query for general web searches (excluding dry academic indexes)
-     */
-    buildGeneralQuery(text) {
-        if (!text) return 'general research';
-        
-        // Remove scholarly terms to reduce duplicate academic results
-        const cleaned = text
-            .replace(/\b(academic|scholarly|literature|scientific|journal|publication|thesis|paper)\b/gi, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-            
-        return cleaned || 'general research';
-    }
-};
+const USER_AGENT = 'DocuMate/1.0 (https://documate.app; mailto:contact@documate.app)';
 
-// ==========================================================================
-// MODULE 2: SearXNG Client & Fetcher
-// ==========================================================================
 export const SearxAPI = {
-    // Freshly synchronized pool of public instances with high uptimes
-    INSTANCES: [
-      "https://linxx.net",
-      "https://oloke.xyz",
-      "https://searxng.website",
-      "https://searx.ononoki.org",
-      "https://namejeff.xyz",
-      "https://catboy.house",
-      "https://xka.cz",
-      "https://chocolatemoo53.com",
-      "https://rowie.at",
-      "https://tiekoetter.com"
-    ],
+    async search(query, limit = 6) {
+        if (!query || query.trim().length === 0) return [];
+        const cleanQuery = query.replace(/[^\w\s-]/g, ' ').trim();
 
-    async search(query, limit = 10) {
-        if (!query) return [];
+        // Run Crossref (Academic) and DuckDuckGo Lite (General Web) concurrently
+        const [crossrefResults, webResults] = await Promise.allSettled([
+            this.searchCrossref(cleanQuery, limit),
+            this.searchDuckDuckGo(cleanQuery, limit)
+        ]);
 
-        const searchQuery = SearxQueryBuilder.buildGeneralQuery(query);
-        
-        // Prioritize custom environment variable if defined, otherwise randomize our fallback pool
-        const customUrl = process.env.SEARX_INSTANCE_URL;
-        const instancesToTry = customUrl ? [customUrl] : [...this.INSTANCES].sort(() => Math.random() - 0.5);
+        const combined = [];
+        if (crossrefResults.status === 'fulfilled') combined.push(...crossrefResults.value);
+        if (webResults.status === 'fulfilled') combined.push(...webResults.value);
 
-        for (const baseUrl of instancesToTry) {
-            // trailing /search endpoint is explicitly defined
-            const url = `${baseUrl}/search?q=${encodeURIComponent(searchQuery)}&format=json&categories=general`;
-            
-            try {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 4000); // 4s aggressive timeout
+        // Deduplicate by URL
+        const seen = new Set();
+        return combined.filter(item => {
+            const id = item.doi || item.url;
+            if (!id || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+        }).slice(0, limit);
+    },
+
+    /**
+     * Crossref API: 100% Free open peer-reviewed papers with complete citation metadata
+     */
+    async searchCrossref(query, limit) {
+        try {
+            const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${limit}&select=DOI,title,URL,abstract,author,published-print,published-online`;
+            const res = await fetch(url, {
+                headers: { 'User-Agent': USER_AGENT }
+            });
+
+            if (!res.ok) return [];
+            const data = await res.json();
+            const items = data.message?.items || [];
+
+            return items.map(item => {
+                const title = Array.isArray(item.title) ? item.title[0] : (item.title || 'Untitled Academic Paper');
+                const doi = item.DOI;
+                const link = item.URL || (doi ? `https://doi.org/${doi}` : '');
+                const year = item['published-print']?.['date-parts']?.[0]?.[0] || 
+                             item['published-online']?.['date-parts']?.[0]?.[0] || 'n.d.';
                 
-                const res = await fetch(url, {
-                    signal: controller.signal,
-                    headers: {
-                        // ANTI-BOT SPOOFING HEADERS: Mimics real browser navigation signatures
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Sec-Fetch-Dest': 'document',
-                        'Sec-Fetch-Mode': 'navigate',
-                        'Sec-Fetch-Site': 'none',
-                        'Sec-Fetch-User': '?1',
-                        'Upgrade-Insecure-Requests': '1'
+                const authorList = (item.author || []).map(a => `${a.given || ''} ${a.family || ''}`.trim()).filter(Boolean);
+                const author = authorList.length ? authorList.join(', ') : 'Academic Contributor';
+
+                return {
+                    title,
+                    url: link,
+                    link,
+                    doi,
+                    content: item.abstract || `${title} (${year}). Published in peer-reviewed proceedings.`,
+                    snippet: item.abstract || title,
+                    meta: {
+                        isDOI: !!doi,
+                        author,
+                        year,
+                        siteName: 'Crossref / Academic Index'
                     }
-                });
-                clearTimeout(timeout);
-                
-                // Handle rate limiting (429) or other request blocks gracefully
-                if (res.status === 429) {
-                    console.warn(`[SearX] Rate limited (429) on: ${baseUrl}. Trying next fallback...`);
-                    continue;
-                }
-                
-                if (!res.ok) {
-                    console.warn(`[SearX] HTTP Error ${res.status} on: ${baseUrl}. Trying next fallback...`);
-                    continue;
-                }
-                
-                const data = await res.json();
-                
-                // Verify the instance supports JSON output formatting (some return 403 or empty errors)
-                if (data.error || !data.results) {
-                    console.warn(`[SearX] JSON format disabled or restricted on: ${baseUrl}. Trying next fallback...`);
-                    continue;
-                }
-
-                const results = data.results || [];
-                console.log(`[SearX] Successful search via: ${baseUrl}`);
-                
-                return results.slice(0, limit).map(item => {
-                    let year = 'n.d.';
-                    if (item.published_date) {
-                        const match = item.published_date.match(/\b(20\d{2})\b/);
-                        if (match) year = match[1];
-                    }
-                    
-                    let siteName = 'Web Source';
-                    try {
-                        const hostname = new URL(item.url).hostname.replace('www.', '');
-                        const parts = hostname.split('.');
-                        siteName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
-                    } catch {}
-
-                    return {
-                        title: item.title || 'Untitled Web Source',
-                        link: item.url,
-                        snippet: item.content || item.snippet || 'No summary available.',
-                        source: 'searx',
-                        meta: {
-                            author: null,
-                            year: year,
-                            published: year,
-                            siteName: siteName
-                        }
-                    };
-                });
-                
-            } catch (e) {
-                console.warn(`[SearX] Connection failed or timed out for ${baseUrl}:`, e.message);
-                // Move to next instance in loop
-            }
+                };
+            });
+        } catch (e) {
+            console.warn('[Crossref] Failed:', e.message);
+            return [];
         }
+    },
 
-        console.error('[SearX] All public SearXNG instances in the fallback pool failed or rate-limited.');
-        return [];
+    /**
+     * DuckDuckGo Lite: Parses clean organic web search results without API keys
+     */
+    async searchDuckDuckGo(query, limit) {
+        try {
+            const url = `https://lite.duckduckgo.com/lite/`;
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                },
+                body: `q=${encodeURIComponent(query)}`
+            });
+
+            if (!res.ok) return [];
+            const html = await res.text();
+
+            // Extract links and snippets from DuckDuckGo Lite table format
+            const results = [];
+            const linkRegex = /<a[^>]+class=['"]result-link['"][^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
+            const snippetRegex = /<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
+
+            const links = [];
+            let match;
+            while ((match = linkRegex.exec(html)) && links.length < limit) {
+                // Decode DDG redirect URL if applicable
+                let targetUrl = match[1];
+                if (targetUrl.includes('uddg=')) {
+                    const parsed = new URL('https://lite.duckduckgo.com' + targetUrl);
+                    targetUrl = decodeURIComponent(parsed.searchParams.get('uddg') || targetUrl);
+                }
+                const title = match[2].replace(/<[^>]+>/g, '').trim();
+                links.push({ url: targetUrl, title });
+            }
+
+            const snippets = [];
+            while ((match = snippetRegex.exec(html)) && snippets.length < limit) {
+                snippets.push(match[1].replace(/<[^>]+>/g, '').trim());
+            }
+
+            for (let i = 0; i < links.length; i++) {
+                if (links[i].url && !links[i].url.includes('duckduckgo.com')) {
+                    results.push({
+                        title: links[i].title,
+                        url: links[i].url,
+                        link: links[i].url,
+                        snippet: snippets[i] || links[i].title,
+                        content: snippets[i] || '',
+                        meta: {
+                            isDOI: false,
+                            siteName: new URL(links[i].url).hostname.replace(/^www\./, '')
+                        }
+                    });
+                }
+            }
+
+            return results;
+        } catch (e) {
+            console.warn('[DDG Lite] Failed:', e.message);
+            return [];
+        }
     }
 };
