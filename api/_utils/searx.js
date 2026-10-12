@@ -1,293 +1,318 @@
 // ==========================================================================
-// FILE PATH: api/_utils/searx.js
+// FILE PATH: api/_utils/scraper.js
 // ==========================================================================
 
 /**
- * api/_utils/searx.js
- * Dedicated DuckDuckGo Search Engine (Lite & HTML Endpoints)
+ * api/_utils/scraper.js
+ * Scrapes web pages for citation metadata, prioritizing DOI when available.
+ * Uses Cheerio for DOM parsing and clean body text extraction.
  * 
  * Table of Contents:
- * 1. Configuration & Headers
- * 2. uddg Decoding & Text Sanitization
- * 3. HTML Parsers (Lite Table & Static HTML)
- * 4. Network Transport Core
- * 5. Exported SearxAPI Interface
+ * 1. Main Source Scraper Module
+ * 2. HTML Scraper & Parser Module
+ * 3. Metadata Extraction Module
+ * 4. Content Extractor & Cleaners Module
  */
 
-// ==========================================================================
-// MODULE 1: CONFIGURATION & HEADERS
-// ==========================================================================
+import * as cheerio from 'cheerio';
+import { DoiAPI } from './doiAPI.js';
+
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const TIMEOUT_MS = 10000;
-
-// Minimal, clean headers that do not trigger Cloudflare TLS/header spoofing blocks
-const REQUEST_HEADERS = {
-    'User-Agent': USER_AGENT,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Content-Type': 'application/x-www-form-urlencoded'
-};
 
 // ==========================================================================
-// MODULE 2: UDDG DECODING & TEXT SANITIZATION
+// MODULE 1: Main Source Scraper
 // ==========================================================================
+export const ScraperAPI = {
+    async scrape(sources) {
+        if (!Array.isArray(sources) || sources.length === 0) return [];
 
-/**
- * Decodes DuckDuckGo's 'uddg' redirect wrapper to extract the real destination URL
- */
-function decodeUddgUrl(rawHref) {
-    if (!rawHref) return null;
+        const results = await Promise.all(
+            sources.slice(0, 20).map(async (source, index) => {
+                try {
+                    const url = source.link || source.url;
 
-    try {
-        // 1. Unescape HTML ampersands
-        let normalized = rawHref.trim().replace(/&amp;/gi, '&');
+                    // Extract DOI directly from link/url or snippet (avoids web blocks)
+                    const doi = url ? (DoiAPI.extractDOI(url) || DoiAPI.extractDOI(source.snippet)) : null;
 
-        // 2. Handle protocol-relative and path-relative URLs
-        if (normalized.startsWith('//')) {
-            normalized = 'https:' + normalized;
-        } else if (normalized.startsWith('/')) {
-            normalized = 'https://duckduckgo.com' + normalized;
+                    if (doi) {
+                        const doiData = await DoiAPI.resolve(url, source.snippet);
+                        if (doiData) {
+                            console.log('[Scraper] Programmatic DOI resolved:', doi);
+                            return {
+                                ...source,
+                                id: index + 1,
+                                title: doiData.title || source.title,
+                                content: doiData.abstract || source.snippet || '',
+                                doi: doiData.doi,
+                                meta: {
+                                    authors: doiData.authors,
+                                    year: doiData.year,
+                                    published: doiData.year,
+                                    siteName: doiData.journal,
+                                    isDOI: true
+                                }
+                            };
+                        }
+                    }
+
+                    // Fall back to web HTML scrape only if programmatic DOI resolution fails
+                    console.log('[Scraper] HTML Scraping:', url || 'undefined');
+                    return await this._scrapeHTML(source, index);
+
+                } catch (e) {
+                    console.error('[Scraper] Error:', source.link || source.url, e.message);
+                    return this._fallback(source, index);
+                }
+            })
+        );
+        return results;
+    },
+
+// ==========================================================================
+// MODULE 2: HTML Scraper & Parser
+// ==========================================================================
+    async _scrapeHTML(source, index) {
+        const url = source.link || source.url;
+        if (!url) {
+            console.warn('[Scraper] Skipping HTML scrape: No URL provided.');
+            return ScraperAPI._fallback(source, index);
         }
 
-        // 3. Extract the 'uddg' query parameter using the standard URL parser
-        if (normalized.includes('uddg=')) {
-            const parsed = new URL(normalized);
-            const target = parsed.searchParams.get('uddg');
-            if (target) {
-                return decodeURIComponent(target);
-            }
+        if (url.toLowerCase().endsWith('.pdf') || 
+            url.includes('/pdf/') ||
+            url.includes('pdfs.semanticscholar.org')) {
+            console.log('[Scraper] Skipping PDF binary URL:', url);
+            return ScraperAPI._fallback(source, index);
         }
 
-        // Regex fallback if URL construction fails on non-standard links
-        const match = normalized.match(/[?&]uddg=([^&]+)/);
-        if (match) {
-            return decodeURIComponent(match[1]);
-        }
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 7000);
 
-        return normalized.startsWith('http') ? normalized : null;
-    } catch (_) {
-        return null;
-    }
-}
-
-/**
- * Strips HTML tags and decodes common character entities
- */
-function sanitizeText(rawHtml) {
-    if (!rawHtml) return '';
-    return rawHtml
-        .replace(/<[^>]+>/g, '')
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&#x27;|&#39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&deg;/g, '°')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-/**
- * Extracts human-readable domain/site name
- */
-function extractDomain(urlStr) {
-    try {
-        const host = new URL(urlStr).hostname.replace(/^www\./i, '');
-        const name = host.split('.')[0] || 'Web';
-        return name.charAt(0).toUpperCase() + name.slice(1);
-    } catch (_) {
-        return 'Web Source';
-    }
-}
-
-/**
- * Extracts a publication year from the snippet text if present
- */
-function extractYear(snippet) {
-    if (!snippet) return 'n.d.';
-    const match = snippet.match(/\b(202[0-6]|201\d|200\d|19\d{2})\b/);
-    return match ? match[0] : 'n.d.';
-}
-
-// ==========================================================================
-// MODULE 3: HTML PARSERS (LITE TABLE & STATIC HTML)
-// ==========================================================================
-
-/**
- * Parses DuckDuckGo Lite HTML table format (lite.duckduckgo.com)
- */
-function parseLiteHtml(html, limit) {
-    const results = [];
-    const linkRegex = /<a[^>]+class=['"]result-link['"][^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
-    const snippetRegex = /<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
-
-    const links = [];
-    let lMatch;
-    while ((lMatch = linkRegex.exec(html)) !== null) {
-        links.push({
-            rawHref: lMatch[1],
-            title: sanitizeText(lMatch[2])
-        });
-    }
-
-    const snippets = [];
-    let sMatch;
-    while ((sMatch = snippetRegex.exec(html)) !== null) {
-        snippets.push(sanitizeText(sMatch[1]));
-    }
-
-    for (let i = 0; i < links.length && results.length < limit; i++) {
-        const realUrl = decodeUddgUrl(links[i].rawHref);
-        const title = links[i].title;
-        const snippet = snippets[i] || '';
-
-        if (realUrl && !realUrl.includes('duckduckgo.com') && title.length > 1) {
-            results.push({
-                title,
-                url: realUrl,
-                link: realUrl,
-                snippet,
-                content: snippet,
-                meta: {
-                    isDOI: false,
-                    author: null,
-                    year: extractYear(snippet),
-                    siteName: extractDomain(realUrl)
+        try {
+            const res = await fetch(url, {
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': USER_AGENT,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9'
                 }
             });
+            clearTimeout(timeout);
+
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('pdf') || contentType.includes('octet-stream')) {
+                console.log('[Scraper] Skipping binary content-type:', url);
+                return ScraperAPI._fallback(source, index);
+            }
+
+            const html = await res.text();
+
+            // Binary signatures check
+            if (html.startsWith('%PDF') || html.substring(0, 100).includes('\x00')) {
+                console.log('[Scraper] Detected binary content signature:', url);
+                return ScraperAPI._fallback(source, index);
+            }
+
+            // Load DOM into Cheerio
+            const $ = cheerio.load(html);
+
+            // Scan HTML context for hidden DOIs in meta headers or body text
+            const doiInHtml = ScraperAPI._extractDoiFromHtml($, html);
+            if (doiInHtml) {
+                const doiData = await DoiAPI.resolve(doiInHtml);
+                if (doiData) {
+                    console.log('[Scraper] Found DOI in HTML content:', doiInHtml);
+                    return {
+                        ...source,
+                        id: index + 1,
+                        title: doiData.title || source.title,
+                        content: doiData.abstract || ScraperAPI._extractContent($) || source.snippet || '',
+                        doi: doiData.doi,
+                        meta: {
+                            authors: doiData.authors,
+                            year: doiData.year,
+                            published: doiData.year,
+                            siteName: doiData.journal,
+                            isDOI: true
+                        }
+                    };
+                }
+            }
+
+            const extractedContent = ScraperAPI._extractContent($);
+
+            return {
+                ...source,
+                id: index + 1,
+                content: extractedContent || source.snippet || '',
+                meta: ScraperAPI._extractMeta($, html, url)
+            };
+
+        } catch (e) {
+            clearTimeout(timeout);
+            throw e;
         }
-    }
+    },
 
-    return results;
-}
+// ==========================================================================
+// MODULE 3: Metadata Extraction
+// ==========================================================================
+    _extractDoiFromHtml($, html) {
+        // 1. Cheerio Meta Tag Selectors (Highwire Press, Dublin Core, PRISM)
+        const metaDoi = $('meta[name="citation_doi"]').attr('content') ||
+                        $('meta[name="dc.identifier"]').attr('content') ||
+                        $('meta[property="prism:doi"]').attr('content') ||
+                        $('meta[name="doi"]').attr('content');
 
-/**
- * Parses DuckDuckGo Static HTML format (html.duckduckgo.com)
- */
-function parseStaticHtml(html, limit) {
-    const results = [];
-    const blockRegex = /<div[^>]+class=['"][^'"]*result__body[^'"]*['"][^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+        if (metaDoi) {
+            const clean = metaDoi.replace(/^https?:\/\/doi\.org\//i, '').trim();
+            if (clean.startsWith('10.')) return clean;
+        }
 
-    let bMatch;
-    while ((bMatch = blockRegex.exec(html)) !== null && results.length < limit) {
-        const block = bMatch[1];
-        const urlMatch = block.match(/<a[^>]+class=['"][^'"]*result__(?:url|title)[^'"]*['"][^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>/i) ||
-                         block.match(/<a[^>]+href=['"]([^'"]+)['"][^>]*>([\s\S]*?)<\/a>/i);
-        const snipMatch = block.match(/<a[^>]+class=['"][^'"]*result__snippet[^'"]*['"][^>]*>([\s\S]*?)<\/a>/i);
+        // 2. Regex fallback for inline text DOIs
+        const patterns = [
+            /doi\.org\/(10\.\d{4,}\/[^\s"'<>\]]+)/i,
+            /"doi"\s*:\s*"(10\.[^"]+)"/i,
+            /DOI:\s*(10\.\d{4,}\/[^\s<]+)/i
+        ];
 
-        if (urlMatch) {
-            const realUrl = decodeUddgUrl(urlMatch[1]);
-            const title = sanitizeText(urlMatch[2]);
-            const snippet = snipMatch ? sanitizeText(snipMatch[1]) : '';
-
-            if (realUrl && !realUrl.includes('duckduckgo.com') && title.length > 1) {
-                results.push({
-                    title,
-                    url: realUrl,
-                    link: realUrl,
-                    snippet,
-                    content: snippet,
-                    meta: {
-                        isDOI: false,
-                        author: null,
-                        year: extractYear(snippet),
-                        siteName: extractDomain(realUrl)
-                    }
-                });
+        for (const pattern of patterns) {
+            const match = html.match(pattern);
+            if (match) {
+                const doi = match[1].replace(/^https?:\/\/doi\.org\//i, '').replace(/[.,;)}\]]+$/, '');
+                if (doi.startsWith('10.')) return doi;
             }
         }
-    }
+        return null;
+    },
 
-    return results;
-}
+    _extractMeta($, html, url) {
+        let author = null;
+        let year = 'n.d.';
+        let siteName = null;
 
-// ==========================================================================
-// MODULE 4: NETWORK TRANSPORT CORE
-// ==========================================================================
+        // 1. Highwire Press & Dublin Core Meta Tags
+        author = $('meta[name="citation_author"]').attr('content') ||
+                 $('meta[name="author"]').attr('content') ||
+                 $('meta[name="dc.creator"]').attr('content');
 
-/**
- * Executes the HTTP request with detailed error reporting
- */
-async function executeSearchRequest(targetUrl, bodyData) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        const pubDate = $('meta[name="citation_publication_date"]').attr('content') ||
+                        $('meta[name="citation_date"]').attr('content') ||
+                        $('meta[property="article:published_time"]').attr('content') ||
+                        $('meta[name="date"]').attr('content') ||
+                        $('meta[name="dc.date"]').attr('content');
 
-    try {
-        const response = await fetch(targetUrl, {
-            method: 'POST',
-            signal: controller.signal,
-            headers: REQUEST_HEADERS,
-            body: bodyData
+        if (pubDate) {
+            const match = pubDate.match(/\b(20\d{2}|19\d{2})\b/);
+            if (match) year = match[1];
+        }
+
+        siteName = $('meta[property="og:site_name"]').attr('content') ||
+                   $('meta[name="application-name"]').attr('content');
+
+        // 2. JSON-LD Metadata Parsing
+        $('script[type="application/ld+json"]').each((_, el) => {
+            try {
+                const rawJson = $(el).html();
+                if (!rawJson) return;
+                const data = JSON.parse(rawJson);
+                const items = data['@graph'] || [data];
+
+                for (const item of items) {
+                    if (!author && item.author) {
+                        author = Array.isArray(item.author)
+                            ? item.author.map(a => (typeof a === 'object' ? a.name : a)).filter(Boolean).join(', ')
+                            : (typeof item.author === 'object' ? item.author.name : item.author);
+                    }
+                    if (year === 'n.d.' && (item.datePublished || item.dateCreated)) {
+                        const match = String(item.datePublished || item.dateCreated).match(/\b(20\d{2}|19\d{2})\b/);
+                        if (match) year = match[1];
+                    }
+                    if (!siteName && item.publisher?.name) {
+                        siteName = item.publisher.name;
+                    }
+                }
+            } catch (_) {}
         });
 
-        clearTimeout(timer);
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status} (${response.statusText})`);
+        // 3. Fallback Site Name from Hostname
+        if (!siteName) {
+            try {
+                const hostname = new URL(url).hostname.replace(/^www\./i, '');
+                const base = hostname.split('.')[0] || 'Web';
+                siteName = base.charAt(0).toUpperCase() + base.slice(1);
+            } catch (_) {
+                siteName = 'Unknown';
+            }
         }
 
-        const html = await response.text();
-
-        if (html.includes('anomaly-modal') || html.includes('bots use DuckDuckGo too')) {
-            throw new Error('DuckDuckGo anti-bot verification challenge triggered');
-        }
-
-        return html;
-    } catch (err) {
-        clearTimeout(timer);
-
-        // Extract the low-level cause from Node's undici engine
-        const causeDetail = err.cause ? ` [Cause: ${err.cause.code || err.cause.message || err.cause}]` : '';
-        throw new Error(`${err.message}${causeDetail}`);
-    }
-}
+        return {
+            author: DoiAPI.cleanAuthorName(author),
+            year: year,
+            published: year,
+            siteName: siteName || 'Unknown'
+        };
+    },
 
 // ==========================================================================
-// MODULE 5: EXPORTED SEARXAPI INTERFACE
+// MODULE 4: Content Extractor & Cleaners
 // ==========================================================================
-export const SearxAPI = {
     /**
-     * Searches DuckDuckGo using lite.duckduckgo.com with automatic html.duckduckgo.com fallback.
-     * 
-     * @param {string} query - The search query
-     * @param {number} limit - Target number of results (default: 8)
-     * @returns {Promise<Array<Object>>} Formatted search source records
+     * Uses Cheerio to strip boilerplate and extract core text
      */
-    async search(query, limit = 8) {
-        if (!query || typeof query !== 'string' || query.trim().length === 0) {
-            return [];
+    _extractContent($) {
+        if (!$) return '';
+
+        // Strip non-content and layout noise elements
+        $('script, style, noscript, nav, header, footer, aside, form, svg, iframe, .ad, .advertisement, #comments, .comments').remove();
+
+        // Target primary content containers if present
+        let targetSelector = 'article, main, [role="main"], .entry-content, .post-content, .article-content, .story-body';
+        let container = $(targetSelector);
+
+        if (!container.length) {
+            container = $('body');
         }
 
-        const cleanQuery = query
-            .replace(/[^\w\s-]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        const formBody = `q=${encodeURIComponent(cleanQuery)}&kl=wt-wt`;
-
-        // 1. Primary Attempt: DuckDuckGo Lite endpoint
-        try {
-            const html = await executeSearchRequest('https://lite.duckduckgo.com/lite/', formBody);
-            const results = parseLiteHtml(html, limit);
-            if (results && results.length > 0) {
-                return results;
+        // Collect readable paragraphs
+        const paragraphs = [];
+        container.find('p, h2, h3').each((_, el) => {
+            const text = $(el).text().replace(/\s+/g, ' ').trim();
+            // Discard short captions, copyright footers, and cookie disclaimers
+            if (text.length > 40 && !/cookie|copyright|all rights reserved|subscribe|newsletter/i.test(text)) {
+                paragraphs.push(text);
             }
-        } catch (liteErr) {
-            console.warn(`[DDG-Search] Lite endpoint failed: ${liteErr.message}. Attempting static HTML endpoint...`);
-        }
+        });
 
-        // 2. Secondary Attempt: DuckDuckGo Static HTML endpoint
+        const fullText = paragraphs.join('\n\n');
+
+        // Truncate to ~4,000 characters for quotes and synthesis
+        return fullText.slice(0, 4000).trim();
+    },
+
+    _fallback(source, index) {
+        let siteName = 'Unknown';
+        const url = source.link || source.url;
         try {
-            const html = await executeSearchRequest('https://html.duckduckgo.com/html/', `${formBody}&b=`);
-            const results = parseStaticHtml(html, limit);
-            if (results && results.length > 0) {
-                return results;
+            if (url) {
+                const hostname = new URL(url).hostname.replace(/^www\./i, '');
+                const parts = hostname.split('.');
+                siteName = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
             }
-        } catch (htmlErr) {
-            console.error(`[DDG-Search] Static HTML endpoint failed: ${htmlErr.message}`);
-        }
+        } catch (_) {}
 
-        return [];
+        return {
+            ...source,
+            id: index + 1,
+            content: source.snippet || '',
+            meta: {
+                author: null,
+                year: 'n.d.',
+                published: 'n.d.',
+                siteName: siteName
+            }
+        };
     }
 };
